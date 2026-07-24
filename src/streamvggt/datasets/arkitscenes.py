@@ -8,43 +8,14 @@ from .base.base_multiview_dataset import (
     BaseMultiViewDataset,
     EmptyDatasetError,
     intrinsics_rows_to_K,
-    validate_max_interval,
 )
 from .types import Split
 from .utils.image import imread_cv2
 from .utils.zipio import frames_root
 
-# preserves the original DUSt3R ARKitScenes default; override via the
+# preserves the original DUSt3R ARKitScenes stride cap; override via the
 # constructor or the DatasetConfig CLI rather than editing this constant.
-DEFAULT_MAX_INTERVAL = 8
-
-
-def stratified_sampling(indices, num_samples, rng=None):
-    if num_samples > len(indices):
-        raise ValueError("num_samples cannot exceed the number of available indices.")
-    elif num_samples == len(indices):
-        return indices
-
-    sorted_indices = sorted(indices)
-    stride = len(sorted_indices) / num_samples
-    sampled_indices = []
-    if rng is None:
-        rng = np.random.default_rng()
-
-    for i in range(num_samples):
-        start = int(i * stride)
-        end = int((i + 1) * stride)
-        # Ensure end does not exceed the list
-        end = min(end, len(sorted_indices))
-        if start < end:
-            # Randomly select within the current stratum
-            rand_idx = rng.integers(start, end)
-            sampled_indices.append(sorted_indices[rand_idx])
-        else:
-            # In case of any rounding issues, select the last index
-            sampled_indices.append(sorted_indices[-1])
-
-    return rng.permutation(sampled_indices)
+DEFAULT_STRIDE_RANGE = (1, 8)
 
 
 class ARKitScenes_Multi(BaseMultiViewDataset):
@@ -58,7 +29,8 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
         self,
         *args,
         ROOT,
-        max_interval=DEFAULT_MAX_INTERVAL,
+        stride_range=DEFAULT_STRIDE_RANGE,
+        regular_stride=True,
         is_metric=True,
         highres_root=None,
         **kwargs,
@@ -70,8 +42,9 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
         # must exclude; None falls back to the original DUSt3R convention of
         # deriving ROOT + "_highres" (silently skipped when absent)
         self.highres_root = highres_root
-        self.max_interval = validate_max_interval(max_interval, "ARKitScenes")
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            *args, stride_range=stride_range, regular_stride=regular_stride, **kwargs
+        )
         match self.split:
             case Split.TRAIN:
                 self.split_dir = "Training"
@@ -115,17 +88,25 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                     high_res_list = np.array(os.listdir(highres_split_dir))
 
             self.scenes = np.setdiff1d(self.scenes, high_res_list)
+        # start-id sampling, identical to the other four loaders (ScanNet,
+        # HAMMER, ARKitScenesHighRes): idx picks a start frame, and
+        # get_seq_from_start_id walks forward from it under the stride policy.
+        # The old dust3r layout kept a second `image_collection` sampler here
+        # (co-visible groups, permuted) selected by a per-sample coin flip; it
+        # emitted out-of-order clips a causal/streaming model never sees at
+        # deployment, so it was removed. The `image_collection` metadata is now
+        # unused, and scenes are kept on frame count alone -- the same rule the
+        # sibling loaders apply.
         offset = 0
-        counts = []
         scenes = []
         sceneids = []
         images = []
         intrinsics = []
         trajectories = []
-        groups = []
-        id_ranges = []
+        start_img_ids = []
+        scene_img_list = []
         j = 0
-        for scene_idx, scene in enumerate(self.scenes):
+        for scene in self.scenes:
             scene_dir = osp.join(self.ROOT, split, scene)
             with np.load(
                 osp.join(scene_dir, "new_scene_metadata.npz"), allow_pickle=True
@@ -133,45 +114,23 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                 imgs = data["images"]
                 intrins = data["intrinsics"]
                 traj = data["trajectories"]
-                min_seq_len = self.min_views()
-                if len(imgs) < min_seq_len:
-                    print(f"Skipping {scene}")
-                    continue
-
-                collections = {}
-                if "image_collection" not in data:
-                    raise KeyError(
-                        f"{scene}: 'image_collection' missing from "
-                        "new_scene_metadata.npz"
-                    )
-                collections["image"] = data["image_collection"]
-
                 num_imgs = imgs.shape[0]
-                img_groups = []
-                min_group_len = self.min_views()
-                for ref_id, group in collections["image"].item().items():
-                    if len(group) + 1 < min_group_len:
-                        continue
-
-                    # groups are (idx, score)s
-                    group.insert(0, (ref_id, 1.0))
-                    group = [int(x[0] + offset) for x in group]
-                    img_groups.append(sorted(group))
-
-                if len(img_groups) == 0:
+                cut_off = self.min_views()
+                if num_imgs < cut_off:
                     print(f"Skipping {scene}")
                     continue
+
+                img_ids = list(np.arange(num_imgs) + offset)
+                start_img_ids_ = img_ids[: num_imgs - cut_off + 1]
 
                 scenes.append(scene)
+                scene_img_list.append(img_ids)
                 sceneids.extend([j] * num_imgs)
-                id_ranges.extend([(offset, offset + num_imgs) for _ in range(num_imgs)])
                 images.extend(imgs)
                 intrinsics.extend(list(intrinsics_rows_to_K(intrins)))
                 trajectories.extend(list(traj))
+                start_img_ids.extend(start_img_ids_)
 
-                # offset groups
-                groups.extend(img_groups)
-                counts.append(offset)
                 offset += num_imgs
                 j += 1
 
@@ -181,47 +140,28 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
             )
         self.scenes = scenes
         self.sceneids = sceneids
-        self.id_ranges = id_ranges
         self.images = images
         self.intrinsics = intrinsics
         self.trajectories = trajectories
-        self.groups = groups
+        self.scene_img_list = scene_img_list
+        self.start_img_ids = start_img_ids
 
     def __len__(self):
-        return len(self.groups)
+        return len(self.start_img_ids)
 
     def get_image_num(self):
         return len(self.images)
 
     def _get_views(self, idx, resolution, rng, num_views):
-        if rng.choice([True, False]):
-            image_idxs = np.arange(self.id_ranges[idx][0], self.id_ranges[idx][1])
-            cut_off = num_views if not self.allow_repeat else max(num_views // 3, 3)
-            start_image_idxs = image_idxs[: len(image_idxs) - cut_off + 1]
-            start_id = rng.choice(start_image_idxs)
-            pos, ordered_video = self.get_seq_from_start_id(
-                num_views,
-                start_id,
-                image_idxs.tolist(),
-                rng,
-                max_interval=self.max_interval,
-                video_prob=0.8,
-                fix_interval_prob=0.5,
-                block_shuffle=16,
-            )
-            image_idxs = np.array(image_idxs)[pos]
-        else:
-            ordered_video = False
-            image_idxs = self.groups[idx]
-            image_idxs = rng.permutation(image_idxs)
-            if len(image_idxs) > num_views:
-                image_idxs = image_idxs[:num_views]
-            else:
-                if rng.random() < 0.8:
-                    image_idxs = rng.choice(image_idxs, size=num_views, replace=True)
-                else:
-                    repeat_num = num_views // len(image_idxs) + 1
-                    image_idxs = np.tile(image_idxs, repeat_num)[:num_views]
+        start_id = self.start_img_ids[idx]
+        all_image_ids = self.scene_img_list[self.sceneids[start_id]]
+        pos, ordered_video = self.get_seq_from_start_id(
+            num_views,
+            start_id,
+            all_image_ids,
+            rng,  # stride/order policy: self.stride_range + base defaults
+        )
+        image_idxs = np.array(all_image_ids)[pos]
 
         views = []
         for v, view_idx in enumerate(image_idxs):
