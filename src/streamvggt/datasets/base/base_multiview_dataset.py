@@ -155,15 +155,29 @@ class BaseMultiViewDataset(EasyDataset):
                 f"got {regular_stride!r}"
             )
         self.regular_stride = regular_stride
-        # plain attribute (not a property) so diagnostics like
-        # tests/temp_mask_survival.py can flip it for A/B runs
-        self.sequential = self.stride_range == (1, 1)
 
     def min_views(self):
         """Minimum frames a scene needs to be usable. Every clip is drawn from
         distinct frames, so this is exactly num_views: shorter scenes are
         skipped at load time rather than padded by repetition."""
         return self.num_views
+
+    def _warn_short_scene(self, n_frames, num_views, floor, actual):
+        """Print once per distinct (n_frames, num_views, floor) that a scene was
+        too short to honor the configured stride floor. Deduped via an instance
+        set so a systematically-short dataset does not warn on every sample."""
+        key = (n_frames, num_views, floor)
+        seen = getattr(self, "_short_scene_warned", None)
+        if seen is None:
+            seen = self._short_scene_warned = set()
+        if key not in seen:
+            seen.add(key)
+            print(
+                f"[{type(self).__name__}] scene has {n_frames} frames -- too "
+                f"short for {num_views} views at stride floor {floor}; sampling "
+                f"denser (max feasible stride {actual}). Lower stride_range or "
+                f"drop short scenes to silence."
+            )
 
     def __len__(self):
         return len(self.scenes)
@@ -213,19 +227,19 @@ class BaseMultiViewDataset(EasyDataset):
         """
         if stride_range is None:
             stride_range = self.stride_range
-        elif self.sequential and validate_stride_range(
+        elif self.stride_range == (1, 1) and validate_stride_range(
             stride_range, type(self).__name__
         ) != (1, 1):
-            # The consecutive-mode early return below keys off self.sequential,
-            # so honoring it would silently discard this override and hand back
-            # stride-1 clips. Fail loudly: an ablation arm that thinks it is
-            # sampling at stride 20 but is not can waste a whole training run.
+            # The consecutive-mode early return below keys off the dataset's own
+            # stride_range==(1, 1), so honoring this override would silently
+            # discard it and hand back stride-1 clips. Fail loudly: an ablation
+            # arm that thinks it is sampling at stride 20 but is not can waste a
+            # whole training run.
             raise ValueError(
                 f"{type(self).__name__}: stride_range={tuple(stride_range)} was "
-                f"passed to get_seq_from_start_id but the dataset is in "
-                f"consecutive mode (self.sequential, from stride_range="
-                f"{self.stride_range}); the override would be ignored. Rebuild "
-                f"the dataset with the stride you want, or clear self.sequential."
+                f"passed to get_seq_from_start_id but the dataset was built "
+                f"consecutive (stride_range=(1, 1)); the override would be "
+                f"ignored. Rebuild the dataset with the stride you want."
             )
         min_interval, max_interval = validate_stride_range(
             stride_range, type(self).__name__
@@ -238,8 +252,8 @@ class BaseMultiViewDataset(EasyDataset):
         # augmentation inherited from the dust3r/VGGT recipe -- right for
         # learning parallax, but it breaks anything assuming pixel-aligned
         # temporal adjacency: the TGM-style temporal loss, TAE, and the
-        # follow-camera visualization. See self.sequential.
-        if self.sequential and len(ids_all) >= num_views:
+        # follow-camera visualization.
+        if self.stride_range == (1, 1) and len(ids_all) >= num_views:
             # slide the window back if it would run off the end of the scene
             start = min(pos_ref, len(ids_all) - num_views)
             return [start + i for i in range(num_views)], True
@@ -256,6 +270,15 @@ class BaseMultiViewDataset(EasyDataset):
             # floor to match when the scene is too short for the requested
             # minimum (feasibility beats the configured lower bound)
             max_interval = min(max_interval, 2 * remaining_sum // (num_views - 1))
+            if max_interval < min_interval:
+                # the configured stride floor cannot be honored: this scene has
+                # too few frames for num_views clips at that stride, so the clip
+                # is denser than asked. Warn once per (scene length, num_views,
+                # floor) so a misconfigured stride_range vs short scenes is
+                # visible without flooding every __getitem__.
+                self._warn_short_scene(
+                    len(ids_all), num_views, min_interval, max_interval
+                )
             lo = min(min_interval, max_interval)
 
             # `intervals` holds the GAPS between consecutive picks; accumulate()

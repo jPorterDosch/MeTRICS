@@ -31,6 +31,16 @@ def collect_series(hm_dir: Path) -> dict[str, list[Path]]:
     return {k: [p for _, p in sorted(v)] for k, v in series.items()}
 
 
+def _positive_fps(s: str) -> float:
+    """argparse type for --fps: must be > 0 (write_gif divides 1000/fps, and a
+    huge value would truncate the frame duration to 0 ms). Rejects at parse
+    time with a clean argparse error instead of a mid-run ZeroDivisionError."""
+    fps = float(s)
+    if not (0 < fps <= 1000):
+        raise argparse.ArgumentTypeError(f"--fps must be in (0, 1000], got {fps}")
+    return fps
+
+
 def write_gif(frames: list[Image.Image], out: Path, fps: float) -> None:
     frames[0].save(
         out,
@@ -46,7 +56,7 @@ def write_gif(frames: list[Image.Image], out: Path, fps: float) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hm-dir", required=True, help="the heatmaps/ directory")
-    ap.add_argument("--fps", type=float, default=10.0)
+    ap.add_argument("--fps", type=_positive_fps, default=10.0)
     ap.add_argument(
         "--pair",
         nargs=2,

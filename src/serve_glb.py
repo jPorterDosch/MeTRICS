@@ -187,7 +187,7 @@ function attach(root) {
     current.traverse(o => {
       // GT camera-pose markers: not scene content. Capture and hide them BEFORE
       // the isPoints branch, else they join pointObjs and skew fitView.
-      const cm = /^campose_(\d+)/.exec(o.name || '');
+      const cm = /^campose_(\\d+)/.exec(o.name || '');
       if (cm) {
         o.visible = false;
         camPoses.set(parseInt(cm[1], 10), o);

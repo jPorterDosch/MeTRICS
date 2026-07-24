@@ -18,34 +18,6 @@ from .utils.zipio import frames_root
 DEFAULT_STRIDE_RANGE = (1, 8)
 
 
-def stratified_sampling(indices, num_samples, rng=None):
-    if num_samples > len(indices):
-        raise ValueError("num_samples cannot exceed the number of available indices.")
-    elif num_samples == len(indices):
-        return indices
-
-    sorted_indices = sorted(indices)
-    stride = len(sorted_indices) / num_samples
-    sampled_indices = []
-    if rng is None:
-        rng = np.random.default_rng()
-
-    for i in range(num_samples):
-        start = int(i * stride)
-        end = int((i + 1) * stride)
-        # Ensure end does not exceed the list
-        end = min(end, len(sorted_indices))
-        if start < end:
-            # Randomly select within the current stratum
-            rand_idx = rng.integers(start, end)
-            sampled_indices.append(sorted_indices[rand_idx])
-        else:
-            # In case of any rounding issues, select the last index
-            sampled_indices.append(sorted_indices[-1])
-
-    return rng.permutation(sampled_indices)
-
-
 class ARKitScenes_Multi(BaseMultiViewDataset):
     """ARKitScenes RGB-D video sequences with metric (lowres) depth and
     per-frame trajectories, preprocessed into:
@@ -116,17 +88,25 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                     high_res_list = np.array(os.listdir(highres_split_dir))
 
             self.scenes = np.setdiff1d(self.scenes, high_res_list)
+        # start-id sampling, identical to the other four loaders (ScanNet,
+        # HAMMER, ARKitScenesHighRes): idx picks a start frame, and
+        # get_seq_from_start_id walks forward from it under the stride policy.
+        # The old dust3r layout kept a second `image_collection` sampler here
+        # (co-visible groups, permuted) selected by a per-sample coin flip; it
+        # emitted out-of-order clips a causal/streaming model never sees at
+        # deployment, so it was removed. The `image_collection` metadata is now
+        # unused, and scenes are kept on frame count alone -- the same rule the
+        # sibling loaders apply.
         offset = 0
-        counts = []
         scenes = []
         sceneids = []
         images = []
         intrinsics = []
         trajectories = []
-        groups = []
-        id_ranges = []
+        start_img_ids = []
+        scene_img_list = []
         j = 0
-        for scene_idx, scene in enumerate(self.scenes):
+        for scene in self.scenes:
             scene_dir = osp.join(self.ROOT, split, scene)
             with np.load(
                 osp.join(scene_dir, "new_scene_metadata.npz"), allow_pickle=True
@@ -134,45 +114,23 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                 imgs = data["images"]
                 intrins = data["intrinsics"]
                 traj = data["trajectories"]
-                min_seq_len = self.min_views()
-                if len(imgs) < min_seq_len:
-                    print(f"Skipping {scene}")
-                    continue
-
-                collections = {}
-                if "image_collection" not in data:
-                    raise KeyError(
-                        f"{scene}: 'image_collection' missing from "
-                        "new_scene_metadata.npz"
-                    )
-                collections["image"] = data["image_collection"]
-
                 num_imgs = imgs.shape[0]
-                img_groups = []
-                min_group_len = self.min_views()
-                for ref_id, group in collections["image"].item().items():
-                    if len(group) + 1 < min_group_len:
-                        continue
-
-                    # groups are (idx, score)s
-                    group.insert(0, (ref_id, 1.0))
-                    group = [int(x[0] + offset) for x in group]
-                    img_groups.append(sorted(group))
-
-                if len(img_groups) == 0:
+                cut_off = self.min_views()
+                if num_imgs < cut_off:
                     print(f"Skipping {scene}")
                     continue
+
+                img_ids = list(np.arange(num_imgs) + offset)
+                start_img_ids_ = img_ids[: num_imgs - cut_off + 1]
 
                 scenes.append(scene)
+                scene_img_list.append(img_ids)
                 sceneids.extend([j] * num_imgs)
-                id_ranges.extend([(offset, offset + num_imgs) for _ in range(num_imgs)])
                 images.extend(imgs)
                 intrinsics.extend(list(intrinsics_rows_to_K(intrins)))
                 trajectories.extend(list(traj))
+                start_img_ids.extend(start_img_ids_)
 
-                # offset groups
-                groups.extend(img_groups)
-                counts.append(offset)
                 offset += num_imgs
                 j += 1
 
@@ -182,62 +140,28 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
             )
         self.scenes = scenes
         self.sceneids = sceneids
-        self.id_ranges = id_ranges
         self.images = images
         self.intrinsics = intrinsics
         self.trajectories = trajectories
-        self.groups = groups
+        self.scene_img_list = scene_img_list
+        self.start_img_ids = start_img_ids
 
     def __len__(self):
-        return len(self.groups)
+        return len(self.start_img_ids)
 
     def get_image_num(self):
         return len(self.images)
 
     def _get_views(self, idx, resolution, rng, num_views):
-        # ARKitScenes lowres has TWO samplers: the temporal one (below) and the
-        # pairs/`groups` one (the else branch), which draws a spatial collection
-        # and permutes it -- it never calls get_seq_from_start_id, so the
-        # stride/order policy does not reach it. Under self.sequential that
-        # branch would silently hand back out-of-order frames and break the
-        # consecutive-frame guarantee the TEST split is validated for, so take
-        # the temporal branch unconditionally there (short-circuits before the
-        # coin flip, so no rng draw is consumed either).
-        if self.sequential or rng.choice([True, False]):
-            image_idxs = np.arange(self.id_ranges[idx][0], self.id_ranges[idx][1])
-            # nview from the batched sampler can be < self.num_views, so cut on
-            # the ACTUAL clip length; min_views() is the scene-level floor
-            start_image_idxs = image_idxs[: len(image_idxs) - num_views + 1]
-            start_id = rng.choice(start_image_idxs)
-            pos, ordered_video = self.get_seq_from_start_id(
-                num_views,
-                start_id,
-                image_idxs.tolist(),
-                rng,  # stride/order policy: self.stride_range + base defaults
-            )
-            image_idxs = np.array(image_idxs)[pos]
-        else:
-            # The `groups` sampler: a co-visible COLLECTION rather than a time
-            # window -- wide baselines and irregular gaps, which is the point of
-            # having two samplers here. The random draw picks WHICH frames; it
-            # must not pick their order, so the result is sorted back into
-            # capture order (groups are built sorted; permutation is what
-            # destroyed it). Same invariant get_seq_from_start_id enforces:
-            # a causal KV cache cannot be fed a clip that jumps back in time.
-            # ordered_video stays False -- ordered, but not a video: the gaps
-            # are arbitrary, so temporal losses/metrics must not treat it as one.
-            ordered_video = False
-            image_idxs = self.groups[idx]
-            image_idxs = rng.permutation(image_idxs)
-            if len(image_idxs) > num_views:
-                image_idxs = image_idxs[:num_views]
-            else:
-                if rng.random() < 0.8:
-                    image_idxs = rng.choice(image_idxs, size=num_views, replace=True)
-                else:
-                    repeat_num = num_views // len(image_idxs) + 1
-                    image_idxs = np.tile(image_idxs, repeat_num)[:num_views]
-            image_idxs = np.sort(image_idxs)
+        start_id = self.start_img_ids[idx]
+        all_image_ids = self.scene_img_list[self.sceneids[start_id]]
+        pos, ordered_video = self.get_seq_from_start_id(
+            num_views,
+            start_id,
+            all_image_ids,
+            rng,  # stride/order policy: self.stride_range + base defaults
+        )
+        image_idxs = np.array(all_image_ids)[pos]
 
         views = []
         for v, view_idx in enumerate(image_idxs):
