@@ -116,7 +116,7 @@ class MetricStreamVGGT(nn.Module):
     def freeze_for_finetune(self) -> dict:
         """Freeze everything except: LoRA adapters (the base projections stay
         frozen -- wrapping != unfreezing), the DepthConditioner (zero-init
-        convs / gate / encoder), and the output heads named in
+        convs / projection / encoder), and the output heads named in
         train.train_heads -- unfrozen in BOTH injection arms so the heads can
         learn to emit metric-scaled output (the knob is part of the hashed
         manifest, keeping the arms comparable)."""
