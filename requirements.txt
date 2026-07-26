@@ -27,3 +27,9 @@ scikit-learn
 gsplat
 evo
 open3d
+# ONNX export (src/export_onnx.py). onnxconverter-common (fp16 conversion,
+# best-effort) pins protobuf==3.20.2, which conflicts with wandb/tensorboard;
+# install it with --no-deps and keep protobuf>=6.31 -- it imports and runs fine.
+onnx==1.16.1
+onnxruntime==1.18.1
+onnxconverter-common==1.14.0
