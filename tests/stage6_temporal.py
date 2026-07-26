@@ -39,13 +39,13 @@ def main():
 
     cond_attn = build("attention")
     cond_none = build("none")
-    # share every non-temporal parameter
+    # the projection is zero-init (exact no-op); randomize it so the
+    # comparison isn't trivially 0-vs-0, then share every non-temporal
+    # parameter between the two conditioners
+    with torch.no_grad():
+        torch.nn.init.normal_(cond_attn.token_proj.weight, std=0.02)
     cond_none.encoder.load_state_dict(cond_attn.encoder.state_dict())
     cond_none.token_proj.load_state_dict(cond_attn.token_proj.state_dict())
-    with torch.no_grad():
-        # open the gates so the comparison isn't trivially 0-vs-0
-        cond_attn.gate.fill_(1.0)
-        cond_none.gate.fill_(1.0)
 
     with torch.no_grad():
         # (1) S=1 no-op vs temporal: none
