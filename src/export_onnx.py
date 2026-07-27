@@ -44,7 +44,10 @@ import os
 import sys
 
 import numpy as np
+import onnx
+import onnxruntime as ort
 import torch
+from torch.onnx import _constants
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -178,6 +181,16 @@ def export_step(wrapper: StreamingDepthExport, args, path: str) -> str:
     return path
 
 
+def is_sdpa_failure(exc: Exception) -> bool:
+    """Is this export failure the fused scaled-dot-product-attention op?
+
+    That is the only failure --no-fallback-sdpa's retry can fix. Matched on
+    the message because torch raises the same UnsupportedOperatorError type
+    for every op it cannot lower."""
+    text = str(exc).lower()
+    return "scaled_dot_product_attention" in text or "sdpa" in text
+
+
 # ---------------------------------------------------------------------------
 # onnxruntime helpers
 # ---------------------------------------------------------------------------
@@ -193,8 +206,6 @@ def ort_session(path: str):
     thread per core -- on a restricted node that is a wall of
     pthread_setaffinity_np errors followed by 48 threads fighting over the one
     core we were given."""
-    import onnxruntime as ort
-
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = n_cpus()
     opts.inter_op_num_threads = 1
@@ -367,7 +378,13 @@ def validate_rollout(
     """ORT rollout: shapes, dtypes, cache growth 1,2,...,clamp-at-window, and
     a reported (not asserted -- the parity test owns thresholds) max diff vs
     the eager wrapper running the same frames."""
-    n_frames = n_frames or args.window + 2
+    n_frames = n_frames or getattr(args, "validate_frames", None) or args.window + 2
+    if n_frames <= wrapper.window:
+        print(
+            f"NOTE: rollout is {n_frames} frames but the window is "
+            f"{wrapper.window}, so the cache never reaches the clamp -- the "
+            "baked window goes unverified here (the parity test can check it)"
+        )
     step_sess = ort_session(step_path)
     eager_cache = None
     ort_cache = None
@@ -413,41 +430,44 @@ def validate_rollout(
 # ---------------------------------------------------------------------------
 # fp16 (best-effort; ported from the PromptDA script, IO kept fp32)
 # ---------------------------------------------------------------------------
-# onnxconverter-common builds the fp16 model as ONE protobuf, which caps at
-# 2 GB. The 1B checkpoint is ~5 GB fp32 / ~2.4 GB fp16, so --fp16 CANNOT
-# succeed for it; it is useful for small models only. Intended behavior --
-# warned about up front and per-file, never fatal.
-FP16_PROTOBUF_LIMIT = 2 * 1024**3
-
-
+# protobuf caps a single message at 2 GB, and the 1B graph crosses it. That is
+# NOT a hard ceiling on fp16 -- convert_onnx_to_fp16 routes around it (see its
+# docstring) -- but the conversion still holds the fp32 model and its fp16 copy
+# in memory at once, so size shows up as a RAM cost instead. Never fatal.
 def weight_bytes(path: str) -> int:
     """Bytes of initializer data in an ONNX model, EXTERNAL data included.
 
     os.path.getsize is useless here: past 2 GB torch writes the weights to
-    sibling files and the .onnx keeps only the graph skeleton, so the 5 GB
-    model whose fp16 form cannot fit in a protobuf looks like a few MB on
-    disk. External tensors carry their size in an `external_data` entry keyed
-    "length"; internal ones are measured from the proto."""
-    import onnx
+    sibling files and the .onnx keeps only the graph skeleton, so a model with
+    3.6 GB of weights looks like 6 MB on disk.
 
+    External tensors MAY carry a "length" entry, but torch's exporter does not
+    write one -- it gives each tensor its own file and only records
+    "location", so the whole tensor is the file. Measured against a real 1B
+    export: summing "length" alone reports 0 bytes for 3.6 GB of weights."""
     model = onnx.load(path, load_external_data=False)
+    base = os.path.dirname(os.path.abspath(path))
     total = 0
     for init in model.graph.initializer:
-        if init.data_location == onnx.TensorProto.EXTERNAL:
-            total += sum(
-                int(kv.value) for kv in init.external_data if kv.key == "length"
-            )
-        else:
+        if init.data_location != onnx.TensorProto.EXTERNAL:
             total += len(init.raw_data) or init.ByteSize()
+            continue
+        meta = {kv.key: kv.value for kv in init.external_data}
+        if "length" in meta:
+            total += int(meta["length"])
+        elif "location" in meta:
+            sidecar = os.path.join(base, meta["location"])
+            if os.path.isfile(sidecar):
+                total += os.path.getsize(sidecar)
     return total
 
 
 def warn_fp16(fp32_paths: list) -> None:
     print(
-        "WARNING: --fp16 is best-effort. onnxconverter-common serializes the "
-        "converted model as a single protobuf (2 GB hard limit), so any graph "
-        "whose fp16 weights exceed that -- the 1B checkpoint at ~2.4 GB does "
-        "-- will fail here. The fp32 export above is unaffected."
+        "WARNING: --fp16 is best-effort. The conversion holds the fp32 graph "
+        "and its fp16 copy in memory at once; the result is written with "
+        "external data, so the 2 GB protobuf limit is routed around rather "
+        "than hit. The fp32 graph is never modified."
     )
     for p in fp32_paths:
         if not os.path.isfile(p):
@@ -458,23 +478,65 @@ def warn_fp16(fp32_paths: list) -> None:
             print(f"fp16: could not size {p} [{type(e).__name__}] {e}")
             continue
         # fp16 halves the fp32 weights; IO stays fp32 but is negligible
-        if fp32 / 2 > FP16_PROTOBUF_LIMIT:
-            print(
-                f"WARNING: {p} holds {fp32 / 1024**3:.1f} GB of fp32 weights, "
-                f"so its fp16 form (~{fp32 / 2 / 1024**3:.1f} GB) exceeds the "
-                "2 GB protobuf limit -- the conversion below is expected to "
-                "fail."
-            )
+        print(
+            f"fp16: {p} holds {fp32 / 1024**3:.2f} GB of fp32 weights -> "
+            f"~{fp32 / 2 / 1024**3:.2f} GB fp16; budget ~"
+            f"{fp32 * 2 / 1024**3:.0f} GB of RAM for the conversion"
+        )
 
 
 def convert_onnx_to_fp16(fp32_path: str, fp16_path: str) -> str:
-    import onnx
+    """fp32 graph -> fp16 weights, fp32 I/O.
+
+    Every step here works around protobuf's 2 GB message limit, which the 1B
+    graph exceeds in THREE separate places -- all of which raise the same
+    unhelpful "Failed to serialize proto":
+
+    1. convert_float_to_float16 runs onnx.shape_inference.infer_shapes on the
+       in-memory proto, which serializes it. Shape info is genuinely needed
+       for the conversion, so instead of just disabling it we run inference
+       the file-based way (infer_shapes_path is external-data aware) and then
+       tell the converter to skip its own.
+    2. onnx.save as a single protobuf. Saved as external data instead -- ONE
+       sidecar, not the per-tensor pile torch writes.
+    3. onnx.checker.check_model on the proto re-serializes it; checking by
+       PATH loads external data properly.
+
+    The inferred model is written beside the original so its relative
+    external-data locations still resolve."""
+    # onnxconverter-common is the ONE optional dependency here:
+    # requirements.txt deliberately does not install it (its protobuf pin
+    # would downgrade the env), so importing it at module scope would break
+    # every other path in this file for anyone who has not hand-installed
+    # it. try_fp16 catches the ImportError and says how to get it.
     from onnxconverter_common import float16 as onnx_float16
 
-    model = onnx.load(fp32_path)
-    model_fp16 = onnx_float16.convert_float_to_float16(model, keep_io_types=True)
-    onnx.checker.check_model(model_fp16)
-    onnx.save(model_fp16, fp16_path)
+    inferred = f"{os.path.splitext(fp32_path)[0]}_inferred.onnx"
+    try:
+        onnx.shape_inference.infer_shapes_path(fp32_path, inferred)
+        src, skip_infer = inferred, True
+    except Exception as e:
+        print(f"fp16: path-based shape inference failed ({type(e).__name__}: {e});")
+        print("      converting without it -- casts may be placed conservatively")
+        src, skip_infer = fp32_path, True
+
+    try:
+        model = onnx.load(src)
+        model_fp16 = onnx_float16.convert_float_to_float16(
+            model, keep_io_types=True, disable_shape_infer=skip_infer
+        )
+        onnx.save(
+            model_fp16,
+            fp16_path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=f"{os.path.basename(fp16_path)}.data",
+            size_threshold=1024,
+        )
+    finally:
+        if os.path.isfile(inferred):
+            os.remove(inferred)
+    onnx.checker.check_model(fp16_path)
     return fp16_path
 
 
@@ -595,7 +657,25 @@ def parse_args():
         "--fp16",
         action="store_true",
         help="also write _fp16 variants (best-effort; fails above the 2 GB "
-        "protobuf limit, i.e. for the 1B checkpoint -- warns, never fatal)",
+        "protobuf limit -- warns, never fatal)",
+    )
+    ap.add_argument(
+        "--fp16-only",
+        action="store_true",
+        help="convert an EXISTING <out>_step.onnx to fp16 and validate it, "
+        "without re-exporting. The checkpoint is still loaded, for the eager "
+        "reference the numerical check compares against; pass the same "
+        "--rotate/--height/--width/--window the graph was exported with",
+    )
+    ap.add_argument(
+        "--validate-frames",
+        type=int,
+        default=None,
+        help="frames for the post-export ORT rollout (default --window + 2, "
+        "the smallest that exercises the cache clamp). Each frame is one 1B "
+        "forward EAGER plus one in onnxruntime, so on a CPU-only node this "
+        "dominates the run at --window 20; lower it to trade the window check "
+        "for time -- the frame-0 probe still asserts unconditionally",
     )
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument(
@@ -614,8 +694,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    from torch.onnx import _constants
-
     max_opset = _constants.ONNX_MAX_OPSET
     if args.opset > max_opset:
         raise SystemExit(f"--opset {args.opset} > torch max {max_opset}")
@@ -627,12 +705,24 @@ def main():
 
     wrapper = build_wrapper(args)
     step_path = f"{args.out}_step.onnx"
+    if args.fp16_only:
+        # tracing the 1B model costs far more than the conversion; reuse a
+        # graph that already passed its probe instead of re-exporting
+        if not os.path.isfile(step_path):
+            raise SystemExit(f"--fp16-only needs an existing {step_path}")
+        print(f"fp16-only: converting {step_path} (no re-export)")
+        try_fp16([step_path], wrapper, args)
+        return
     try:
         export_step(wrapper, args, step_path)
     except Exception as e:
-        if args.no_fallback_sdpa:
+        # Retry ONLY if the failure is the fused SDPA op. Tracing the 1B model
+        # takes many minutes, and an unrelated failure (an unsupported op
+        # elsewhere, say) fails again identically -- the old blanket retry
+        # just doubled the wait and blamed the wrong thing.
+        if args.no_fallback_sdpa or not is_sdpa_failure(e):
             raise
-        print(f"step export failed ({e}); retrying with unfused attention")
+        print(f"step export failed on the fused attention op ({e}); retrying unfused")
         wrapper.set_fused_attention(False)
         export_step(wrapper, args, step_path)
 

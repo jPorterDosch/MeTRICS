@@ -154,6 +154,95 @@ class _ConstantPositions:
         return pos.clone()
 
 
+def _adaptive_pool_matrix(in_size: int, out_size: int) -> torch.Tensor:
+    """Row-averaging matrix [out, in] reproducing PyTorch's adaptive pooling.
+
+    Output cell i averages input indices [floor(i*in/out), ceil((i+1)*in/out)),
+    which is the exact rule in ATen -- cell widths differ by one when the ratio
+    is not integral, which is precisely the case the ONNX exporter refuses."""
+    m = torch.zeros(out_size, in_size)
+    for i in range(out_size):
+        start = (i * in_size) // out_size
+        end = -(-((i + 1) * in_size) // out_size)  # ceil division
+        m[i, start:end] = 1.0 / (end - start)
+    return m
+
+
+class _ExportAdaptiveAvgPool2d:
+    """F.adaptive_avg_pool2d as two constant matmuls, for fixed sizes.
+
+    The exporter only lowers adaptive_avg_pool2d when the output size divides
+    the input size (it becomes an AveragePool with one fixed kernel). The
+    conditioner pools the sparse map to the DPT fusion sizes, and at 518x392
+    two of the four are non-integral ratios (518/148 = 3.5, 518/19 = 27.3), so
+    the head/token arms cannot export at all without this.
+
+    Averaging over a rectangle is separable, so pooling H then W with two
+    constant matrices is mathematically identical -- and trivially exportable,
+    since both matrices are graph initializers. Cached per shape; the sizes
+    are fixed by the export resolution, so this is a handful of small
+    constants."""
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple[int, int, int, int], tuple] = {}
+
+    def __call__(self, x: torch.Tensor, out_hw: tuple[int, int]) -> torch.Tensor:
+        in_h, in_w = int(x.shape[-2]), int(x.shape[-1])
+        out_h, out_w = int(out_hw[0]), int(out_hw[1])
+        key = (in_h, in_w, out_h, out_w)
+        if key not in self._cache:
+            self._cache[key] = (
+                _adaptive_pool_matrix(in_h, out_h),
+                _adaptive_pool_matrix(in_w, out_w),
+            )
+        rh, rw = self._cache[key]
+        rh = rh.to(dtype=x.dtype, device=x.device)
+        rw = rw.to(dtype=x.dtype, device=x.device)
+        return torch.matmul(torch.matmul(rh, x), rw.transpose(0, 1))
+
+
+_EXPORT_POOL = _ExportAdaptiveAvgPool2d()
+
+
+def _masked_downsample_export(disp, mask, out_hw, eps: float = 1e-6):
+    """depth_cond.conditioner.masked_downsample with the one unexportable op
+    swapped. Everything else -- the divide, the eps clamp, the zeroing of
+    empty cells -- is copied verbatim, so the arithmetic is unchanged."""
+    valid_sum = _EXPORT_POOL(disp * mask, out_hw)
+    frac = _EXPORT_POOL(mask, out_hw)
+    pooled = valid_sum / frac.clamp(min=eps)
+    pooled = pooled * (frac > 0)
+    return pooled, frac
+
+
+class _ConstantPosEncoding:
+    """Drop-in for DinoVisionTransformer.interpolate_pos_encoding at a FIXED
+    resolution.
+
+    The original resizes the pretrain pos-embed grid to the input resolution
+    with ANTIALIASED bicubic interpolation, which traces to
+    aten::_upsample_bicubic2d_aa -- an op with no ONNX symbolic at any opset.
+    It kills the export outright (in _run_symbolic_function, before any
+    fallback can help). But its result depends only on the token count and
+    the input h/w, so at a fixed export resolution it is a constant: evaluate
+    it once eagerly, at the original's full precision, and hand the graph the
+    answer.
+
+    Same resolution guard as _ConstantPositions, and the same reason."""
+
+    def __init__(self, embed: torch.Tensor, wh: tuple[int, int]) -> None:
+        self.embed = embed  # [1, 1 + n_patch, dim]
+        self.wh = wh
+
+    def __call__(self, x, w, h) -> torch.Tensor:
+        if isinstance(w, int) and isinstance(h, int) and (w, h) != self.wh:
+            raise AssertionError(
+                f"pos encoding was baked for {self.wh}, called with {(w, h)} "
+                "-- rebuild the wrapper for this resolution"
+            )
+        return self.embed.to(x.dtype)
+
+
 def rotate_cw(x: torch.Tensor) -> torch.Tensor:
     """90 degrees clockwise over the last two dims == torch.rot90(x, k=-1)."""
     return x.transpose(-2, -1).flip(-1)
@@ -237,12 +326,46 @@ class StreamingDepthExport(nn.Module):
             self.aggregator.position_getter = _ConstantPositions(
                 pos.view(1, ph * pw, 2), (ph, pw)
             )
+        # DINOv2 patch embed only: bake its interpolated positional encoding
+        # (see _ConstantPosEncoding -- the antialiased bicubic resize has no
+        # ONNX symbolic). The conv patch embed has no such method.
+        self._bake_pos_encoding()
+        # conditioned arms only: swap the conditioner's masked pooling for an
+        # exportable equivalent (see _ExportAdaptiveAvgPool2d -- the DPT fusion
+        # sizes are not integer divisors of the input at this resolution).
+        # Module-attribute patch, so the conditioner's module-global lookup
+        # picks it up, same mechanism as the sincos drop-in below.
+        if self.conditioner is not None:
+            from streamvggt.depth_cond import conditioner as _cond
+
+            _cond.masked_downsample = _masked_downsample_export
         # export-process-wide: float32 sincos embedding (see the drop-in's
         # docstring -- the original's float64 omega breaks the exported Einsum)
         _head_utils.make_sincos_pos_embed = _make_sincos_pos_embed_f32
 
         self.eval()
         self.requires_grad_(False)
+
+    def _bake_pos_encoding(self) -> None:
+        """Replace the DINOv2 patch embed's interpolate_pos_encoding with the
+        constant it evaluates to at this resolution (see _ConstantPosEncoding).
+
+        The argument order is upstream's, and it is a trap: the caller,
+        prepare_tokens_with_masks, unpacks `B, nc, w, h = x.shape` -- so what
+        it passes as `w` is the image HEIGHT. Everything downstream is
+        self-consistent (w0 = w // patch_size indexes the height axis), so we
+        replicate the call exactly rather than "fix" the names."""
+        vit = getattr(self.aggregator, "patch_embed", None)
+        if not hasattr(vit, "interpolate_pos_encoding"):
+            return  # conv patch embed: no interpolation, nothing to bake
+        h, w = self.net_hw  # network-facing, post-rotation
+        n_patch = (h // vit.patch_size) * (w // vit.patch_size)
+        probe = torch.zeros(
+            1, n_patch + 1, vit.pos_embed.shape[-1], dtype=vit.pos_embed.dtype
+        )
+        with torch.no_grad():
+            embed = vit.interpolate_pos_encoding(probe, h, w).detach()
+        vit.interpolate_pos_encoding = _ConstantPosEncoding(embed, (h, w))
 
     def empty_cache(self) -> list[torch.Tensor]:
         """48 zero-length cache tensors matching THIS model's geometry."""

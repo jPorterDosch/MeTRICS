@@ -69,13 +69,71 @@ exercised):
 import argparse
 import os
 import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
+# Everything below needs src/ on the path, hence the E402s. The ONE import
+# this file still defers is onnxconverter-common (see check_fp16_smoke):
+# requirements.txt deliberately does not install it, so importing it here
+# would break --cpu-unit for everyone who has not hand-installed it.
 import numpy as np  # noqa: E402
+import onnx  # noqa: E402
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from PIL import Image  # noqa: E402
+
+import streamvggt.heads.utils as head_utils  # noqa: E402
+from export_onnx import (  # noqa: E402
+    assert_graph_geometry,
+    assert_graph_io,
+    cache_input_names,
+    cache_output_names,
+    check_fp16_numerics,
+    convert_onnx_to_fp16,
+    export_step,
+    load_base_model,
+    load_finetuned_model,
+    merge_lora,
+    ort_session,
+    probe_frame0,
+    run_by_name,
+    validate_rollout,
+)
+from runtime_utils import set_torch_threads  # noqa: E402
+from streamvggt.depth_cond.conditioner import (  # noqa: E402
+    dpt_fusion_sizes,
+    masked_downsample,
+)
+from streamvggt.depth_cond.lora import LoRALinear, LoRAQKV  # noqa: E402
+from streamvggt.export import StreamingDepthExport  # noqa: E402
+from streamvggt.export.cache import (  # noqa: E402
+    NUM_GLOBAL_BLOCKS,
+    empty_cache,
+    flatten_cache,
+    unflatten_cache,
+)
+from streamvggt.export.wrapper import (  # noqa: E402
+    _EXPORT_POOL,
+    _make_sincos_pos_embed_f32,
+    _masked_downsample_export,
+    rotate_cw,
+)
+from streamvggt.heads.dpt_head import DPTHead  # noqa: E402
+from streamvggt.layers.vision_transformer import DinoVisionTransformer  # noqa: E402
+from streamvggt.models.aggregator import Aggregator  # noqa: E402
+from streamvggt.models.streamvggt import StreamVGGT  # noqa: E402
+from visualize_spot import load_spot_views  # noqa: E402
+
+# Fixed so that two constructions inside one run produce identical weights --
+# check_baked_pos_encoding builds the same tiny ViT twice and compares the
+# baked encoding against the original. Not a magic number to tune: the DATA
+# seeds all come from --seed.
+MODEL_SEED = 4
 
 
 def parse_args():
@@ -124,6 +182,27 @@ def parse_args():
         help="max allowed |depth diff| (use ~1e-1 for fp16 graphs)",
     )
     ap.add_argument("--seed", type=int, default=0)
+    spot = ap.add_argument_group(
+        "real data (optional)",
+        "Roll REAL Spot frames instead of random noise. Random frames prove "
+        "graph == eager; only real imagery can catch a wrong convention "
+        "(rotation direction, [0,1] vs [-1,1], depth units), because those "
+        "move eager and graph together.",
+    )
+    spot.add_argument(
+        "--spot-dir",
+        default=None,
+        help="Spot sequence dir with color/ and depth/ "
+        "(e.g. /oscar/data/jtompki1/cli277/new_spot_data/0)",
+    )
+    spot.add_argument("--spot-start", type=int, default=0)
+    spot.add_argument("--spot-stride", type=int, default=1)
+    spot.add_argument(
+        "--dump-dir",
+        default=None,
+        help="write per-frame [input rgb | predicted depth] PNGs here; the two "
+        "panels should sit 90 degrees apart when --rotate is baked in",
+    )
     return ap.parse_args()
 
 
@@ -131,10 +210,6 @@ def parse_args():
 # --cpu-unit checks
 # ---------------------------------------------------------------------------
 def check_lora_merge() -> None:
-    from streamvggt.export.lora_merge import merge_lora
-    from streamvggt.depth_cond.lora import LoRALinear, LoRAQKV
-
-    torch.manual_seed(0)
     dim = 64
 
     class FakeAttn(nn.Module):
@@ -197,16 +272,6 @@ def check_lora_merge() -> None:
 
 
 def check_cache_roundtrip() -> None:
-    from streamvggt.export.cache import (
-        NUM_GLOBAL_BLOCKS,
-        cache_input_names,
-        cache_output_names,
-        empty_cache,
-        flatten_cache,
-        unflatten_cache,
-    )
-
-    torch.manual_seed(1)
     pairs = [
         (torch.randn(1, 16, 3, 10, 64), torch.randn(1, 16, 3, 10, 64))
         for _ in range(NUM_GLOBAL_BLOCKS)
@@ -233,9 +298,6 @@ def check_cache_roundtrip() -> None:
 def check_rotation() -> None:
     # outputs stay in the rotated orientation by design (no inverse in the
     # pipeline), so only the input rotation is contract
-    from streamvggt.export.wrapper import rotate_cw
-
-    torch.manual_seed(2)
     for shape in ((1, 3, 5, 7), (1, 5, 7)):
         x = torch.randn(*shape)
         if not torch.equal(rotate_cw(x), torch.rot90(x, k=-1, dims=(-2, -1))):
@@ -254,9 +316,6 @@ def check_sincos_patch_cost() -> None:
     the deviation. The DPT head scales the embedding by ratio=0.1 before
     adding it to the features, so the reported number is an upper bound on
     what reaches the depth output."""
-    import streamvggt.heads.utils as head_utils
-    from streamvggt.export.wrapper import _make_sincos_pos_embed_f32
-
     if head_utils.make_sincos_pos_embed is _make_sincos_pos_embed_f32:
         raise AssertionError(
             "run this check before any StreamingDepthExport is constructed -- "
@@ -295,11 +354,170 @@ def check_sincos_patch_cost() -> None:
     )
 
 
+def check_baked_pos_encoding() -> None:
+    """The DINOv2 patch embed's interpolate_pos_encoding is the one op that
+    cannot be exported at all: an antialiased bicubic resize
+    (aten::_upsample_bicubic2d_aa) with no ONNX symbolic at any opset.
+    StreamingDepthExport bakes it to a constant; this checks that the
+    constant is EQUAL to what the original computes, that it no longer
+    depends on the interpolation, and that it refuses another resolution.
+
+    The export smoke cannot cover this -- build_tiny_model uses the conv
+    patch embed, which has no such method, so the tiny graph exports happily
+    while the real checkpoint dies. That is exactly how this reached a real
+    export. A tiny DinoVisionTransformer stands in for the 1B one here."""
+    h, w = SMOKE_HW  # non-square: forces the interpolation branch
+    ps = 14
+
+    def tiny_vit():
+        torch.manual_seed(MODEL_SEED)
+        return DinoVisionTransformer(
+            img_size=h,
+            patch_size=ps,
+            embed_dim=64,  # must match the tiny aggregator's width
+            depth=1,
+            num_heads=1,
+            mlp_ratio=1.0,
+            num_register_tokens=4,
+            interpolate_antialias=True,  # as Aggregator builds it
+            interpolate_offset=0.0,
+        ).eval()
+
+    class _PatchEmbedOnly(nn.Module):
+        """Just the pos-encoding path -- a whole-model export costs minutes,
+        and the op either lowers here or it does not."""
+
+        def __init__(self, vit):
+            super().__init__()
+            self.vit = vit
+
+        def forward(self, img):
+            return self.vit.prepare_tokens_with_masks(img)
+
+    def export(vit, path):
+        torch.onnx.export(
+            _PatchEmbedOnly(vit), (torch.rand(1, 3, h, w),), path, opset_version=17
+        )
+        return {n.op_type for n in onnx.load(path).graph.node}
+
+    with tempfile.TemporaryDirectory() as td:
+        # control: unmodified, this is the failure a real export hits
+        try:
+            export(tiny_vit(), os.path.join(td, "control.onnx"))
+        except Exception as e:
+            if "bicubic" not in str(e):
+                raise AssertionError(
+                    f"expected the antialiased-bicubic export failure, got "
+                    f"[{type(e).__name__}] {e}"
+                )
+        else:
+            raise AssertionError(
+                "the unbaked DINOv2 pos encoding exported -- this check no "
+                "longer proves the bake is what makes the export work"
+            )
+
+        # the real path: the wrapper's constructor bakes it
+        model = build_tiny_model()
+        model.aggregator.patch_embed = tiny_vit()
+        wrapper = StreamingDepthExport(model, image_hw=(h, w), window=3)
+        vit = wrapper.aggregator.patch_embed
+        ref = tiny_vit().interpolate_pos_encoding(
+            torch.zeros(1, (h // ps) * (w // ps) + 1, 64), h, w
+        )
+        got = vit.interpolate_pos_encoding(torch.zeros_like(ref), h, w)
+        if got.shape != ref.shape or not torch.equal(got, ref):
+            raise AssertionError(
+                f"baked pos encoding {tuple(got.shape)} differs from the "
+                f"original {tuple(ref.shape)}"
+            )
+        try:
+            vit.interpolate_pos_encoding(ref, w, h)  # swapped == wrong res
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("baked pos encoding accepted the wrong resolution")
+        ops = export(vit, os.path.join(td, "baked.onnx"))
+        if "Resize" in ops:
+            raise AssertionError(f"interpolation survived the bake: {sorted(ops)}")
+    print(
+        f"[cpu-unit] DINOv2 pos encoding: unbaked fails to export (bicubic), "
+        f"baked equals it exactly and exports clean at {h}x{w}"
+    )
+
+
+def check_exportable_adaptive_pool() -> None:
+    """The conditioned arms pool the sparse map to the DPT fusion sizes with
+    F.adaptive_avg_pool2d, which the exporter lowers ONLY when the output size
+    divides the input. At the real 518x392 two of the four fusion sizes are
+    non-integral ratios (518/148 = 3.5, 518/19 = 27.3), so the head arm cannot
+    export at all -- it dies with SymbolicValueError before writing anything.
+
+    The wrapper swaps in a separable two-matmul equivalent. This checks both
+    halves: that the original really is unexportable at these sizes (so the
+    swap is load-bearing, not decoration) and that the replacement matches it
+    numerically on a sparse map with realistic validity.
+
+    The base arm never reaches this code, which is why the base export
+    succeeded on the real checkpoint while the head arm crashed."""
+    h, w = 518, 392  # the real network resolution, where the ratios go bad
+    sizes = dpt_fusion_sizes(h, w, 14)
+    x = torch.rand(1, 1, h, w)
+    mask = (torch.rand(1, 1, h, w) < 0.427).float()  # real Spot validity share
+
+    worst = 0.0
+    for out_hw in sizes:
+        ref = F.adaptive_avg_pool2d(x, out_hw)
+        got = _EXPORT_POOL(x, out_hw)
+        if got.shape != ref.shape:
+            raise AssertionError(f"{out_hw}: shape {got.shape} != {ref.shape}")
+        pa, fa = masked_downsample(x, mask, out_hw)
+        pb, fb = _masked_downsample_export(x, mask, out_hw)
+        worst = max(
+            worst,
+            (ref - got).abs().max().item(),
+            (pa - pb).abs().max().item(),
+            (fa - fb).abs().max().item(),
+        )
+    if worst > 1e-5:
+        raise AssertionError(f"exportable pooling deviates by {worst:.2e}")
+
+    class _Pool(nn.Module):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def forward(self, t):
+            return self.fn(t, sizes[0])  # (148, 112): the 3.5x ratio
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            torch.onnx.export(
+                _Pool(F.adaptive_avg_pool2d),
+                (x,),
+                os.path.join(td, "control.onnx"),
+                opset_version=17,
+            )
+        except Exception as e:
+            if "adaptive_avg_pool2d" not in str(e):
+                raise AssertionError(f"unexpected control failure: {e}")
+        else:
+            raise AssertionError(
+                "F.adaptive_avg_pool2d exported at a non-integral ratio -- this "
+                "check no longer proves the replacement is needed"
+            )
+        torch.onnx.export(
+            _Pool(_EXPORT_POOL), (x,), os.path.join(td, "pool.onnx"), opset_version=17
+        )
+    print(
+        f"[cpu-unit] adaptive pooling: original unexportable at {sizes[0]} "
+        f"(3.5x), matmul form exports and matches within {worst:.2e}"
+    )
+
+
 def check_window_slice() -> None:
     """The in-graph slice kv[:, :, -W:] must equal the reference truncation
     semantics validated in the KV-window experiment (keep the LAST W frame
     slices; no-op while n_frames <= W)."""
-    torch.manual_seed(3)
     W = 4
     for n_frames in (1, W, W + 3):
         k = torch.randn(1, 16, n_frames, 10, 64)
@@ -330,11 +548,7 @@ def build_tiny_model():
     compares the cache output, where those token rows land verbatim -- so a
     slot the tracer constant-folded shows up at full magnitude. With
     interchangeable tokens the probe would pass regardless."""
-    from streamvggt.heads.dpt_head import DPTHead
-    from streamvggt.models.aggregator import Aggregator
-    from streamvggt.models.streamvggt import StreamVGGT
-
-    torch.manual_seed(4)
+    torch.manual_seed(MODEL_SEED)
     model = StreamVGGT.__new__(StreamVGGT)
     nn.Module.__init__(model)
     model.aggregator = Aggregator(
@@ -357,7 +571,7 @@ def build_tiny_model():
     model.camera_head = None
     model.point_head = None
     model.track_head = None
-    g = torch.Generator().manual_seed(7)
+    g = torch.Generator().manual_seed(MODEL_SEED)
     with torch.no_grad():
         agg = model.aggregator
         agg.camera_token.copy_(torch.randn(agg.camera_token.shape, generator=g))
@@ -382,12 +596,6 @@ def run_export_smoke(args) -> None:
     the dynamic frame-0 token selection the single-graph contract rests on --
     each export is the expensive part here, so that check rides along with
     these two rather than paying for a third."""
-    import tempfile
-    from types import SimpleNamespace
-
-    from export_onnx import export_step, probe_frame0, validate_rollout
-    from streamvggt.export import StreamingDepthExport
-
     model = build_tiny_model()
     h, w = SMOKE_HW
     for rotate in (False, True):
@@ -402,7 +610,7 @@ def run_export_smoke(args) -> None:
             step = export_step(wrapper, ns, os.path.join(td, "tiny_step.onnx"))
             probe_frame0(step, wrapper, ns)
             validate_rollout(step, wrapper, ns, n_frames=6)
-            check_graph_orientation(step, wrapper)
+            check_graph_orientation(step, wrapper, args.seed)
             if not rotate:  # one conversion is enough; rotation is orthogonal
                 check_fp16_smoke(step, wrapper, ns)
         print(
@@ -410,21 +618,18 @@ def run_export_smoke(args) -> None:
             f"{expect_hw[0]}x{expect_hw[1]} out, 50 in / 50 out, divergent "
             "frame-0 token selection stayed dynamic)"
         )
-    check_no_inverse_rotation(model)
+    check_no_inverse_rotation(model, args.seed)
     print("export smoke PASSED")
 
 
 @torch.no_grad()
-def check_graph_orientation(step_path, wrapper) -> None:
+def check_graph_orientation(step_path, wrapper, seed: int) -> None:
     """The EXPORTED graph emits the network orientation: [1, W, H] when the
     rotation is baked in, [1, H, W] when it is not. Asserted against the
     contract, not against the eager wrapper -- eager and graph share `_step`,
     so a rotation change moves both and their agreement proves nothing."""
-    from export_onnx import ort_session, run_by_name
-    from streamvggt.export import cache_input_names
-
     h, w = SMOKE_HW
-    rgb, d = dummy_frame(h, w, seed=31)
+    rgb, d = dummy_frame(h, w, seed=seed)
     feed = {"rgb": rgb.numpy(), "sparse_depth": d.numpy()}
     feed.update(
         dict(zip(cache_input_names(), (t.numpy() for t in wrapper.empty_cache())))
@@ -448,8 +653,6 @@ def check_fp16_smoke(step_path, wrapper, ns) -> None:
     valid-pixel COUNT, which passes fp32 parity and turns the whole fp16 graph
     into NaN at 65505 valid pixels (see wrapper._zero_from). The tiny model
     converts in seconds, so the smoke pays for the coverage."""
-    from export_onnx import check_fp16_numerics, convert_onnx_to_fp16
-
     try:
         import onnxconverter_common  # noqa: F401
     except ImportError:
@@ -466,16 +669,13 @@ def check_fp16_smoke(step_path, wrapper, ns) -> None:
 
 
 @torch.no_grad()
-def check_no_inverse_rotation(model) -> None:
+def check_no_inverse_rotation(model, seed: int) -> None:
     """Pin the no-inverse-rotation contract by construction: rotating in-graph
     must be EQUIVALENT to pre-rotating the inputs and not rotating at all.
     Any rotate_ccw at the end of `_step` breaks this equality -- and, since
     the test resolution is non-square, even the shapes."""
-    from streamvggt.export import StreamingDepthExport
-    from streamvggt.export.wrapper import rotate_cw
-
     h, w = SMOKE_HW
-    rgb, d = dummy_frame(h, w, seed=41)
+    rgb, d = dummy_frame(h, w, seed=seed)
     # both wrappers have net_hw == (w, h), so they agree on the constant
     # position getter this constructor bakes into the shared model
     baked = StreamingDepthExport(model, image_hw=(h, w), window=3, rotate=True)
@@ -501,10 +701,15 @@ def check_no_inverse_rotation(model) -> None:
 
 
 def run_cpu_unit(args) -> None:
+    # one seed for the whole run, from --seed: the checks below draw their
+    # data from the global RNG rather than each pinning a magic number
+    torch.manual_seed(args.seed)
     check_lora_merge()
     check_cache_roundtrip()
     check_rotation()
     check_sincos_patch_cost()  # MUST precede the first wrapper construction
+    check_baked_pos_encoding()
+    check_exportable_adaptive_pool()
     check_window_slice()
     run_export_smoke(args)
     print("cpu-unit checks PASSED")
@@ -521,21 +726,52 @@ def dummy_frame(h: int, w: int, seed: int):
     return rgb, d * keep
 
 
+def spot_frames(args) -> list:
+    """Real Spot frames, in the GRAPH's input convention.
+
+    Random frames prove graph == eager but can say NOTHING about whether the
+    convention is right: a wrong rotation direction, a [-1,1] vs [0,1] mixup,
+    or millimetre depth all move eager and graph together, so every existing
+    check still passes. Only real imagery exposes those.
+
+    Conversion, both halves of which are the contract this pins down:
+      * load_spot_views rotates with PIL BEFORE its resize/crop; the exported
+        graph bakes the rotation instead and wants PRE-rotation frames. So ask
+        for rotate="none" -- 392x518 landscape -- and let the graph rotate.
+      * it returns ImgNorm [-1,1] (the dataset format); the model wants [0,1],
+        which is what finetune_depth._prepare_batch does with (img + 1) / 2.
+    """
+    views = load_spot_views(
+        Path(args.spot_dir), args.spot_start, args.frames, args.spot_stride, "none"
+    )
+    frames = []
+    for v in views:
+        rgb = (v["img"] + 1.0) / 2.0  # [-1,1] dataset format -> [0,1] model input
+        depth = v["sparse_depth"][:, None].float()  # [1,1,H,W], metres
+        frames.append((rgb.float(), depth))
+    return frames
+
+
+def dump_depth(path: str, arr, rgb=None) -> None:
+    """Write a depth map as a PNG for the one check no assertion can make:
+    looking at it. Orientation errors are invisible numerically -- eager and
+    graph agree on an upside-down map -- but obvious at a glance."""
+    d = np.asarray(arr).squeeze()
+    finite = np.isfinite(d) & (d > 0)
+    lo, hi = (d[finite].min(), d[finite].max()) if finite.any() else (0.0, 1.0)
+    norm = np.clip((d - lo) / max(hi - lo, 1e-9), 0, 1)
+    img = Image.fromarray((norm * 255).astype(np.uint8))
+    if rgb is not None:
+        r = (np.asarray(rgb).squeeze().transpose(1, 2, 0) * 255).astype(np.uint8)
+        panel = Image.new("RGB", (img.width + r.shape[1], max(img.height, r.shape[0])))
+        panel.paste(Image.fromarray(r), (0, 0))
+        panel.paste(img.convert("RGB"), (r.shape[1], 0))
+        img = panel
+    img.save(path)
+
+
 @torch.no_grad()
 def run_parity(args) -> None:
-    from export_onnx import (
-        assert_graph_geometry,
-        assert_graph_io,
-        cache_input_names,
-        cache_output_names,
-        load_base_model,
-        load_finetuned_model,
-        merge_lora,
-        ort_session,
-        run_by_name,
-    )
-    from streamvggt.export import StreamingDepthExport
-
     if args.onnx_prefix is None:
         raise SystemExit("full mode needs --onnx-prefix (run export first)")
     step_path = f"{args.onnx_prefix}_step.onnx"
@@ -562,10 +798,26 @@ def run_parity(args) -> None:
     # graph; this is where a mismatch with the flags given here is caught
     assert_graph_geometry(step_sess, wrapper, step_path)
 
+    frames = None
+    if args.spot_dir:
+        frames = spot_frames(args)
+        got_hw = tuple(frames[0][0].shape[-2:])
+        if got_hw != (args.height, args.width):
+            raise SystemExit(
+                f"Spot frames are {got_hw}, graph takes "
+                f"{(args.height, args.width)} -- pass matching --height/--width"
+            )
+        print(f"frames: {len(frames)} real Spot frames from {args.spot_dir}")
+    if args.dump_dir:
+        os.makedirs(args.dump_dir, exist_ok=True)
+
     eager_cache, ort_cache = None, None
     worst_depth, worst_conf, worst_cache = 0.0, 0.0, 0.0
     for i in range(args.frames):
-        rgb, d = dummy_frame(args.height, args.width, args.seed * 1000 + i)
+        if frames is not None:
+            rgb, d = frames[i]
+        else:
+            rgb, d = dummy_frame(args.height, args.width, args.seed * 1000 + i)
         ref_depth, ref_conf, eager_cache = wrapper._step(rgb, d, eager_cache)
         feed = {"rgb": rgb.numpy(), "sparse_depth": d.numpy()}
         cache = (
@@ -613,6 +865,14 @@ def run_parity(args) -> None:
         worst_depth = max(worst_depth, d_depth)
         worst_conf = max(worst_conf, d_conf)
         worst_cache = max(worst_cache, d_cache)
+        if args.dump_dir:
+            # rgb is PRE-rotation, depth is POST -- so a correct baked rotation
+            # shows the panels 90 degrees apart, which is the point
+            dump_depth(
+                os.path.join(args.dump_dir, f"frame_{i:03d}_graph.png"),
+                out["depth"],
+                rgb=rgb.numpy(),
+            )
         print(
             f"  frame {i}: |d depth| {d_depth:.3e}  |d conf| {d_conf:.3e}  "
             f"|d cache| {d_cache:.3e}"
@@ -638,8 +898,6 @@ def run_parity(args) -> None:
 
 def main():
     args = parse_args()
-    from runtime_utils import set_torch_threads
-
     # torch (like onnxruntime) sizes its pool from the machine's cores, not
     # from our cpuset -- on a busy login node that is pure contention
     set_torch_threads()
