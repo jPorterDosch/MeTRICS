@@ -102,6 +102,7 @@ from export_onnx import (  # noqa: E402
     ort_session,
     probe_frame0,
     run_by_name,
+    set_providers,
     validate_rollout,
 )
 from runtime_utils import set_torch_threads  # noqa: E402
@@ -180,6 +181,24 @@ def parse_args():
         type=float,
         default=2e-3,
         help="max allowed |depth diff| (use ~1e-1 for fp16 graphs)",
+    )
+    ap.add_argument(
+        "--cuda",
+        action="store_true",
+        help="run the ONNX side on CUDAExecutionProvider. The eager side "
+        "stays on CPU, so the reported diffs then include device numerics, "
+        "not just exporter fidelity -- raise --threshold accordingly. Needs "
+        "onnxruntime-gpu, plus cuDNN 9 (torch bundles 8) -- on Oscar, "
+        "`module load cudnn/9.8.0.87-12-y7fu`",
+    )
+    ap.add_argument(
+        "--tf32",
+        action="store_true",
+        help="let the CUDA provider use TF32 for fp32 matmuls (its own "
+        "default, which set_providers turns OFF -- see its docstring). Costs "
+        "~5e-4 relative per product against the CPU fp32 eager reference, "
+        "which showed up as ~1e-2 on the cache and ~3e-4 on depth; use "
+        "--threshold 1e-2 with it",
     )
     ap.add_argument("--seed", type=int, default=0)
     spot = ap.add_argument_group(
@@ -752,22 +771,41 @@ def spot_frames(args) -> list:
     return frames
 
 
-def dump_depth(path: str, arr, rgb=None) -> None:
-    """Write a depth map as a PNG for the one check no assertion can make:
-    looking at it. Orientation errors are invisible numerically -- eager and
-    graph agree on an upside-down map -- but obvious at a glance."""
-    d = np.asarray(arr).squeeze()
-    finite = np.isfinite(d) & (d > 0)
-    lo, hi = (d[finite].min(), d[finite].max()) if finite.any() else (0.0, 1.0)
-    norm = np.clip((d - lo) / max(hi - lo, 1e-9), 0, 1)
-    img = Image.fromarray((norm * 255).astype(np.uint8))
+def _to_pil(chw_or_hw, is_depth: bool):
+    a = np.asarray(chw_or_hw).squeeze()
+    if is_depth:
+        finite = np.isfinite(a) & (a > 0)
+        lo, hi = (a[finite].min(), a[finite].max()) if finite.any() else (0.0, 1.0)
+        a = np.clip((a - lo) / max(hi - lo, 1e-9), 0, 1)
+        return Image.fromarray((a * 255).astype(np.uint8)).convert("RGB")
+    return Image.fromarray((a.transpose(1, 2, 0) * 255).astype(np.uint8))
+
+
+def dump_depth(path: str, depth, rgb=None, rotate: bool = False) -> None:
+    """Write a panel for the one check no assertion can make: looking at it.
+
+    Orientation errors are invisible numerically -- eager and graph agree
+    perfectly on an upside-down map -- so this is the only place they surface.
+
+    With a baked rotation the panels are
+        [ graph input | input rotated as the graph rotates it | graph output ]
+    and the check is that the RIGHT TWO match in orientation and structure.
+    Comparing the output against the raw input only proves that *a* rotation
+    happened; the middle panel is what distinguishes clockwise from
+    counter-clockwise, which is the error that would otherwise ship."""
+    panels = []
     if rgb is not None:
-        r = (np.asarray(rgb).squeeze().transpose(1, 2, 0) * 255).astype(np.uint8)
-        panel = Image.new("RGB", (img.width + r.shape[1], max(img.height, r.shape[0])))
-        panel.paste(Image.fromarray(r), (0, 0))
-        panel.paste(img.convert("RGB"), (r.shape[1], 0))
-        img = panel
-    img.save(path)
+        panels.append(_to_pil(rgb, is_depth=False))
+        if rotate:
+            panels.append(_to_pil(rotate_cw(torch.as_tensor(rgb)), is_depth=False))
+    panels.append(_to_pil(depth, is_depth=True))
+    w, h = sum(p.width for p in panels), max(p.height for p in panels)
+    sheet = Image.new("RGB", (w, h))
+    x = 0
+    for p in panels:
+        sheet.paste(p, (x, 0))
+        x += p.width
+    sheet.save(path)
 
 
 @torch.no_grad()
@@ -866,12 +904,15 @@ def run_parity(args) -> None:
         worst_conf = max(worst_conf, d_conf)
         worst_cache = max(worst_cache, d_cache)
         if args.dump_dir:
-            # rgb is PRE-rotation, depth is POST -- so a correct baked rotation
-            # shows the panels 90 degrees apart, which is the point
+            # rgb is PRE-rotation, depth is POST: they SHOULD be 90 degrees
+            # apart. The middle panel (rgb rotated the way the graph rotates
+            # it) is the one to compare the depth against -- it is what tells
+            # clockwise from counter-clockwise.
             dump_depth(
                 os.path.join(args.dump_dir, f"frame_{i:03d}_graph.png"),
                 out["depth"],
                 rgb=rgb.numpy(),
+                rotate=args.rotate,
             )
         print(
             f"  frame {i}: |d depth| {d_depth:.3e}  |d conf| {d_conf:.3e}  "
@@ -901,6 +942,10 @@ def main():
     # torch (like onnxruntime) sizes its pool from the machine's cores, not
     # from our cpuset -- on a busy login node that is pure contention
     set_torch_threads()
+    if args.cuda:
+        set_providers("CUDAExecutionProvider", "CPUExecutionProvider", tf32=args.tf32)
+    elif args.tf32:
+        raise SystemExit("--tf32 only means anything with --cuda")
     if args.cpu_unit:
         run_cpu_unit(args)
     else:

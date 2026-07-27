@@ -194,6 +194,52 @@ def is_sdpa_failure(exc: Exception) -> bool:
 # ---------------------------------------------------------------------------
 # onnxruntime helpers
 # ---------------------------------------------------------------------------
+# Execution providers for every session built here. CPU by default: the whole
+# point of the parity checks is exporter fidelity, and CPU-vs-CPU keeps device
+# numerics out of the comparison. set_providers() switches it for the one
+# question CPU cannot answer -- how the graph behaves on the hardware it will
+# actually be deployed to (fp16 especially: the CUDA kernels are different code
+# from the CPU path, which wraps unsupported fp16 ops in casts).
+_PROVIDERS: tuple = ("CPUExecutionProvider",)
+_PROVIDER_OPTIONS: dict = {}
+
+
+def set_providers(*names: str, tf32: bool = False) -> None:
+    """Choose the execution providers, verifying they actually EXIST.
+
+    onnxruntime silently falls back to CPU when a requested provider is
+    missing -- and the CPU wheel does not ship CUDA at all -- so 'validated on
+    GPU' can quietly mean 'validated on CPU again'. Refuse instead.
+
+    TF32 is disabled on CUDA unless tf32=True. The CUDA EP enables it by
+    default (use_tf32=1, ORT >= 1.17): fp32 matmuls are rounded to a 10-bit
+    mantissa on the way into the tensor cores -- fp32's exponent range, fp16's
+    precision, ~5e-4 relative per product. The eager reference every check
+    here compares against runs on CPU in true fp32, so leaving it on makes
+    every --cuda diff report device precision rather than exporter fidelity,
+    at roughly 1e-2 absolute on the KV cache -- ten times PROBE_GATE, which is
+    an absolute gate calibrated for an exact comparison. That is a real
+    frame-0 probe failure on a correct graph, so the default is off. Note
+    torch disagrees: allow_tf32 has been False for matmuls since 1.12, so
+    moving the eager side to GPU would NOT have closed the gap -- the fix
+    belongs here, at the provider option."""
+    global _PROVIDERS, _PROVIDER_OPTIONS
+    have = set(ort.get_available_providers())
+    missing = [n for n in names if n not in have]
+    if missing:
+        raise SystemExit(
+            f"onnxruntime has no {missing} (available: {sorted(have)}). The "
+            "default 'onnxruntime' wheel is CPU-only; CUDA needs "
+            "'pip install onnxruntime-gpu' (it replaces onnxruntime -- the two "
+            "provide the same module and cannot be installed side by side)."
+        )
+    _PROVIDERS = tuple(names)
+    _PROVIDER_OPTIONS = {}
+    if "CUDAExecutionProvider" in names:
+        _PROVIDER_OPTIONS["CUDAExecutionProvider"] = {"use_tf32": "1" if tf32 else "0"}
+    ort_session.cache_clear()
+
+
 @functools.lru_cache(maxsize=1)
 def ort_session(path: str):
     """Cached because building a session over this graph is expensive (~20 s
@@ -209,7 +255,20 @@ def ort_session(path: str):
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = n_cpus()
     opts.inter_op_num_threads = 1
-    return ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
+    providers = [
+        (n, _PROVIDER_OPTIONS[n]) if n in _PROVIDER_OPTIONS else n for n in _PROVIDERS
+    ]
+    sess = ort.InferenceSession(path, opts, providers=providers)
+    # ORT assigns nodes per provider and reports what it ACTUALLY used; a
+    # requested provider that ends up unused would make a "GPU" run a CPU run
+    used = sess.get_providers()
+    if _PROVIDERS[0] not in used:
+        raise SystemExit(f"requested {_PROVIDERS[0]} but the session runs on {used}")
+    if used[0] != "CPUExecutionProvider":
+        # get_providers() reports names only, so the options -- which decide
+        # what the reported diffs even MEAN -- would otherwise be invisible
+        print(f"onnxruntime providers: {used} options: {_PROVIDER_OPTIONS}")
+    return sess
 
 
 def graph_io_names() -> tuple[list[str], list[str]]:
@@ -677,6 +736,28 @@ def parse_args():
         "dominates the run at --window 20; lower it to trade the window check "
         "for time -- the frame-0 probe still asserts unconditionally",
     )
+    ap.add_argument(
+        "--cuda",
+        action="store_true",
+        help="run the post-export checks on CUDAExecutionProvider instead "
+        "of CPU. The export itself is unaffected (tracing is CPU-only); this "
+        "is for validating on the hardware the graph will be deployed to, "
+        "which matters most for --fp16 (CUDA fp16 kernels are different code "
+        "from the CPU path). Needs onnxruntime-gpu; fails loudly otherwise. "
+        "ORT >= 1.20 wants cuDNN 9, which is NOT the cuDNN 8 torch bundles -- "
+        "on Oscar, `module load cudnn/9.8.0.87-12-y7fu` first or the CUDA "
+        "provider silently falls back to CPU (ort_session catches it)",
+    )
+    ap.add_argument(
+        "--tf32",
+        action="store_true",
+        help="let the CUDA provider use TF32 for fp32 matmuls (its own "
+        "default, which set_providers turns OFF). TF32 costs ~5e-4 relative "
+        "per product, which lands ~1e-2 on the cache and FAILS the frame-0 "
+        "probe on a perfectly correct graph -- the eager reference is CPU "
+        "fp32. Pass this only to measure deployment numerics, not to validate "
+        "the export, and expect the probe to trip",
+    )
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument(
         "--out",
@@ -702,6 +783,10 @@ def main():
     # same reason as ort_session's thread sizing: torch also defaults to the
     # machine's core count, which oversubscribes a cpuset-restricted node
     set_torch_threads()
+    if args.cuda:
+        set_providers("CUDAExecutionProvider", "CPUExecutionProvider", tf32=args.tf32)
+    elif args.tf32:
+        raise SystemExit("--tf32 only means anything with --cuda")
 
     wrapper = build_wrapper(args)
     step_path = f"{args.out}_step.onnx"
