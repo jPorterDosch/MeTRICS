@@ -230,8 +230,11 @@ def set_providers(*names: str, tf32: bool = False) -> None:
         raise SystemExit(
             f"onnxruntime has no {missing} (available: {sorted(have)}). The "
             "default 'onnxruntime' wheel is CPU-only; CUDA needs "
-            "'pip install onnxruntime-gpu' (it replaces onnxruntime -- the two "
-            "provide the same module and cannot be installed side by side)."
+            "onnxruntime-gpu. Both wheels install the same `onnxruntime` "
+            "package, and pip will happily co-install them -- whichever landed "
+            "last wins -- so uninstall BOTH, then 'pip install "
+            "onnxruntime-gpu'. Requesting a provider the live build lacks is "
+            "what you are seeing here."
         )
     _PROVIDERS = tuple(names)
     _PROVIDER_OPTIONS = {}
@@ -744,8 +747,9 @@ def parse_args():
         "is for validating on the hardware the graph will be deployed to, "
         "which matters most for --fp16 (CUDA fp16 kernels are different code "
         "from the CPU path). Needs onnxruntime-gpu; fails loudly otherwise. "
-        "ORT >= 1.20 wants cuDNN 9, which is NOT the cuDNN 8 torch bundles -- "
-        "on Oscar, `module load cudnn/9.8.0.87-12-y7fu` first or the CUDA "
+        "It also needs cuDNN 9 on the library path (onnxruntime-gpu 1.22, the "
+        "pinned build; torch bundles cuDNN 8, which does NOT satisfy it) -- on "
+        "Oscar, `module load cudnn/9.8.0.87-12-y7fu` first, or the CUDA "
         "provider silently falls back to CPU (ort_session catches it)",
     )
     ap.add_argument(
