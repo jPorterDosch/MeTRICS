@@ -27,3 +27,20 @@ scikit-learn
 gsplat
 evo
 open3d
+# ONNX export (src/export_onnx.py)
+onnx==1.16.1
+# The GPU wheel, NOT plain onnxruntime, even for CPU-only work: it ships the
+# CPU provider too, and the two wheels install the same `onnxruntime` package
+# (~550 overlapping files), so co-installing them silently leaves whichever
+# landed last in charge. If both are already present, `pip uninstall` BOTH
+# before reinstalling this one -- removing either alone guts the survivor.
+# --cuda additionally needs CUDA 12 + cuDNN 9 on the library path (torch
+# bundles cuDNN 8; on Oscar: module load cudnn/9.8.0.87-12-y7fu).
+onnxruntime-gpu==1.22.0
+# onnxconverter-common is needed ONLY for --fp16 (best-effort) and is
+# deliberately NOT listed as a requirement: it pins protobuf==3.20.2, which
+# would downgrade the env out from under wandb/tensorboard. --no-deps cannot
+# be expressed per-line in a requirements file, so install it by hand -- it
+# imports and runs fine against protobuf>=6.31:
+#   pip install --no-deps onnxconverter-common==1.14.0
+# Without it, --fp16 warns and skips; every other path is unaffected.
