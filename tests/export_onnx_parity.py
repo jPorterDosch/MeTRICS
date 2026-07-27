@@ -262,21 +262,33 @@ def check_sincos_patch_cost() -> None:
             "run this check before any StreamingDepthExport is constructed -- "
             "the constructor installs the patch process-wide"
         )
-    pos = torch.arange(64, dtype=torch.float32)  # covers the largest grid axis
-    for embed_dim in (64, 256):
-        ref = head_utils.make_sincos_pos_embed(embed_dim, pos)
-        got = _make_sincos_pos_embed_f32(embed_dim, pos)
-        if got.dtype != ref.dtype or got.shape != ref.shape:
-            raise AssertionError(
-                f"sincos drop-in returns {got.dtype}{tuple(got.shape)}, "
-                f"original {ref.dtype}{tuple(ref.shape)}"
-            )
-        diff = (ref.double() - got.double()).abs().max().item()
-        if diff > 1e-5:
-            raise AssertionError(
-                f"float32 sincos embedding deviates by {diff:.2e} at "
-                f"embed_dim={embed_dim} -- too far from the base model"
-            )
+    # non-fp32 `pos` is the case the export itself never traces: the heads run
+    # fp32 there, but the patch is process-wide, so anything running the model
+    # under bf16/fp16 autocast hits it too. The original always ends in
+    # `emb.float()`; a drop-in that followed pos.dtype would quietly hand the
+    # DPT head a half-precision embedding.
+    for dtype in (torch.float32, torch.bfloat16, torch.float16):
+        pos = torch.arange(64, dtype=dtype)  # covers the largest grid axis
+        for embed_dim in (64, 256):
+            ref = head_utils.make_sincos_pos_embed(embed_dim, pos)
+            got = _make_sincos_pos_embed_f32(embed_dim, pos)
+            if got.dtype != torch.float32 or got.dtype != ref.dtype:
+                raise AssertionError(
+                    f"sincos drop-in returns {got.dtype} for {dtype} pos; "
+                    f"original returns {ref.dtype} (float32 is the contract)"
+                )
+            if got.shape != ref.shape:
+                raise AssertionError(
+                    f"sincos drop-in returns {tuple(got.shape)}, original "
+                    f"{tuple(ref.shape)}"
+                )
+            diff = (ref.double() - got.double()).abs().max().item()
+            if diff > 1e-5:
+                raise AssertionError(
+                    f"float32 sincos embedding deviates by {diff:.2e} at "
+                    f"embed_dim={embed_dim}, pos dtype {dtype} -- too far "
+                    "from the base model"
+                )
     print(
         f"[cpu-unit] float32 sincos patch within {diff:.2e} of the original "
         "(x0.1 head ratio before it reaches the features)"

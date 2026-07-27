@@ -515,6 +515,17 @@ def check_fp16_numerics(fp16_path: str, wrapper: StreamingDepthExport, args) -> 
 
 
 def try_fp16(paths: list, wrapper: StreamingDepthExport, args) -> None:
+    try:
+        import onnxconverter_common  # noqa: F401
+    except ImportError:
+        print(
+            "WARNING: --fp16 needs onnxconverter-common, which requirements.txt "
+            "deliberately does NOT install (its protobuf==3.20.2 pin would "
+            "downgrade the env under wandb/tensorboard). Install it with:\n"
+            "  pip install --no-deps onnxconverter-common==1.14.0\n"
+            "Skipping fp16; the fp32 graph is unaffected."
+        )
+        return
     warn_fp16(paths)
     for p in paths:
         fp16_path = p.replace(".onnx", "_fp16.onnx")

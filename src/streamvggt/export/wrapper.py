@@ -94,7 +94,9 @@ def _make_sincos_pos_embed_f32(
     Parity with the unpatched model: `omega` does not depend on `pos`, so it
     is still built in float64 and only cast down afterwards -- the baked
     frequencies are then the correctly rounded float32 of the original's, and
-    only the outer product and sin/cos run at lower precision. Measured
+    only the outer product and sin/cos run at lower precision. The return
+    dtype matches the original's `emb.float()` unconditionally (pinned by
+    check_sincos_patch_cost across input dtypes). Measured
     residual is 3.4e-6 on the embedding, which the DPT head scales by
     ratio=0.1 before adding it to the features -- ~3e-7, four orders below
     the 2e-3 parity threshold (pinned at 1e-5 by check_sincos_patch_cost in
@@ -104,10 +106,14 @@ def _make_sincos_pos_embed_f32(
         raise ValueError(f"embed_dim must be even, got {embed_dim}")
     omega = torch.arange(embed_dim // 2, dtype=torch.double, device=pos.device)
     omega /= embed_dim / 2.0
-    omega = (1.0 / omega_0**omega).to(pos.dtype)
-    pos = pos.reshape(-1)
-    out = torch.einsum("m,d->md", pos, omega)
-    return torch.cat([torch.sin(out), torch.cos(out)], dim=1)
+    omega = (1.0 / omega_0**omega).float()
+    # float32 in, float32 out, whatever `pos` is: the original computes in
+    # float64 and ends with `return emb.float()`, so a caller under bf16/fp16
+    # autocast gets float32 from it. Following pos.dtype instead would hand
+    # the DPT head a half-precision positional embedding -- a divergence the
+    # export's own fp32 tracing would never reveal.
+    out = torch.einsum("m,d->md", pos.reshape(-1).float(), omega)
+    return torch.cat([torch.sin(out), torch.cos(out)], dim=1).float()
 
 
 class _ConstantPositions:
