@@ -190,25 +190,20 @@ class DepthConditioner(nn.Module):
                     in_ch = 2 * patch_size * patch_size
                 else:
                     in_ch = enc_channels
+                # LoRA-B pattern: the projection ITSELF is the zero, so the
+                # injected signal is an exact no-op at init (model ==
+                # pretrained baseline) while grad(proj) does not depend on
+                # proj's own value -- it can train from step 0, exactly like
+                # the head arm's zero-init convs and lora_B. Exactly ONE zero
+                # in the path: no gate on top (a scalar zero gate scales
+                # grad(proj) and provably deadlocks: the hammer_sweep gated
+                # arms ended at gate -0.003/-0.011 with proj still at random
+                # init; that scheme was removed 2026-07-25 -- gated
+                # checkpoints from before then are not loadable on this
+                # code and need the pre-removal revision to rebuild).
                 self.token_proj = nn.Conv2d(in_ch, token_dim, kernel_size=1)
-                nn.init.normal_(self.token_proj.weight, std=0.02)
+                nn.init.zeros_(self.token_proj.weight)
                 nn.init.zeros_(self.token_proj.bias)
-                # Learnable scalar gate initialized to 0: at init the injected signal
-                # is a no-op and the model output equals the pretrained baseline.
-                # (Only ONE zero in the path -- a zero gate on top of a zero-init
-                # projection would kill both gradients.)
-                # TODO(soft deadlock): one zero is still one too many when it is a
-                # scalar on the WHOLE branch: grad(token_proj) is scaled by the
-                # gate, so at gate=0 token_proj gets no gradient and can only
-                # learn ~|gate| slower thereafter. The gate, meanwhile, only grows
-                # if the (still-random) token_proj output is useful -- so it hovers
-                # at ~0 (measured -0.003 after 5 epochs in the HAMMER sweep, arm
-                # b536d87d) and the token arm effectively cannot bootstrap. Fix by
-                # copying the LoRA pattern (zero-init the token_proj OUTPUT and
-                # drop the scalar gate: its grad does not depend on itself, cf.
-                # lora_B which trained fine in the same runs), or init the gate
-                # nonzero (~0.1), or give the gate its own high-LR param group.
-                self.gate = nn.Parameter(torch.zeros(()))
             case _:
                 raise ValueError(f"unknown injection type: {self.injection!r}")
 
@@ -326,8 +321,9 @@ class DepthConditioner(nn.Module):
 
     def _project_token(self, x: torch.Tensor) -> torch.Tensor:
         """Projection for InjectionType.TOKEN (the pre-cache PROPOSED arm):
-        produce per-patch features at the backbone patch grid, gated by the
-        zero-init scalar, to be added residually to the RGB patch tokens."""
+        produce per-patch features at the backbone patch grid, to be added
+        residually to the RGB patch tokens. The projection is zero-init, so
+        the injection starts as an exact no-op."""
         B, S = x.shape[:2]
         flat = x.flatten(0, 1)  # [B*S, C, h, w]
         match self.cfg.encoder:
@@ -343,7 +339,6 @@ class DepthConditioner(nn.Module):
                 )
         y = self.token_proj(flat)  # [B*S, token_dim, ph, pw]
         y = y.flatten(2).transpose(1, 2)  # [B*S, P_patch, token_dim]
-        y = self.gate * y
         return y.reshape(B, S, *y.shape[1:])
 
 
