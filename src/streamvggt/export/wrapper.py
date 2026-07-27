@@ -7,14 +7,28 @@ carry: list-of-dict I/O, HF ModelOutput, autocast contexts, and python-side
 cache management. Camera / point / track heads are dropped -- depth only.
 
 I/O contract (all variants share it; ONE graph serves every frame):
-  inputs : rgb   [1, 3, H, W]  float32 in [0, 1]
-           depth [1, 1, H, W]  float32 sparse METRIC depth (metres); invalid
-                               pixels are anything outside [depth_min,
-                               depth_max] -- the validity mask is derived
-                               IN-GRAPH as (depth >= depth_min) &
-                               (depth <= depth_max), matching the consumer's
-                               convention, so no third input exists. The base
-                               variant accepts and ignores `depth`.
+  inputs : rgb   [1, 3, H, W]  float32 in [0, 1] -- NOT the [-1, 1] ImgNorm
+                               tensor the datasets and visualize_spot.py's
+                               load_spot_views build. That is the dataset
+                               format; finetune_depth._prepare_batch rescales
+                               it with (img + 1) / 2 before the model, and
+                               Aggregator._encode then applies the ImageNet
+                               mean/std itself (its docstring: "images ... in
+                               range [0, 1]"). Feed pixel/255, not pixel/255
+                               * 2 - 1.
+           sparse_depth [1, 1, H, W]  float32 sparse METRIC depth (metres);
+                               invalid pixels are anything outside
+                               [depth_min, depth_max] -- the validity mask is
+                               derived IN-GRAPH as (d >= depth_min) &
+                               (d <= depth_max), matching the consumer's
+                               convention, so no third input exists. NOT
+                               named `depth`: ONNX value names share one
+                               namespace with the outputs and the exporter
+                               silently renames a collision (`depth` ->
+                               `depth.1`). The base variant accepts and
+                               ignores its VALUES but still exposes the input
+                               (see StreamingDepthExport._zero_from -- an
+                               untied input is pruned by the tracer).
            past_k_00..past_v_23: 48 cache tensors [1, 16, n_frames, P, 64],
                                dynamic dim 2. Frame 0 feeds n_frames == 0
                                (see StreamingDepthExport.empty_cache). The
@@ -24,15 +38,18 @@ I/O contract (all variants share it; ONE graph serves every frame):
                                SYMBOLICALLY, so the selection stays dynamic
                                in-graph and no separate init graph exists --
                                asserted per-export by export_onnx.probe_frame0
-                               and pinned by the divergent-token case in
-                               tests/export_onnx_parity.py.
-  outputs: depth [1, H, W], depth_conf [1, H, W], new_k_00..new_v_23
+                               and pinned by the divergent-token smoke model
+                               in tests/export_onnx_parity.py.
+  outputs: depth [1, H', W'], depth_conf [1, H', W'] where (H', W') is the
+           NETWORK orientation -- (W, H) with rotate=True, (H, W) otherwise
+           (rotated outputs are not rotated back) -- plus new_k_00..new_v_23
            (cache carried to the next call, already window-sliced).
 
-Rotation: with rotate_cw=True the graph rotates rgb+depth 90 degrees
-clockwise before the network and rotates the depth/conf outputs back, so the
-caller keeps one orientation. Implemented as transpose+flip (torch.rot90 has
-no ONNX symbolic in the TorchScript exporter).
+Rotation: with rotate=True the graph rotates rgb+depth 90 degrees clockwise
+before the network; the depth/conf outputs REMAIN in that rotated
+orientation ([1, W, H] for [H, W] inputs) -- the consumer wants the rotated
+maps, so no inverse rotation is applied. Implemented as transpose+flip
+(torch.rot90 has no ONNX symbolic in the TorchScript exporter).
 
 Sliding window: cache outputs are sliced to the last `window` frame slices
 in-graph, so steady-state memory is bounded at window * per-frame-KV.
@@ -69,16 +86,25 @@ def _make_sincos_pos_embed_f32(
     embed_dim: int, pos: torch.Tensor, omega_0: float = 100
 ) -> torch.Tensor:
     """Float32 drop-in for heads.utils.make_sincos_pos_embed. The original
-    builds omega in float64; eager PyTorch silently type-promotes the einsum,
-    but the exported ONNX Einsum keeps the mixed float/double inputs and
-    onnxruntime rejects the graph. Computing in pos.dtype (float32) changes
-    the embedding by ~1e-7 -- and the eager parity reference runs the SAME
-    patched function, so graph-vs-eager parity is unaffected."""
+    builds omega in float64 and eager PyTorch type-promotes the einsum (it
+    casts back to float32 on return, so nothing downstream sees float64), but
+    the exported ONNX Einsum keeps the mixed float/double inputs and
+    onnxruntime rejects the graph.
+
+    Parity with the unpatched model: `omega` does not depend on `pos`, so it
+    is still built in float64 and only cast down afterwards -- the baked
+    frequencies are then the correctly rounded float32 of the original's, and
+    only the outer product and sin/cos run at lower precision. Measured
+    residual is 3.4e-6 on the embedding, which the DPT head scales by
+    ratio=0.1 before adding it to the features -- ~3e-7, four orders below
+    the 2e-3 parity threshold (pinned at 1e-5 by check_sincos_patch_cost in
+    tests/export_onnx_parity.py). Graph-vs-eager parity is unaffected either
+    way: the eager reference runs this same patched function."""
     if embed_dim % 2 != 0:
         raise ValueError(f"embed_dim must be even, got {embed_dim}")
-    omega = torch.arange(embed_dim // 2, dtype=pos.dtype, device=pos.device)
+    omega = torch.arange(embed_dim // 2, dtype=torch.double, device=pos.device)
     omega /= embed_dim / 2.0
-    omega = 1.0 / omega_0**omega
+    omega = (1.0 / omega_0**omega).to(pos.dtype)
     pos = pos.reshape(-1)
     out = torch.einsum("m,d->md", pos, omega)
     return torch.cat([torch.sin(out), torch.cos(out)], dim=1)
@@ -92,23 +118,39 @@ class _ConstantPositions:
     and the cold branch re-runs torch.cartesian_prod -- which has no ONNX
     symbolic and kills the export. At a fixed export resolution the positions
     are a constant, so we precompute them eagerly once and always return
-    them (they trace into the graph as an initializer)."""
+    them (they trace into the graph as an initializer).
 
-    def __init__(self, positions: torch.Tensor) -> None:
+    Otherwise it matches PositionGetter exactly -- batch-expanded and cloned
+    -- and refuses a grid it was not built for, which is the failure mode of
+    baking a resolution into a getter the model keeps (see
+    StreamingDepthExport.__init__). Under tracing h/w arrive as Tensors and
+    the guard is skipped; the export resolution is fixed by construction
+    there, while eager (the parity reference) is where a second wrapper at a
+    different resolution could silently reuse the wrong grid."""
+
+    def __init__(self, positions: torch.Tensor, hw: tuple[int, int]) -> None:
         self.positions = positions  # [1, h*w, 2], int64
+        self.hw = hw
 
     def __call__(self, batch, h, w, device) -> torch.Tensor:
-        return self.positions.to(device)
+        if isinstance(h, int) and isinstance(w, int) and (h, w) != self.hw:
+            raise AssertionError(
+                f"position getter was baked for grid {self.hw}, called with "
+                f"{(h, w)} -- the model is shared by wrappers of different "
+                "resolutions; rebuild the wrapper for this resolution"
+            )
+        pos = self.positions.to(device)
+        # PositionGetter hands back a batch-expanded clone. `batch` can arrive
+        # as a traced Tensor (which expand would choke on) and the export is
+        # always B*S == 1, so only expand for a real python int > 1.
+        if isinstance(batch, int) and batch > 1:
+            pos = pos.expand(batch, -1, -1)
+        return pos.clone()
 
 
 def rotate_cw(x: torch.Tensor) -> torch.Tensor:
     """90 degrees clockwise over the last two dims == torch.rot90(x, k=-1)."""
     return x.transpose(-2, -1).flip(-1)
-
-
-def rotate_ccw(x: torch.Tensor) -> torch.Tensor:
-    """Inverse of rotate_cw == torch.rot90(x, k=1)."""
-    return x.transpose(-2, -1).flip(-2)
 
 
 class StreamingDepthExport(nn.Module):
@@ -146,8 +188,10 @@ class StreamingDepthExport(nn.Module):
         self.depth_min = float(depth_min)
         self.depth_max = float(depth_max)
 
-        # network-facing dims are POST-rotation
+        # network-facing dims are POST-rotation; image_hw is what the GRAPH
+        # takes (pre-rotation), which is what a consumer must feed
         h, w = image_hw
+        self.image_hw = (h, w)
         self.net_hw = (w, h) if self.rotate else (h, w)
         ps = self.aggregator.patch_size
         if self.net_hw[0] % ps or self.net_hw[1] % ps:
@@ -167,16 +211,25 @@ class StreamingDepthExport(nn.Module):
         self.num_heads = attn.num_heads
         self.head_dim = attn.head_dim
 
+        # Both patches below are DELIBERATE and both are visible outside this
+        # object: the wrapper takes ownership of `model` for export purposes
+        # (it is not a copy -- deep-copying the 1B checkpoint to keep the
+        # caller's model pristine is not worth 5 GB), and the sincos patch is
+        # process-wide. Construct the wrapper on a model you are exporting,
+        # not on one a training loop is still using. Both replacements are
+        # equivalent to the originals at the export resolution / in float32
+        # and are pinned by tests/export_onnx_parity.py --cpu-unit.
+        #
         # fixed-resolution export: swap the RoPE position getter for a
         # precomputed constant (see _ConstantPositions -- the original's
         # cache misses under tracing and re-enters aten::cartesian_prod,
-        # which has no ONNX symbolic). Mutates the wrapped aggregator, which
-        # the wrapper owns for export purposes.
+        # which has no ONNX symbolic). The getter guards its own grid, so a
+        # second wrapper at a different resolution fails loudly.
         if self.aggregator.position_getter is not None:
             ph, pw = self.net_hw[0] // ps, self.net_hw[1] // ps
             pos = torch.cartesian_prod(torch.arange(ph), torch.arange(pw))
             self.aggregator.position_getter = _ConstantPositions(
-                pos.view(1, ph * pw, 2)
+                pos.view(1, ph * pw, 2), (ph, pw)
             )
         # export-process-wide: float32 sincos embedding (see the drop-in's
         # docstring -- the original's float64 omega breaks the exported Einsum)
@@ -205,6 +258,26 @@ class StreamingDepthExport(nn.Module):
             for block in blocks:
                 block.attn.fused_attn = enabled
 
+    def _zero_from(self, depth: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        """An exactly-zero scalar that DEPENDS on `depth`, for the base variant.
+
+        The base arm ignores depth's values, but the I/O contract says every
+        variant exposes the same 50 inputs -- and the ONNX tracer prunes any
+        input no op consumes, so an untied `depth` silently vanishes from the
+        graph (asserted against by export_onnx.assert_graph_io).
+
+        The tied-in value is a BOOLEAN, deliberately: it is 0 or 1 in every
+        dtype the graph can be converted to, so `x * 0.0` is exactly 0.0. An
+        earlier version tied in the valid-pixel COUNT, which is fine in fp32
+        but overflows fp16 -- a dense depth map counts past 65504, the fp16
+        conversion casts that to inf, and inf * 0.0 = NaN poisons the entire
+        fp16 graph (export_onnx.check_fp16_numerics now also catches that
+        class of bug empirically). The predicate is the same validity mask
+        the conditioned arms derive, and it is finite for ANY input -- NaN
+        and Inf both compare False."""
+        mask = (depth >= self.depth_min) & (depth <= self.depth_max)
+        return (mask.sum() > 0).to(dtype) * 0.0
+
     def _conditioning(self, depth: torch.Tensor):
         """depth: [1, 1, H', W'] interpreted as [B, S, H, W]. Returns
         (injected_patch_feats, depth_head_residuals) for the active arm."""
@@ -228,6 +301,8 @@ class StreamingDepthExport(nn.Module):
 
         images = rgb.unsqueeze(1)  # [1, 1, 3, H', W']
         feats, residuals = self._conditioning(depth)
+        if self.conditioner is None:
+            images = images + self._zero_from(depth, images.dtype)
 
         # fresh list every call -- the aggregator mutates it in place
         pkv = (
@@ -259,9 +334,8 @@ class StreamingDepthExport(nn.Module):
             # (negative Slice clamps), then keeps the most recent W frames.
             out_cache += [k[:, :, -self.window :], v[:, :, -self.window :]]
 
-        if self.rotate:
-            depth_pred = rotate_ccw(depth_pred)
-            conf = rotate_ccw(conf)
+        # outputs deliberately stay in the rotated (network) orientation --
+        # the consumer wants rotated depth maps, so no rotate_ccw here
         return depth_pred, conf, out_cache
 
 

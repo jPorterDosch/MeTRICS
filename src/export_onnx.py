@@ -1,21 +1,31 @@
 """Export StreamVGGT / MetricStreamVGGT streaming depth to ONNX.
 
 One ONNX call == one frame. The exported graph(s) take `rgb [1,3,H,W]` (in
-[0,1]) and `depth [1,1,H,W]` (sparse METRIC depth; the validity mask is
-derived in-graph as 0.01 m <= d <= 100 m) plus 48 KV-cache tensors
-[1,16,n_frames,P,64] with a dynamic frame axis, and return `depth [1,H,W]`,
-`depth_conf [1,H,W]` and the 48 updated cache tensors, already sliced to the
-last `--window` frames. See streamvggt/export/wrapper.py for the full I/O
-contract, the baked rotation, and the documented frame-0-eviction /
-scale-drift caveats.
+[0,1]) and `sparse_depth [1,1,H,W]` (sparse METRIC depth; the validity mask
+is derived in-graph as 0.01 m <= d <= 100 m) plus 48 KV-cache tensors
+[1,16,n_frames,P,64] with a dynamic frame axis, and return `depth` /
+`depth_conf` in the NETWORK orientation ([1,W,H] with --rotate, [1,H,W]
+otherwise -- rotated outputs are not rotated back) and the 48 updated cache
+tensors, already sliced to the last `--window` frames. See
+streamvggt/export/wrapper.py for the full I/O contract, the baked rotation,
+and the documented frame-0-eviction / scale-drift caveats.
+
+Every variant exports the SAME 50 inputs / 50 outputs -- including the base
+arm, which ignores `sparse_depth`'s values but must still expose the input
+(the tracer prunes inputs nothing consumes, so the wrapper ties it in with an
+exactly-zero term). The input is NOT called `depth`: that name belongs to the
+predicted output, and the exporter silently renames a collision (`depth` ->
+`depth.1`). assert_graph_io re-checks the contract against the loaded graph
+on every export, and run_by_name refuses any feed that does not match it
+name-for-name.
 
 Single graph, all frames: frame 0 is served by feeding 48 zero-length
 caches. The aggregator's frame-0 vs later-frame camera/register token choice
 is derived from the cache's shape, which the tracer records symbolically, so
 the selection stays dynamic in the exported graph (verified empirically: a
 graph exported with deliberately divergent token slots matches eager at both
-frame 0 and later frames -- see the divergent-token case in
-tests/export_onnx_parity.py). Because that dynamism is a tracer behavior,
+frame 0 and later frames -- the smoke model in tests/export_onnx_parity.py
+forces those slots apart). Because that dynamism is a tracer behavior,
 not a language guarantee, every export runs a frame-0 probe against the
 eager wrapper that ASSERTS it held (depth AND cache outputs, gate 1e-3; the
 cache contains the token rows verbatim, so a mis-tokened frame 0 cannot
@@ -29,6 +39,7 @@ Examples (compute node; the base checkpoint is ~5 GB in fp32):
 """
 
 import argparse
+import functools
 import os
 import sys
 
@@ -45,6 +56,7 @@ from streamvggt.export import (  # noqa: E402
     cache_output_names,
     merge_lora,
 )
+from runtime_utils import n_cpus, set_torch_threads  # noqa: E402
 from streamvggt.models.streamvggt import StreamVGGT  # noqa: E402
 from visualize_depth import (  # noqa: E402
     load_saved_args,
@@ -103,9 +115,10 @@ def build_wrapper(args) -> StreamingDepthExport:
         window=args.window,
         rotate=args.rotate,
     )
-    if args.weights and args.variant and wrapper.variant != args.variant:
+    if args.variant and wrapper.variant != args.variant:
+        source = "the run's config" if args.weights else "--ckpt (base implied)"
         raise SystemExit(
-            f"--variant {args.variant} does not match the run's config "
+            f"--variant {args.variant} does not match {source} "
             f"({wrapper.variant}); drop --variant to infer it"
         )
     print(
@@ -150,36 +163,144 @@ def export_step(wrapper: StreamingDepthExport, args, path: str) -> str:
     dyn = {n: {2: "n_frames"} for n in cache_input_names()}
     dyn.update({n: {2: "n_frames_out"} for n in cache_output_names()})
     print(f"exporting step graph -> {path} (opset {args.opset})")
+    input_names, output_names = graph_io_names()
     torch.onnx.export(
         StepWrapper(wrapper),
         (rgb, d, *cache),
         path,
-        input_names=["rgb", "depth", *cache_input_names()],
-        output_names=["depth", "depth_conf", *cache_output_names()],
+        input_names=input_names,
+        output_names=output_names,
         dynamic_axes=dyn,
         opset_version=args.opset,
         do_constant_folding=True,
     )
+    ort_session.cache_clear()  # never serve a session built from the old file
     return path
 
 
 # ---------------------------------------------------------------------------
 # onnxruntime helpers
 # ---------------------------------------------------------------------------
+@functools.lru_cache(maxsize=1)
 def ort_session(path: str):
+    """Cached because building a session over this graph is expensive (~20 s
+    for the tiny smoke model) and the probe / rollout / orientation checks all
+    run the SAME file; export_step clears the cache, so a re-export to the
+    same path can never be served a stale session.
+
+    Threads are sized from the affinity mask: left alone, onnxruntime builds
+    its pool from the machine's core count (48 here) and then tries to pin one
+    thread per core -- on a restricted node that is a wall of
+    pthread_setaffinity_np errors followed by 48 threads fighting over the one
+    core we were given."""
     import onnxruntime as ort
 
-    return ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = n_cpus()
+    opts.inter_op_num_threads = 1
+    return ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
+
+
+def graph_io_names() -> tuple[list[str], list[str]]:
+    """The I/O contract every exported graph must satisfy, in one place --
+    also the names handed to torch.onnx.export, so the two cannot drift.
+
+    The sparse-depth INPUT is not called `depth`: ONNX value names share one
+    namespace, and the exporter silently renames a collision (input `depth`
+    became `depth.1` once it stopped being pruned). `depth` is the predicted
+    output; `sparse_depth` is the measured input."""
+    return (
+        ["rgb", "sparse_depth", *cache_input_names()],
+        ["depth", "depth_conf", *cache_output_names()],
+    )
+
+
+def assert_graph_io(sess, path: str) -> None:
+    """Fail loudly if the exported graph's I/O deviates from the contract.
+
+    Two failure modes, both silent and both observed: the tracer PRUNES an
+    input no op consumes (the base arm ignores the sparse depth, so its graph
+    shipped with 49 inputs), and it RENAMES an input whose name collides with
+    an output (`depth` -> `depth.1`). Either way the consumer feeds a tensor
+    the graph does not have. Checked on every export, before any parity
+    number is reported."""
+    want_in, want_out = graph_io_names()
+    collide = sorted(set(want_in) & set(want_out))
+    if collide:
+        raise SystemExit(
+            f"I/O contract is ambiguous: {collide} used as both input and "
+            "output name; the exporter will rename one of them"
+        )
+    got_in = [i.name for i in sess.get_inputs()]
+    got_out = [o.name for o in sess.get_outputs()]
+    problems = []
+    for kind, want, got in (("input", want_in, got_in), ("output", want_out, got_out)):
+        missing, extra = sorted(set(want) - set(got)), sorted(set(got) - set(want))
+        if missing:
+            problems.append(f"{kind}s dropped by the exporter: {missing}")
+        if extra:
+            problems.append(f"unexpected {kind}s: {extra}")
+    if problems:
+        raise SystemExit(
+            f"{path}: graph I/O contract violated ({len(got_in)} inputs / "
+            f"{len(got_out)} outputs, expected {len(want_in)}/{len(want_out)})"
+            + "".join(f"\n  - {p}" for p in problems)
+        )
+
+
+def assert_graph_geometry(sess, wrapper: StreamingDepthExport, path: str) -> None:
+    """Check the graph's DECLARED shapes against the wrapper's -- this is
+    where a --height / --width mismatch with the export is caught, at load
+    time, instead of as a confusing ORT error mid-rollout.
+
+    Only dims the graph states as integers are compared. The INPUTS are fully
+    static; the depth/conf OUTPUTS are not -- the DPT head sizes its
+    interpolations from traced tensor shapes, so the exporter declares them
+    symbolically ('Gatherdepth_dim_1') even though they are constant in
+    practice. The output orientation is therefore checked on a real run
+    instead (validate_rollout here, run_parity in the parity test), which
+    also covers --rotate: `rgb` is PRE-rotation, so its shape is identical
+    with and without the baked rotation and cannot tell them apart. At a
+    SQUARE resolution nothing can -- a rotation mismatch is a silent
+    transpose there, and only the parity diff exposes it."""
+    want = {
+        "rgb": [1, 3, *wrapper.image_hw],
+        "sparse_depth": [1, 1, *wrapper.image_hw],
+        "depth": [1, *wrapper.net_hw],
+        "depth_conf": [1, *wrapper.net_hw],
+    }
+    got = {v.name: v.shape for v in (*sess.get_inputs(), *sess.get_outputs())}
+    bad = []
+    for name, wanted in want.items():
+        if name not in got:
+            continue
+        stated = got[name]
+        if len(stated) != len(wanted) or any(
+            isinstance(g, int) and g != w for g, w in zip(stated, wanted)
+        ):
+            bad.append(f"{name}: graph {stated}, expected {wanted}")
+    if bad:
+        raise SystemExit(
+            f"{path}: graph geometry does not match this wrapper "
+            f"(rotate={wrapper.rotate}, input HxW={wrapper.image_hw})"
+            + "".join(f"\n  - {b}" for b in bad)
+        )
 
 
 def run_by_name(sess, feed: dict) -> dict:
     """Feed strictly by input name (never positional) and return outputs by
-    name -- the graph's own I/O names are the contract."""
+    name -- the graph's own I/O names are the contract. Extra keys are an
+    ERROR, not something to filter out: quietly dropping them is exactly what
+    hides an input the exporter pruned."""
     names = {i.name for i in sess.get_inputs()}
-    missing = names - feed.keys()
-    if missing:
-        raise KeyError(f"missing ONNX inputs: {sorted(missing)}")
-    outs = sess.run(None, {k: v for k, v in feed.items() if k in names})
+    missing = sorted(names - feed.keys())
+    extra = sorted(feed.keys() - names)
+    if missing or extra:
+        raise KeyError(
+            f"ONNX feed does not match the graph: missing {missing}, "
+            f"not in graph {extra}"
+        )
+    outs = sess.run(None, feed)
     return dict(zip([o.name for o in sess.get_outputs()], outs))
 
 
@@ -200,13 +321,23 @@ def probe_frame0(step_path: str, wrapper: StreamingDepthExport, args) -> float:
     rgb, d = dummy_frame(args, seed=20)
     ref_depth, _, ref_cache = wrapper._step(rgb, d, None)
     sess = ort_session(step_path)
-    feed = {"rgb": _np(rgb), "depth": _np(d)}
+    # contract first: a pruned input or a geometry mismatch would otherwise
+    # surface as a confusing runtime failure below
+    assert_graph_io(sess, step_path)
+    assert_graph_geometry(sess, wrapper, step_path)
+    feed = {"rgb": _np(rgb), "sparse_depth": _np(d)}
     for name, t in zip(cache_input_names(), wrapper.empty_cache()):
         feed[name] = _np(t)
     try:
         out = run_by_name(sess, feed)
-    except Exception as e:  # zero-length concat unsupported, shape errors, ...
-        raise SystemExit(f"frame-0 probe: graph rejects empty cache ({e})")
+    except Exception as e:
+        # The interesting failure is ORT refusing a zero-length input (empty
+        # Concat / Slice on an empty axis). Anything else -- a name mismatch,
+        # a shape rule, an unimplemented op -- is a DIFFERENT bug, so report
+        # the exception type instead of asserting a diagnosis.
+        raise SystemExit(
+            f"frame-0 probe: ORT failed on zero-length caches [{type(e).__name__}] {e}"
+        )
     d_depth = float(np.abs(out["depth"] - _np(ref_depth)).max())
     d_cache = max(
         float(np.abs(out[n] - _np(t)).max())
@@ -244,7 +375,7 @@ def validate_rollout(
     for i in range(n_frames):
         rgb, d = dummy_frame(args, seed=100 + i)
         ref_depth, ref_conf, eager_cache = wrapper._step(rgb, d, eager_cache)
-        feed = {"rgb": _np(rgb), "depth": _np(d)}
+        feed = {"rgb": _np(rgb), "sparse_depth": _np(d)}
         cache = (
             ort_cache
             if ort_cache is not None
@@ -282,6 +413,60 @@ def validate_rollout(
 # ---------------------------------------------------------------------------
 # fp16 (best-effort; ported from the PromptDA script, IO kept fp32)
 # ---------------------------------------------------------------------------
+# onnxconverter-common builds the fp16 model as ONE protobuf, which caps at
+# 2 GB. The 1B checkpoint is ~5 GB fp32 / ~2.4 GB fp16, so --fp16 CANNOT
+# succeed for it; it is useful for small models only. Intended behavior --
+# warned about up front and per-file, never fatal.
+FP16_PROTOBUF_LIMIT = 2 * 1024**3
+
+
+def weight_bytes(path: str) -> int:
+    """Bytes of initializer data in an ONNX model, EXTERNAL data included.
+
+    os.path.getsize is useless here: past 2 GB torch writes the weights to
+    sibling files and the .onnx keeps only the graph skeleton, so the 5 GB
+    model whose fp16 form cannot fit in a protobuf looks like a few MB on
+    disk. External tensors carry their size in an `external_data` entry keyed
+    "length"; internal ones are measured from the proto."""
+    import onnx
+
+    model = onnx.load(path, load_external_data=False)
+    total = 0
+    for init in model.graph.initializer:
+        if init.data_location == onnx.TensorProto.EXTERNAL:
+            total += sum(
+                int(kv.value) for kv in init.external_data if kv.key == "length"
+            )
+        else:
+            total += len(init.raw_data) or init.ByteSize()
+    return total
+
+
+def warn_fp16(fp32_paths: list) -> None:
+    print(
+        "WARNING: --fp16 is best-effort. onnxconverter-common serializes the "
+        "converted model as a single protobuf (2 GB hard limit), so any graph "
+        "whose fp16 weights exceed that -- the 1B checkpoint at ~2.4 GB does "
+        "-- will fail here. The fp32 export above is unaffected."
+    )
+    for p in fp32_paths:
+        if not os.path.isfile(p):
+            continue
+        try:
+            fp32 = weight_bytes(p)
+        except Exception as e:  # size warning must never break the export
+            print(f"fp16: could not size {p} [{type(e).__name__}] {e}")
+            continue
+        # fp16 halves the fp32 weights; IO stays fp32 but is negligible
+        if fp32 / 2 > FP16_PROTOBUF_LIMIT:
+            print(
+                f"WARNING: {p} holds {fp32 / 1024**3:.1f} GB of fp32 weights, "
+                f"so its fp16 form (~{fp32 / 2 / 1024**3:.1f} GB) exceeds the "
+                "2 GB protobuf limit -- the conversion below is expected to "
+                "fail."
+            )
+
+
 def convert_onnx_to_fp16(fp32_path: str, fp16_path: str) -> str:
     import onnx
     from onnxconverter_common import float16 as onnx_float16
@@ -293,14 +478,62 @@ def convert_onnx_to_fp16(fp32_path: str, fp16_path: str) -> str:
     return fp16_path
 
 
-def try_fp16(paths: list) -> None:
+@torch.no_grad()
+def check_fp16_numerics(fp16_path: str, wrapper: StreamingDepthExport, args) -> bool:
+    """Run one frame through the fp16 graph and refuse to ship a broken one.
+
+    A structurally valid fp16 graph can still be numerically dead: any value
+    that overflows fp16 becomes inf, and inf reaching a multiply or subtract
+    turns the whole map into NaN (that is exactly how a valid-pixel COUNT tied
+    into the base graph poisoned it -- see wrapper._zero_from). check_model
+    cannot see this; only running it can. Non-finite output DELETES the file
+    rather than leave a graph that looks exportable lying next to the good
+    one. The reported diff is informational -- fp16 legitimately differs from
+    fp32 by ~1e-1, which is why the parity test takes a --threshold."""
+    rgb, d = dummy_frame(args, seed=30)
+    ref_depth, _, _ = wrapper._step(rgb, d, None)
+    sess = ort_session(fp16_path)
+    assert_graph_io(sess, fp16_path)
+    assert_graph_geometry(sess, wrapper, fp16_path)
+    feed = {"rgb": _np(rgb), "sparse_depth": _np(d)}
+    feed.update(dict(zip(cache_input_names(), (_np(t) for t in wrapper.empty_cache()))))
+    out = run_by_name(sess, feed)
+    finite = {n: bool(np.isfinite(out[n]).all()) for n in ("depth", "depth_conf")}
+    if not all(finite.values()):
+        ort_session.cache_clear()  # release the file before unlinking it
+        os.remove(fp16_path)
+        print(
+            f"ERROR: {fp16_path} produces non-finite output "
+            f"({', '.join(n for n, ok in finite.items() if not ok)}) -- an "
+            "fp16 overflow somewhere in the graph. Removed it; the fp32 graph "
+            "is unaffected."
+        )
+        return False
+    diff = float(np.abs(out["depth"] - _np(ref_depth)).max())
+    print(f"fp16: frame-0 output finite, max|depth diff| vs fp32 eager = {diff:.3e}")
+    return True
+
+
+def try_fp16(paths: list, wrapper: StreamingDepthExport, args) -> None:
+    warn_fp16(paths)
     for p in paths:
         fp16_path = p.replace(".onnx", "_fp16.onnx")
         try:
             convert_onnx_to_fp16(p, fp16_path)
             print(f"fp16: wrote {fp16_path}")
         except Exception as e:
-            print(f"fp16: conversion of {p} failed (best-effort, not fatal): {e}")
+            print(
+                f"WARNING: fp16 conversion of {p} failed (best-effort, not "
+                f"fatal; the fp32 graph is still valid) [{type(e).__name__}] {e}"
+            )
+            continue
+        try:
+            check_fp16_numerics(fp16_path, wrapper, args)
+        except Exception as e:
+            print(
+                f"WARNING: could not validate {fp16_path} "
+                f"[{type(e).__name__}] {e} -- treat it as unverified"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -344,11 +577,14 @@ def parse_args():
     ap.add_argument(
         "--rotate",
         action="store_true",
-        help="bake a 90-degree-clockwise input rotation (and the inverse on "
-        "outputs) into the graph",
+        help="bake a 90-degree-clockwise input rotation into the graph; "
+        "outputs stay in the rotated orientation",
     )
     ap.add_argument(
-        "--fp16", action="store_true", help="also write _fp16 variants (best-effort)"
+        "--fp16",
+        action="store_true",
+        help="also write _fp16 variants (best-effort; fails above the 2 GB "
+        "protobuf limit, i.e. for the 1B checkpoint -- warns, never fatal)",
     )
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument(
@@ -374,6 +610,9 @@ def main():
         raise SystemExit(f"--opset {args.opset} > torch max {max_opset}")
     out_dir = os.path.dirname(os.path.abspath(args.out))
     os.makedirs(out_dir, exist_ok=True)
+    # same reason as ort_session's thread sizing: torch also defaults to the
+    # machine's core count, which oversubscribes a cpuset-restricted node
+    set_torch_threads()
 
     wrapper = build_wrapper(args)
     step_path = f"{args.out}_step.onnx"
@@ -389,7 +628,7 @@ def main():
     probe_frame0(step_path, wrapper, args)
     validate_rollout(step_path, wrapper, args)
     if args.fp16:
-        try_fp16([step_path])
+        try_fp16([step_path], wrapper, args)
     print("done:", step_path)
 
 
