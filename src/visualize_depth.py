@@ -238,10 +238,18 @@ def _per_frame_scene(predictions: dict) -> trimesh.Scene:
     return apply_scene_alignment(scene, extrinsics_4x4)
 
 
-# Fixed absolute scale for BOTH relative-error series so base/finetuned panels
+# Default absolute scale for BOTH relative-error series so base/finetuned panels
 # are directly comparable (a per-image autoscale would make every panel look
-# equally bad). 0.10 = 10% relative error saturates the colormap; val AbsRel is
-# ~0.05, so structure is visible rather than crushed.
+# equally bad). 0.10 = 10% relative error saturates the colormap; IN-DOMAIN val
+# AbsRel is ~0.05, so structure is visible rather than crushed.
+#
+# This default is only right in-domain. Out-of-domain (e.g. a HAMMER-trained
+# checkpoint visualized on ScanNet via --dataset) relative error routinely
+# exceeds 10% at nearly every pixel, every panel clips to the top colour, and
+# the comparison silently carries NO information -- measured 99.8% of valid
+# pixels saturated on a scannet run. Raise it with --rel-vmax (~0.5 for that
+# case) and check the saturated_frac column of the summary CSV, which exists to
+# make exactly this failure visible without decoding the PNGs.
 _REL_VMAX = 0.10
 
 
@@ -253,6 +261,8 @@ def _export_heatmaps(
     valid: torch.Tensor,
     K: torch.Tensor,
     pose: torch.Tensor,
+    rel_vmax: float = _REL_VMAX,
+    tcons_vmax: float | None = None,
 ) -> int:
     """2D heatmap companions to the GLB export, from the SAME predictions.
 
@@ -268,8 +278,23 @@ def _export_heatmaps(
                               Needs NO ground-truth depth, only poses, so the
                               same code transfers to captures without GT.
       {tag}_summary.png       per-frame mean curves of both error series
+      {tag}_summary.csv       the SAME per-frame numbers as text, plus the
+                              fraction of valid pixels clipped at rel_vmax.
+                              The PNG is a picture of these curves and cannot
+                              be compared across runs by eye; the CSV is what
+                              you diff between base and finetuned.
     Pixels with no valid comparison are gray. Returns #files written."""
+    import csv
+
     import matplotlib.pyplot as plt
+
+    # The two series live on very different scales once out of domain: accuracy
+    # can run >50% while warp self-consistency stays ~1%, so one shared ceiling
+    # cannot show both (0.5 flattens gterr's structure into view but crushes
+    # tcons to black). tcons_vmax defaults to rel_vmax, preserving the old
+    # single-scale behaviour when only one is passed.
+    if tcons_vmax is None:
+        tcons_vmax = rel_vmax
 
     os.makedirs(hm_dir, exist_ok=True)
     S = pred.shape[0]
@@ -278,11 +303,16 @@ def _export_heatmaps(
     valid_np = valid.numpy().astype(bool)
     written = 0
 
-    def save_map(path: str, rel: np.ndarray, ok: np.ndarray) -> None:
+    def save_map(path: str, rel: np.ndarray, ok: np.ndarray, vmax: float) -> float:
+        """Write one colormapped panel; return the fraction of VALID pixels at
+        or above vmax (i.e. clipped to the top colour). A value near 1 means
+        the panel is saturated and holds no comparable structure -- the error
+        is real but the picture cannot show how large it is."""
         cmap = matplotlib.colormaps["inferno"]
-        rgba = cmap(np.clip(rel / _REL_VMAX, 0.0, 1.0))
+        rgba = cmap(np.clip(rel / vmax, 0.0, 1.0))
         rgba[~ok] = (0.5, 0.5, 0.5, 1.0)
         plt.imsave(path, rgba)
+        return float((rel[ok] >= vmax).mean()) if ok.any() else float("nan")
 
     # --- predicted depth, one robust shared range across the clip ---
     finite = np.isfinite(pred_np) & (pred_np > 0)
@@ -296,17 +326,20 @@ def _export_heatmaps(
         written += 1
 
     # --- accuracy vs GT ---
-    gterr_means = []
+    gterr_means, gterr_sat = [], []
     for i in range(S):
         ok = valid_np[i] & (gt_np[i] > 0) & finite[i]
         rel = np.zeros_like(pred_np[i])
         rel[ok] = np.abs(pred_np[i][ok] - gt_np[i][ok]) / gt_np[i][ok]
-        save_map(os.path.join(hm_dir, f"{tag}_gterr_{i:03d}.png"), rel, ok)
+        sat = save_map(
+            os.path.join(hm_dir, f"{tag}_gterr_{i:03d}.png"), rel, ok, rel_vmax
+        )
         gterr_means.append(float(rel[ok].mean()) if ok.any() else np.nan)
+        gterr_sat.append(sat)
         written += 1
 
     # --- temporal self-consistency (adjacent pairs, GT-depth-free) ---
-    tcons_means = []
+    tcons_means, tcons_sat = [], []
     for i in range(S - 1):
         il_a, il_b = _img2lidar(K[i], pose[i]), _img2lidar(K[i + 1], pose[i + 1])
         warped = point2depth(
@@ -317,9 +350,58 @@ def _export_heatmaps(
         ok = (warped > 1e-6) & finite[i + 1]
         rel = np.zeros_like(pred_np[i + 1])
         rel[ok] = np.abs(pred_np[i + 1][ok] - warped[ok]) / pred_np[i + 1][ok]
-        save_map(os.path.join(hm_dir, f"{tag}_tcons_{i:03d}.png"), rel, ok)
+        sat = save_map(
+            os.path.join(hm_dir, f"{tag}_tcons_{i:03d}.png"), rel, ok, tcons_vmax
+        )
         tcons_means.append(float(rel[ok].mean()) if ok.any() else np.nan)
+        tcons_sat.append(sat)
         written += 1
+
+    # --- the numbers, as numbers ---
+    # The curves below are unreadable across two runs by eye (that is how a
+    # fully-saturated gterr comparison passed for "no difference"), so the same
+    # values go to CSV. tcons is a PER-PAIR series: row i holds the (i, i+1)
+    # pair, and the last row's tcons cells are empty.
+    csv_path = os.path.join(hm_dir, f"{tag}_summary.csv")
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["# tag", tag])
+        w.writerow(["# rel_vmax", rel_vmax])
+        w.writerow(["# tcons_vmax", tcons_vmax])
+        w.writerow(
+            [
+                "frame",
+                "gterr_mean",
+                "gterr_saturated_frac",
+                "tcons_mean",
+                "tcons_saturated_frac",
+            ]
+        )
+        for i in range(S):
+            has_pair = i < S - 1
+            w.writerow(
+                [
+                    i,
+                    f"{gterr_means[i]:.6f}",
+                    f"{gterr_sat[i]:.6f}",
+                    f"{tcons_means[i]:.6f}" if has_pair else "",
+                    f"{tcons_sat[i]:.6f}" if has_pair else "",
+                ]
+            )
+    written += 1
+    mean_gterr_sat = float(np.nanmean(gterr_sat)) if gterr_sat else float("nan")
+    mean_tcons_sat = float(np.nanmean(tcons_sat)) if tcons_sat else float("nan")
+    for series, sat, vmax, flag in (
+        ("gterr", mean_gterr_sat, rel_vmax, "--rel-vmax"),
+        ("tcons", mean_tcons_sat, tcons_vmax, "--tcons-vmax"),
+    ):
+        if sat > 0.5:
+            print(
+                f"  WARNING [{tag}]: {series} heatmaps are saturated at "
+                f"vmax={vmax} ({sat:.1%} of valid pixels clipped). The panels "
+                f"cannot show how large the error is -- raise {flag} and "
+                f"re-render before comparing them."
+            )
 
     fig, ax = plt.subplots(figsize=(7, 3.2), constrained_layout=True)
     ax.plot(gterr_means, label="|pred-gt|/gt (per frame)", marker="o", ms=3)
@@ -330,9 +412,17 @@ def _export_heatmaps(
         marker="s",
         ms=3,
     )
+    # the colormap ceilings, so a curve sitting on/above one explains a flat panel
+    ax.axhline(rel_vmax, color="C0", ls="--", lw=1, label=f"gterr ceiling={rel_vmax:g}")
+    if tcons_vmax != rel_vmax:
+        ax.axhline(
+            tcons_vmax, color="C1", ls=":", lw=1, label=f"tcons ceiling={tcons_vmax:g}"
+        )
     ax.set_xlabel("frame")
     ax.set_ylabel("mean relative error")
-    ax.set_title(tag)
+    ax.set_title(
+        f"{tag}  (clipped: gterr {mean_gterr_sat:.0%}, tcons {mean_tcons_sat:.0%})"
+    )
     ax.legend(fontsize=8)
     fig.savefig(os.path.join(hm_dir, f"{tag}_summary.png"), dpi=150)
     plt.close(fig)
@@ -412,8 +502,29 @@ def main() -> None:
         help="also write 2D PNG heatmaps per clip to <out-dir>/heatmaps: "
         "colormapped predicted depth, |pred-gt|/gt accuracy maps, and "
         "adjacent-pair warp self-consistency maps (the per-pixel field that "
-        "tae() reduces to a scalar), plus a per-frame summary curve. Fixed "
-        "color scale so base/finetuned panels are directly comparable.",
+        "tae() reduces to a scalar), plus a per-frame summary curve and CSV. "
+        "Fixed color scale so base/finetuned panels are directly comparable.",
+    )
+    ap.add_argument(
+        "--rel-vmax",
+        type=float,
+        default=_REL_VMAX,
+        help="relative error that saturates the gterr/tcons colormaps (default "
+        f"{_REL_VMAX}, tuned for IN-DOMAIN val AbsRel ~0.05). Out-of-domain runs "
+        "(e.g. --dataset scannet on a HAMMER checkpoint) blow past this at nearly "
+        "every pixel, which flattens both panels to one colour and makes the "
+        "comparison look like 'no difference'; try ~0.5 there. Keep it IDENTICAL "
+        "across the base and finetuned runs you intend to pair, or the panels are "
+        "not comparable. Check the saturated_frac columns of the summary CSV.",
+    )
+    ap.add_argument(
+        "--tcons-vmax",
+        type=float,
+        default=None,
+        help="separate ceiling for the warp self-consistency maps (default: same "
+        "as --rel-vmax). The two series diverge out of domain -- accuracy can run "
+        ">50% while consistency stays ~1% -- so one shared scale renders one of "
+        "them useless. Set --rel-vmax 0.5 --tcons-vmax 0.03 for a scannet run.",
     )
     ap.add_argument("--num-workers", type=int, default=4)
     args = ap.parse_args()
@@ -554,6 +665,8 @@ def main() -> None:
                         valid[b],
                         K[b],
                         pose[b],
+                        rel_vmax=args.rel_vmax,
+                        tcons_vmax=args.tcons_vmax,
                     )
                     print(f"  [{mode}] clip {exported}: {n_png} heatmap PNGs")
                 mean_c, min_c, max_c = confs[b]
