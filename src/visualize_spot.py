@@ -45,6 +45,7 @@ from finetune_depth import (
 )
 from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
 from visualize_depth import (
+    _REL_VMAX,
     _export_heatmaps,
     _per_frame_scene,
     load_saved_args,
@@ -194,6 +195,17 @@ def main() -> None:
     )
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--heatmaps", action="store_true")
+    ap.add_argument(
+        "--rel-vmax",
+        type=float,
+        default=_REL_VMAX,
+        help="relative error that saturates the gterr/tcons colormaps (default "
+        f"{_REL_VMAX}). On SPOT 'gterr' is deviation from the SENSOR's sparse "
+        "depth rather than true GT, which can run well above the in-domain "
+        "default; if the summary CSV's saturated_frac columns are near 1 the "
+        "panels are flat and carry no comparable structure. Keep it identical "
+        "across the base and finetuned runs you intend to pair.",
+    )
     args = ap.parse_args()
 
     ckpt_path = resolve_checkpoint(args.weights, args.checkpoint)
@@ -329,6 +341,7 @@ def main() -> None:
             sensor_mask,
             K,
             c2w,
+            rel_vmax=args.rel_vmax,
         )
         print(f"wrote {n} heatmap PNGs")
 
