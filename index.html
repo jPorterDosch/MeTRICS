@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MeTRICS — Supplementary Comparisons</title>
+    <style>
+        body {
+            max-width: 1000px;
+            margin: auto;
+            padding: 1.5rem 1rem 4rem;
+            font-family: -apple-system, system-ui, sans-serif;
+            color: #f0f0f0;
+            background: #0d1b3e;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: .25rem;
+        }
+
+        .sub {
+            color: #9db;
+            margin-top: 0;
+            font-style: italic;
+        }
+
+        h2 {
+            font-size: 1.2rem;
+            margin: 2.5rem 0 1rem;
+        }
+
+        .pair {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .box {
+            flex: 1 1 320px;
+            background: #16294f;
+            border-radius: 10px;
+            padding: .75rem;
+        }
+
+        .box .label {
+            font-weight: 600;
+            margin-bottom: .5rem;
+            color: #7fd;
+        }
+
+        .box img {
+            width: 100%;
+            display: block;
+            border-radius: 6px;
+        }
+
+        .single img {
+            width: 100%;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>MeTRICS — Live Comparisons</h1>
+    <p class="sub">Metric Temporally-consistent Reconstruction In Causal Streaming</p>
+
+    <h2>1. Flickering between frames</h2>
+    <div class="single">
+        <img src="gifs/flickering.gif" alt="Flickering between frames">
+    </div>
+
+    <h2>2. Depth map — StreamVGGT vs. Ours</h2>
+    <div class="single">
+        <img src="gifs/depth_comparison.gif" alt="Depth map, StreamVGGT vs Ours">
+    </div>
+
+    <h2>3. 3D map — StreamVGGT vs. Ours</h2>
+    <div class="pair">
+        <div class="box">
+            <div class="label">StreamVGGT</div>
+            <img src="gifs/3dmap_streamvggt.gif" alt="3D map, StreamVGGT">
+        </div>
+        <div class="box">
+            <div class="label">Ours (MeTRICS)</div>
+            <img src="gifs/3dmap_ours.gif" alt="3D map, Ours">
+        </div>
+    </div>
+
+</body>
+
+</html>
