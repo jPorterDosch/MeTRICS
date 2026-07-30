@@ -89,7 +89,9 @@ def run(hm_dir: Path) -> int:
     ok = valid.numpy() & (gt.numpy() > 0)
     rel_ref = np.abs(pred.numpy() - gt.numpy()) / gt.numpy()
     want = float(
-        np.mean([_spearman(conf.numpy()[i][ok[i]], rel_ref[i][ok[i]]) for i in range(S)])
+        np.mean(
+            [_spearman(conf.numpy()[i][ok[i]], rel_ref[i][ok[i]]) for i in range(S)]
+        )
     )
     print(f"\nsynthetic ground truth: Spearman(conf, rel_err) = {want:+.3f}")
     check(want < -0.9, f"the SYNTHETIC data really is anti-correlated ({want:+.3f})")
@@ -97,8 +99,16 @@ def run(hm_dir: Path) -> int:
     # ---- 1. conf-carrying arm ----
     print("\n[1] _export_heatmaps with conf=  (tag 'finetuned_clip0')")
     n = _export_heatmaps(
-        str(hm_dir), "finetuned_clip0", pred, gt, valid, K, pose,
-        conf=conf, conf_vmin=1.0, conf_vmax=2.0,
+        str(hm_dir),
+        "finetuned_clip0",
+        pred,
+        gt,
+        valid,
+        K,
+        pose,
+        conf=conf,
+        conf_vmin=1.0,
+        conf_vmax=2.0,
     )
     pngs = sorted(p.name for p in hm_dir.glob("finetuned_clip0_conf_*.png"))
     check(len(pngs) == S, f"{len(pngs)}/{S} conf PNGs written {pngs}")
@@ -110,8 +120,13 @@ def run(hm_dir: Path) -> int:
         check(c in header, f"CSV has column {c}  (header: {','.join(header)})")
     check(
         header[:5]
-        == ["frame", "gterr_mean", "gterr_saturated_frac", "tcons_mean",
-            "tcons_saturated_frac"],
+        == [
+            "frame",
+            "gterr_mean",
+            "gterr_saturated_frac",
+            "tcons_mean",
+            "tcons_saturated_frac",
+        ],
         "the pre-existing columns kept their positions (appended, not inserted)",
     )
     got = np.array([float(r[header.index("conf_err_corr")]) for r in rows])
@@ -124,7 +139,9 @@ def run(hm_dir: Path) -> int:
     sat = np.array([float(r[header.index("conf_saturated_frac")]) for r in rows])
     check(bool((sat >= 0).all() and (sat <= 1).all()), f"saturated_frac in [0,1] {sat}")
     cm = np.array([float(r[header.index("conf_mean")]) for r in rows])
-    check(bool((cm > 1.0).all()), f"conf_mean above the expp1 floor of 1.0 {cm.round(3)}")
+    check(
+        bool((cm > 1.0).all()), f"conf_mean above the expp1 floor of 1.0 {cm.round(3)}"
+    )
 
     # a rendered conf panel must not be uniform -- a constant image is what a
     # broken normalization (or a vmin==vmax) silently produces
@@ -137,7 +154,9 @@ def run(hm_dir: Path) -> int:
     # ---- 2. the base arm, written WITHOUT conf (old schema) ----
     print("\n[2] _export_heatmaps with conf=None  (tag 'base_clip0', old schema)")
     n0 = _export_heatmaps(str(hm_dir), "base_clip0", pred * 1.1, gt, valid, K, pose)
-    check(n0 == 3 * S + 1, f"reported {n0} files (expected {3 * S + 1}, no conf series)")
+    check(
+        n0 == 3 * S + 1, f"reported {n0} files (expected {3 * S + 1}, no conf series)"
+    )
     check(
         not list(hm_dir.glob("base_clip0_conf_*.png")),
         "no conf PNGs written when conf is omitted",
@@ -148,9 +167,17 @@ def run(hm_dir: Path) -> int:
     # ---- 3. GIF assembly picks the new series up with no changes ----
     print("\n[3] heatmaps_to_gif.py --pair")
     r = subprocess.run(
-        [sys.executable, str(REPO / "src" / "heatmaps_to_gif.py"),
-         "--hm-dir", str(hm_dir), "--pair", "base_clip0", "finetuned_clip0"],
-        capture_output=True, text=True,
+        [
+            sys.executable,
+            str(REPO / "src" / "heatmaps_to_gif.py"),
+            "--hm-dir",
+            str(hm_dir),
+            "--pair",
+            "base_clip0",
+            "finetuned_clip0",
+        ],
+        capture_output=True,
+        text=True,
     )
     check(r.returncode == 0, f"exit {r.returncode}\n{r.stderr[-500:]}")
     check(
@@ -167,53 +194,88 @@ def run(hm_dir: Path) -> int:
 
     # ---- 4. compare, mixed schema then matched schema ----
     print("\n[4] compare_heatmap_summaries.py, MIXED schema (must not crash)")
-    cmp_cmd = [sys.executable, str(REPO / "tests" / "compare_heatmap_summaries.py"),
-               str(hm_dir)]
+    cmp_cmd = [
+        sys.executable,
+        str(REPO / "tests" / "compare_heatmap_summaries.py"),
+        str(hm_dir),
+    ]
     r = subprocess.run(cmp_cmd, capture_output=True, text=True)
     check(r.returncode == 0, f"exit {r.returncode}\n{r.stderr[-800:]}")
     check("only one arm" in r.stdout, "reports the one-sided conf series")
-    check("gterr" in r.stdout and "tcons" in r.stdout, "still compares the error series")
+    check(
+        "gterr" in r.stdout and "tcons" in r.stdout, "still compares the error series"
+    )
 
     print("\n[5] compare_heatmap_summaries.py, BOTH arms with conf")
     both = hm_dir.parent / "matched"
     both.mkdir(exist_ok=True)
-    _export_heatmaps(str(both), "finetuned_clip0", pred, gt, valid, K, pose,
-                     conf=conf, conf_vmax=2.0)
+    _export_heatmaps(
+        str(both), "finetuned_clip0", pred, gt, valid, K, pose, conf=conf, conf_vmax=2.0
+    )
     # a WORSE, less-informative base: bigger error and a conf field that no
     # longer tracks it, so conf_corr must favour the finetuned arm (more negative)
-    _export_heatmaps(str(both), "base_clip0", pred * 1.1, gt, valid, K, pose,
-                     conf=torch.from_numpy(
-                         np.full((S, H, W), 1.5, dtype=np.float32)
-                         + 0.01 * np.random.default_rng(1).random((S, H, W)).astype(np.float32)
-                     ), conf_vmax=2.0)
+    _export_heatmaps(
+        str(both),
+        "base_clip0",
+        pred * 1.1,
+        gt,
+        valid,
+        K,
+        pose,
+        conf=torch.from_numpy(
+            np.full((S, H, W), 1.5, dtype=np.float32)
+            + 0.01 * np.random.default_rng(1).random((S, H, W)).astype(np.float32)
+        ),
+        conf_vmax=2.0,
+    )
     r = subprocess.run(
-        [sys.executable, str(REPO / "tests" / "compare_heatmap_summaries.py"), str(both)],
-        capture_output=True, text=True,
+        [
+            sys.executable,
+            str(REPO / "tests" / "compare_heatmap_summaries.py"),
+            str(both),
+        ],
+        capture_output=True,
+        text=True,
     )
     check(r.returncode == 0, f"exit {r.returncode}\n{r.stderr[-800:]}")
     print("\n".join("      " + ln for ln in r.stdout.strip().splitlines()))
     check("conf " in r.stdout, "conf row present")
     check("conf_corr" in r.stdout, "conf_corr row present")
     check("diagnostic" in r.stdout, "conf is labelled a diagnostic, not a win/loss")
-    corr_line = next((ln for ln in r.stdout.splitlines() if ln.startswith("conf_corr")), "")
+    corr_line = next(
+        (ln for ln in r.stdout.splitlines() if ln.startswith("conf_corr")), ""
+    )
     # columns: name, left mean, right mean, delta, rel, verdict
     check(
         bool(corr_line) and float(corr_line.split()[3]) < 0,
         f"conf_corr delta is negative (finetuned better calibrated): {corr_line!r}",
     )
     r2 = subprocess.run(
-        [sys.executable, str(REPO / "src" / "heatmaps_to_gif.py"), "--hm-dir", str(both),
-         "--pair", "base_clip0", "finetuned_clip0"], capture_output=True, text=True,
+        [
+            sys.executable,
+            str(REPO / "src" / "heatmaps_to_gif.py"),
+            "--hm-dir",
+            str(both),
+            "--pair",
+            "base_clip0",
+            "finetuned_clip0",
+        ],
+        capture_output=True,
+        text=True,
     )
     check(r2.returncode == 0, f"gif exit {r2.returncode}\n{r2.stderr[-500:]}")
-    check((both / "pair_conf.gif").is_file(), "pair_conf.gif written for a matched pair")
+    check(
+        (both / "pair_conf.gif").is_file(), "pair_conf.gif written for a matched pair"
+    )
 
     return failures
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--keep", default=None, help="write artifacts here instead of a temp dir")
+    ap.add_argument(
+        "--keep", default=None, help="write artifacts here instead of a temp dir"
+    )
     args = ap.parse_args()
 
     if args.keep:

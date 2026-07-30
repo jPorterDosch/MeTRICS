@@ -67,8 +67,10 @@ def main():
 
     print(f"hdf5 checked: {len(files) - skipped_recent}   corrupt: {len(bad)}")
     if skipped_recent:
-        print(f"skipped (modified < {args.min_age}s ago, possibly in-flight): "
-              f"{skipped_recent}")
+        print(
+            f"skipped (modified < {args.min_age}s ago, possibly in-flight): "
+            f"{skipped_recent}"
+        )
     for path, err in bad[:50]:
         print(f"  {err}: {path}")
     if len(bad) > 50:

@@ -51,7 +51,9 @@ def get_parser():
     p.add_argument("--shard", type=int, default=0, help="this shard index (0-based)")
     p.add_argument("--num-shards", type=int, default=1, help="total number of shards")
     p.add_argument(
-        "--dry-run", action="store_true", help="list what would be done, extract nothing"
+        "--dry-run",
+        action="store_true",
+        help="list what would be done, extract nothing",
     )
     return p
 
@@ -92,7 +94,10 @@ def main():
                 jobs.append((split, scene, scene_dir, sens))
 
     jobs = [j for i, j in enumerate(jobs) if i % args.num_shards == args.shard]
-    print(f"[shard {args.shard}/{args.num_shards}] {len(jobs)} scenes assigned", flush=True)
+    print(
+        f"[shard {args.shard}/{args.num_shards}] {len(jobs)} scenes assigned",
+        flush=True,
+    )
 
     done = skipped = failed = 0
     for split, scene, scene_dir, sens in jobs:
@@ -110,7 +115,10 @@ def main():
             failed += 1
             print(f"FAILED {split}/{scene}: {e}", file=sys.stderr, flush=True)
 
-    print(f"[shard {args.shard}] extracted={done} skipped={skipped} failed={failed}", flush=True)
+    print(
+        f"[shard {args.shard}] extracted={done} skipped={skipped} failed={failed}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
