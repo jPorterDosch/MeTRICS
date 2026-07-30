@@ -44,7 +44,7 @@ from finetune_depth import (
     build_model,
     build_train_loader,
 )
-from streamvggt.datasets import MultiDatasetConfig, Split
+from streamvggt.datasets import DatasetName, MultiDatasetConfig, Split
 from visual_util import apply_scene_alignment, integrate_camera_into_scene
 from streamvggt.depth_cond import (
     DepthCondCfg,
@@ -113,28 +113,81 @@ def rebuild_metric_cfg(raw: dict) -> MetricCfg:
     ).validate()
 
 
+# MultiDatasetConfig fields that are parallel per-dataset tuples (entry i
+# describes dataset i); every other field is shared across the mixture and so
+# survives narrowing untouched. Kept in sync with MultiDatasetConfig's own
+# "per-dataset parallel tuples" block -- narrowing by list length instead would
+# silently mangle any shared list that happened to match the dataset count.
+_PER_DATASET_FIELDS = (
+    "root",
+    "dataset",
+    "stride_range",
+    "epoch_size",
+    "is_metric",
+    "highres_root",
+)
+
+
+def _dataset_names(vd: dict) -> list[str]:
+    """Saved dataset names as plain strings. The checkpoint snapshot stores
+    primitives, but an in-memory config holds DatasetName members."""
+    return [d.value if isinstance(d, DatasetName) else str(d) for d in vd["dataset"]]
+
+
+def _select_dataset_entry(vd: dict, i: int) -> None:
+    """Narrow every parallel per-dataset tuple to entry i in place, leaving a
+    one-dataset config. Optional tuples that the run omitted stay omitted."""
+    for field in _PER_DATASET_FIELDS:
+        values = vd.get(field)
+        if values is not None:
+            vd[field] = [values[i]]
+
+
 def rebuild_val_dataset(
     raw: dict, data_root: str | None, dataset: str | None = None
 ) -> MultiDatasetConfig:
-    """Reconstruct the validation dataset config saved with the run. --data-root
-    overrides the on-disk location (useful when the data tree lives somewhere
-    other than the training CWD); --dataset additionally swaps the dataset TYPE
-    (e.g. visualize a HAMMER-finetuned model on scannet/arkitscenes to probe
-    out-of-domain behaviour). Both only support the single-dataset val config
-    finetune_depth.py ships with."""
+    """Reconstruct the validation dataset config saved with the run, narrowed to
+    exactly one dataset (this tool visualizes a single clip, so a mixture would
+    silently export whichever dataset the sampler happened to draw).
+
+    --dataset does one of two things depending on whether the run already
+    validates on that dataset:
+
+    * SELECT -- the name is in the saved val config (e.g. --dataset hammer on a
+      HAMMER+ScanNet run): pin the mixture to that dataset's own entry. Root,
+      stride range and epoch size all come from the saved config, so --data-root
+      is optional.
+    * SUBSTITUTE -- the name is not in the saved config (e.g. --dataset
+      arkitscenes on a HAMMER run): swap the dataset TYPE to probe out-of-domain
+      behaviour. The saved roots all point at the wrong tree, so --data-root is
+      required.
+
+    --data-root on its own just relocates the tree (useful when the data lives
+    somewhere other than the training CWD); it needs the config to already be
+    down to one dataset, since otherwise there is no saying which root it means.
+    """
     vd = dict(raw["val_dataset"])
+    names = _dataset_names(vd)
     if dataset is not None:
-        if data_root is None:
-            raise ValueError("--dataset requires --data-root (the new tree)")
-        if len(vd["dataset"]) != 1:
-            raise ValueError("--dataset only supports a single-dataset val config")
-        vd["dataset"] = [dataset]
+        if dataset in names:
+            _select_dataset_entry(vd, names.index(dataset))
+        else:
+            if data_root is None:
+                raise ValueError(
+                    f"--dataset {dataset} is not in this run's val config "
+                    f"({', '.join(names)}), so it needs --data-root pointing at "
+                    f"that dataset's processed tree"
+                )
+            # keep entry 0's shared-by-position fields (stride, epoch size) and
+            # overwrite the type; the root is replaced by --data-root below
+            _select_dataset_entry(vd, 0)
+            vd["dataset"] = [dataset]
     if data_root is not None:
         if len(vd["root"]) != 1:
             raise ValueError(
                 "--data-root only supports a single-dataset val config; the "
-                f"saved config has {len(vd['root'])} roots. Edit the script to "
-                "override them individually."
+                f"saved config has {len(vd['root'])} roots ({', '.join(names)}). "
+                f"Pass --dataset <name> to pin one of them first."
             )
         vd["root"] = [data_root]
         # the lowres loader's highres-exclusion root is a sibling of the old
@@ -151,6 +204,16 @@ def rebuild_val_dataset(
         vd["highres_root"] = [
             None if r is None else Path(r) for r in vd["highres_root"]
         ]
+    if len(vd["dataset"]) > 1:
+        # Left as a mixture on purpose (the caller wants the run's whole val
+        # split), but anything that exports ONE clip then labels it after the
+        # run cannot say which dataset it drew -- warn rather than fail, since
+        # paired-arm scoring over the mixture is still valid.
+        print(
+            f"WARNING val config keeps {len(vd['dataset'])} datasets "
+            f"({', '.join(_dataset_names(vd))}); sampled clips may come from "
+            f"any of them. Pass --dataset <name> to pin one."
+        )
     return MultiDatasetConfig(**vd)
 
 
@@ -640,10 +703,13 @@ def main() -> None:
     ap.add_argument(
         "--dataset",
         default=None,
-        help="swap the val dataset TYPE (e.g. scannet, arkitscenes) to probe "
-        "out-of-domain behaviour; requires --data-root pointing at that "
-        "dataset's processed tree. Sparse conditioning is re-simulated from the "
-        "new dataset's GT, so the pipeline runs unchanged.",
+        help="pin the val config to ONE dataset. A name the run already "
+        "validates on (e.g. hammer on a HAMMER+ScanNet run) selects that "
+        "entry and keeps its saved root; any other name (e.g. scannet, "
+        "arkitscenes) swaps the dataset TYPE to probe out-of-domain behaviour "
+        "and requires --data-root pointing at that dataset's processed tree. "
+        "Sparse conditioning is re-simulated from the new dataset's GT, so the "
+        "pipeline runs unchanged.",
     )
     ap.add_argument(
         "--all-pixels",

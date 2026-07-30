@@ -26,8 +26,11 @@
 #             injection path is not actually zero-init.
 #             Catches failure mode we previously missed -- zero-init was preventing
 #             effective training/convergence.
-#   hammer    In-domain base-vs-finetuned GLBs + heatmaps on the run's own val
-#             dataset (whatever it trained on -- no --dataset override).
+#   hammer    In-domain base-vs-finetuned GLBs + heatmaps, pinned to the HAMMER
+#             half of the run's val split (--dataset hammer). Pinning matters
+#             on HAMMER+ScanNet runs: only one clip is exported, so an unpinned
+#             mixture would file whichever dataset the sampler drew under
+#             hammer/ and the paired table would compare across datasets.
 #   scannet   The same, out-of-domain on ScanNet TEST. Answers "does any of
 #             this transfer off the training distribution?"
 #   spot      Real robot capture with REAL sensor sparsity (not simulated
@@ -63,6 +66,7 @@ set -euo pipefail
 
 REPO=/oscar/home/jdosch/MeTRIC
 PRETRAINED="${PRETRAINED:-$REPO/ckpt/checkpoints.pth}"
+HAMMER_ROOT="${HAMMER_ROOT:-/oscar/scratch/jdosch/data/processed_hammer}"
 SCANNET_ROOT="${SCANNET_ROOT:-/gpfs/data/jtompki1/cli277/metric/processed_scannet}"
 SPOT_SEQ="${SPOT_SEQ:-/oscar/data/jtompki1/cli277/new_spot_data/0}"
 CLIPS="${CLIPS:-32}"        # ablation clips
@@ -168,7 +172,18 @@ for stage in "${STAGES[@]}"; do
             --clips "$CLIPS" --include-base --pretrained "$PRETRAINED" \
             | tee "$OUT_ROOT/ablation.txt"
         ;;
-    hammer)   viz_pair "$OUT_ROOT/hammer" HAMMER_SCALES ;;
+    hammer)
+        if [ ! -d "$HAMMER_ROOT" ]; then
+            echo "SKIP hammer: $HAMMER_ROOT not found" >&2
+        else
+            # --dataset hammer is NOT optional on a mixed-val run: without it
+            # the sampler draws from the whole val mixture, so the single clip
+            # filed under hammer/ (and scaled with HAMMER_SCALES) could be a
+            # ScanNet clip. On a HAMMER-only run it selects entry 0 -- a no-op.
+            viz_pair "$OUT_ROOT/hammer" HAMMER_SCALES \
+                --dataset hammer --data-root "$HAMMER_ROOT"
+        fi
+        ;;
     scannet)
         if [ ! -d "$SCANNET_ROOT" ]; then
             echo "SKIP scannet: $SCANNET_ROOT not found" >&2
