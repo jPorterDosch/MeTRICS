@@ -277,21 +277,32 @@ _REL_VMAX = 0.10
 _CONF_VMIN, _CONF_VMAX = 1.0, 10.0
 
 
+def _avg_ranks(x: np.ndarray) -> np.ndarray:
+    """0-based ranks with ties assigned their group mean (scipy 'average')."""
+    order = np.argsort(x, kind="stable")
+    xs = x[order]
+    grp = np.cumsum(np.r_[True, xs[1:] != xs[:-1]]) - 1  # group id per position
+    counts = np.bincount(grp)
+    starts = np.r_[0, np.cumsum(counts)[:-1]]
+    r = np.empty(x.size, dtype=np.float64)
+    r[order] = (starts + (counts - 1) / 2.0)[grp]
+    return r
+
+
 def _spearman(a: np.ndarray, b: np.ndarray) -> float:
     """Rank correlation of two equal-length 1-D arrays.
 
     Rank rather than Pearson because relative depth error is heavy-tailed: a
     few pixels at 400% error would otherwise set the coefficient by themselves.
-    Ranks come from argsort-of-argsort, which breaks ties arbitrarily instead of
-    averaging them -- negligible for continuous data, but a frame whose
-    confidence has collapsed to a constant is ALL ties and its number is
-    meaningless (conf_saturated_frac / the min==max print expose that case)."""
+
+    Ties need AVERAGE ranks, not ordinal argsort-of-argsort. conf floors at 1.0
+    (expp1), so a collapsing sigma piles mass on the floor; ordinal ranks then
+    attenuate the coefficient toward 0, and on a constant frame report raster
+    order vs error rather than NaN. Both read as "confidence is decoration" --
+    the conclusion this number is used to draw."""
     if a.size < 2:
         return float("nan")
-    ra = np.empty(a.size, dtype=np.float64)
-    ra[np.argsort(a, kind="stable")] = np.arange(a.size)
-    rb = np.empty(b.size, dtype=np.float64)
-    rb[np.argsort(b, kind="stable")] = np.arange(b.size)
+    ra, rb = _avg_ranks(a), _avg_ranks(b)
     sa, sb = ra.std(), rb.std()
     if sa == 0 or sb == 0:
         return float("nan")
@@ -474,9 +485,9 @@ def _export_heatmaps(
     csv_path = os.path.join(hm_dir, f"{tag}_summary.csv")
     with open(csv_path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["# tag", tag])
-        w.writerow(["# rel_vmax", rel_vmax])
-        w.writerow(["# tcons_vmax", tcons_vmax])
+        # meta = whole '#' rows, header = columns of one row; both are extended
+        # under the same condition, so accumulate both and write once.
+        meta = [["# tag", tag], ["# rel_vmax", rel_vmax], ["# tcons_vmax", tcons_vmax]]
         header = [
             "frame",
             "gterr_mean",
@@ -485,9 +496,9 @@ def _export_heatmaps(
             "tcons_saturated_frac",
         ]
         if conf_np is not None:
-            w.writerow(["# conf_vmin", conf_vmin])
-            w.writerow(["# conf_vmax", conf_vmax])
+            meta += [["# conf_vmin", conf_vmin], ["# conf_vmax", conf_vmax]]
             header += ["conf_mean", "conf_saturated_frac", "conf_err_corr"]
+        w.writerows(meta)
         w.writerow(header)
         for i in range(S):
             has_pair = i < S - 1
