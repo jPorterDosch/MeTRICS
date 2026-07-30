@@ -36,10 +36,18 @@
 #             window makes warp self-consistency nearly free and flatters the
 #             model, so a result that only holds there is not a result.
 #
+# Every viz stage writes, per frame: predicted depth, |pred-gt|/gt accuracy, the
+# model's own predicted CONFIDENCE, and warp self-consistency -- as PNG series,
+# then as GIFs, including side-by-side pair_*.gif (pair_depth.gif, pair_conf.gif,
+# ...) for the base-vs-finetuned arms.
+#
 # Every stage writes a summary CSV; the run ends with the paired base-vs-ours
 # table for all of them via tests/compare_heatmap_summaries.py. The CSV is the
 # artifact to trust -- the GIFs are for looking at, and a saturated panel is
-# indistinguishable from "no difference" by eye.
+# indistinguishable from "no difference" by eye. For the confidence series the
+# number that matters is conf_err_corr (Spearman of confidence against relative
+# error): more negative = the confidence actually tracks the error, near 0 = the
+# map is decoration regardless of how good it looks.
 #
 # Needs a GPU (loss_of_one_batch runs under torch.cuda.amp.autocast). Run it on
 # a GPU node, or sbatch this file.
@@ -106,9 +114,17 @@ CKPT_ARGS=(--weights "$WEIGHTS" --checkpoint best)
 # domain (accuracy >50% while consistency stays ~1%), so one shared scale
 # renders one of them useless. These are for the PICTURES only -- the CSV
 # means are computed pre-clip and are unaffected.
-HAMMER_SCALES=(--rel-vmax 0.3  --tcons-vmax 0.05)   # base ~0.20 AbsRel in-domain
-SCANNET_SCALES=(--rel-vmax 0.5 --tcons-vmax 0.03)   # OOD, tcons ~0.01
-SPOT_SCALES=(--rel-vmax 1.0    --tcons-vmax 0.15)   # sensor-deviation, runs high
+#
+# --conf-vmax is the same idea for the predicted-confidence panels. The depth
+# head is expp1 (conf = 1 + exp(x)), so 1.0 is the floor and there is no
+# ceiling; these are starting points, not measured values. Check the
+# conf_saturated_frac column of each summary CSV and retune if it is near 1
+# (panels all bright) or near 0 with a low conf mean (panels all dark). Keep
+# the value IDENTICAL across a base/finetuned pair -- viz_pair does, by
+# construction, since both arms get the same array.
+HAMMER_SCALES=(--rel-vmax 0.3  --tcons-vmax 0.05 --conf-vmax 10)  # base ~0.20 AbsRel in-domain
+SCANNET_SCALES=(--rel-vmax 0.5 --tcons-vmax 0.03 --conf-vmax 10)  # OOD, tcons ~0.01
+SPOT_SCALES=(--rel-vmax 1.0    --tcons-vmax 0.15 --conf-vmax 10)  # sensor-deviation, runs high
 
 heatmap_gifs () {  # $1 = heatmaps dir
     [ -d "$1" ] && python heatmaps_to_gif.py --hm-dir "$1" \

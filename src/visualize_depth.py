@@ -154,17 +154,29 @@ def rebuild_val_dataset(
     return MultiDatasetConfig(**vd)
 
 
+def _stack_depth_conf(preds: list[dict]) -> torch.Tensor:
+    """The model's predicted depth confidence for a whole clip, [B,S,H,W] cpu.
+
+    This is the raw depth-head output. The head is built with
+    conf_activation="expp1" (streamvggt.py), i.e. conf = 1 + exp(x): 1.0 is the
+    hard floor and there is NO ceiling.
+
+    Do not confuse it with the 0/1 geometry mask _clip_predictions stores under
+    the same "depth_conf" key -- that one is "GT-valid AND finite", written to
+    drive predictions_to_glb's conf>1e-5 filter, and carries none of the model's
+    learned uncertainty. Both the training forward and the streaming inference
+    path emit p["depth_conf"] as [B,H,W]."""
+    return torch.stack([p["depth_conf"].detach().float().cpu() for p in preds], dim=1)
+
+
 def _clip_confidences(preds: list[dict]) -> list[tuple[float, float, float]]:
     """Per-clip (mean, min, max) of the model's predicted depth confidence over
     the whole clip -- a quick read on whether the learned confidences are
     degenerate/saturating (cf. the metric-mode depth_alpha caveat: raw-metre
-    residuals can swamp the -alpha*log(sigma) regularizer). preds is the
-    [S]-list of per-view dicts; depth_conf is [B,H,W]. Returns one tuple per
-    batch element b, in b order (matches _export_eval_glbs's export order)."""
-    conf = torch.stack(
-        [p["depth_conf"].detach().float() for p in preds], dim=1
-    )  # [B,S,H,W]
-    flat = conf.reshape(conf.shape[0], -1).cpu()
+    residuals can swamp the -alpha*log(sigma) regularizer). Returns one tuple
+    per batch element b, in b order (matches _export_eval_glbs's export
+    order)."""
+    flat = _stack_depth_conf(preds).flatten(1)
     return [
         (flat[b].mean().item(), flat[b].min().item(), flat[b].max().item())
         for b in range(flat.shape[0])
@@ -252,6 +264,39 @@ def _per_frame_scene(predictions: dict) -> trimesh.Scene:
 # make exactly this failure visible without decoding the PNGs.
 _REL_VMAX = 0.10
 
+# Colour range for the predicted-confidence panels. The depth head's
+# conf_activation is "expp1" (conf = 1 + exp(x)), so 1.0 is the hard floor and
+# there is no ceiling -- hence a vmin as well as a vmax.
+#
+# It is FIXED for the same reason the error scales are: a per-clip autoscale
+# would renormalize the base and the finetuned panel independently, so two
+# clips with completely different confidence levels would render identically
+# and the A/B would silently carry no information. 10.0 covers the bulk of an
+# in-domain clip; the conf_saturated_frac column of the summary CSV says when
+# it does not, and --conf-vmax raises it.
+_CONF_VMIN, _CONF_VMAX = 1.0, 10.0
+
+
+def _spearman(a: np.ndarray, b: np.ndarray) -> float:
+    """Rank correlation of two equal-length 1-D arrays.
+
+    Rank rather than Pearson because relative depth error is heavy-tailed: a
+    few pixels at 400% error would otherwise set the coefficient by themselves.
+    Ranks come from argsort-of-argsort, which breaks ties arbitrarily instead of
+    averaging them -- negligible for continuous data, but a frame whose
+    confidence has collapsed to a constant is ALL ties and its number is
+    meaningless (conf_saturated_frac / the min==max print expose that case)."""
+    if a.size < 2:
+        return float("nan")
+    ra = np.empty(a.size, dtype=np.float64)
+    ra[np.argsort(a, kind="stable")] = np.arange(a.size)
+    rb = np.empty(b.size, dtype=np.float64)
+    rb[np.argsort(b, kind="stable")] = np.arange(b.size)
+    sa, sb = ra.std(), rb.std()
+    if sa == 0 or sb == 0:
+        return float("nan")
+    return float(((ra - ra.mean()) * (rb - rb.mean())).mean() / (sa * sb))
+
 
 def _export_heatmaps(
     hm_dir: str,
@@ -263,23 +308,37 @@ def _export_heatmaps(
     pose: torch.Tensor,
     rel_vmax: float = _REL_VMAX,
     tcons_vmax: float | None = None,
+    scale: int = 1,
+    conf: torch.Tensor | None = None,
+    conf_vmin: float = _CONF_VMIN,
+    conf_vmax: float = _CONF_VMAX,
 ) -> int:
     """2D heatmap companions to the GLB export, from the SAME predictions.
 
-    pred/gt/valid: [S,H,W] cpu; K: [S,3,3]; pose: [S,4,4] cam2world. Writes:
+    pred/gt/valid: [S,H,W] cpu; K: [S,3,3]; pose: [S,4,4] cam2world.
+    conf: optional [S,H,W] PREDICTED depth confidence from _stack_depth_conf
+    (the model's own uncertainty head, not the 0/1 GLB mask); when omitted the
+    conf panels/columns are skipped and the output is byte-identical to before.
+    Writes:
       {tag}_depth_XXX.png     colormapped predicted depth (one shared robust
                               range across the clip, so brightness is comparable
                               frame to frame)
       {tag}_gterr_XXX.png     |pred-gt|/gt where GT is valid (accuracy)
+      {tag}_conf_XXX.png      the model's predicted confidence, DENSE (no GT
+                              mask -- see below), on the fixed [conf_vmin,
+                              conf_vmax] scale so base and finetuned panels are
+                              directly comparable
       {tag}_tcons_XXX.png     adjacent-pair self-consistency: pred[i] warped
                               into frame i+1 via the GT camera (depth2point /
                               point2depth -- the exact machinery tae() reduces
                               to a scalar), then |pred[i+1]-warped|/pred[i+1].
                               Needs NO ground-truth depth, only poses, so the
                               same code transfers to captures without GT.
-      {tag}_summary.png       per-frame mean curves of both error series
+      {tag}_summary.png       per-frame mean curves of both error series, plus
+                              mean confidence on a twin axis
       {tag}_summary.csv       the SAME per-frame numbers as text, plus the
-                              fraction of valid pixels clipped at rel_vmax.
+                              fraction of valid pixels clipped at rel_vmax and
+                              the confidence/error rank correlation.
                               The PNG is a picture of these curves and cannot
                               be compared across runs by eye; the CSV is what
                               you diff between base and finetuned.
@@ -297,6 +356,18 @@ def _export_heatmaps(
         tcons_vmax = rel_vmax
 
     os.makedirs(hm_dir, exist_ok=True)
+
+    def _imsave(path: str, rgba: np.ndarray) -> None:
+        """plt.imsave writes the array at its NATIVE pixel size, so a panel is
+        exactly the model's working resolution (518x392 -> ~1.7in at 300dpi).
+        `scale` block-replicates for print. NEAREST on purpose: it enlarges
+        without inventing structure, so the figure still shows the true
+        resolution of the prediction. It adds NO information -- it only stops a
+        poster pipeline from resampling it for you."""
+        if scale > 1:
+            rgba = rgba.repeat(scale, axis=0).repeat(scale, axis=1)
+        plt.imsave(path, rgba)
+
     S = pred.shape[0]
     pred_np = pred.numpy()
     gt_np = gt.numpy()
@@ -311,7 +382,7 @@ def _export_heatmaps(
         cmap = matplotlib.colormaps["inferno"]
         rgba = cmap(np.clip(rel / vmax, 0.0, 1.0))
         rgba[~ok] = (0.5, 0.5, 0.5, 1.0)
-        plt.imsave(path, rgba)
+        _imsave(path, rgba)
         return float((rel[ok] >= vmax).mean()) if ok.any() else float("nan")
 
     # --- predicted depth, one robust shared range across the clip ---
@@ -322,11 +393,17 @@ def _export_heatmaps(
         x = np.clip((pred_np[i] - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
         rgba = turbo(x)
         rgba[~finite[i]] = (0.5, 0.5, 0.5, 1.0)
-        plt.imsave(os.path.join(hm_dir, f"{tag}_depth_{i:03d}.png"), rgba)
+        _imsave(os.path.join(hm_dir, f"{tag}_depth_{i:03d}.png"), rgba)
         written += 1
 
-    # --- accuracy vs GT ---
+    # --- accuracy vs GT, and the confidence panel that shares its mask ---
+    # One loop on purpose: conf_err_corr needs the per-pixel rel-error field and
+    # the GT-valid mask that gterr computes here, so splitting them would mean
+    # rebuilding both.
     gterr_means, gterr_sat = [], []
+    conf_means, conf_sat, conf_corr = [], [], []
+    conf_np = None if conf is None else conf.numpy()
+    viridis = matplotlib.colormaps["viridis"]
     for i in range(S):
         ok = valid_np[i] & (gt_np[i] > 0) & finite[i]
         rel = np.zeros_like(pred_np[i])
@@ -337,6 +414,33 @@ def _export_heatmaps(
         gterr_means.append(float(rel[ok].mean()) if ok.any() else np.nan)
         gterr_sat.append(sat)
         written += 1
+
+        if conf_np is None:
+            continue
+        # DENSE on purpose -- not masked to GT like gterr. Confidence exists at
+        # every pixel the model predicts, and the GT holes (where the gterr
+        # panel is gray) are exactly where a depth-COMPLETION model's own
+        # uncertainty is the only thing you have to read. Gray here means a
+        # non-finite confidence, i.e. a broken head, not "no GT".
+        cok = np.isfinite(conf_np[i])
+        span = max(conf_vmax - conf_vmin, 1e-9)
+        rgba = viridis(np.clip((conf_np[i] - conf_vmin) / span, 0.0, 1.0))
+        rgba[~cok] = (0.5, 0.5, 0.5, 1.0)
+        _imsave(os.path.join(hm_dir, f"{tag}_conf_{i:03d}.png"), rgba)
+        written += 1
+        conf_means.append(float(conf_np[i][cok].mean()) if cok.any() else np.nan)
+        conf_sat.append(
+            float((conf_np[i][cok] >= conf_vmax).mean()) if cok.any() else np.nan
+        )
+        # Does the confidence actually track the error? NEGATIVE means yes (high
+        # confidence where the error is low), which is the only reading under
+        # which these panels mean anything. ~0 means the map is decoration, and
+        # a POSITIVE value means the head is anti-calibrated. Computed on the
+        # GT-valid pixels only -- it is the one thing here that needs GT.
+        both = ok & cok
+        conf_corr.append(
+            _spearman(conf_np[i][both], rel[both]) if both.sum() >= 2 else np.nan
+        )
 
     # --- temporal self-consistency (adjacent pairs, GT-depth-free) ---
     tcons_means, tcons_sat = [], []
@@ -362,46 +466,78 @@ def _export_heatmaps(
     # fully-saturated gterr comparison passed for "no difference"), so the same
     # values go to CSV. tcons is a PER-PAIR series: row i holds the (i, i+1)
     # pair, and the last row's tcons cells are empty.
+    #
+    # The column SET depends on whether conf was passed, so consumers must key
+    # off the header row rather than fixed indices (compare_heatmap_summaries.py
+    # does). New columns are appended, never inserted, so older CSVs still
+    # parse.
     csv_path = os.path.join(hm_dir, f"{tag}_summary.csv")
     with open(csv_path, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["# tag", tag])
         w.writerow(["# rel_vmax", rel_vmax])
         w.writerow(["# tcons_vmax", tcons_vmax])
-        w.writerow(
-            [
-                "frame",
-                "gterr_mean",
-                "gterr_saturated_frac",
-                "tcons_mean",
-                "tcons_saturated_frac",
-            ]
-        )
+        header = [
+            "frame",
+            "gterr_mean",
+            "gterr_saturated_frac",
+            "tcons_mean",
+            "tcons_saturated_frac",
+        ]
+        if conf_np is not None:
+            w.writerow(["# conf_vmin", conf_vmin])
+            w.writerow(["# conf_vmax", conf_vmax])
+            header += ["conf_mean", "conf_saturated_frac", "conf_err_corr"]
+        w.writerow(header)
         for i in range(S):
             has_pair = i < S - 1
-            w.writerow(
-                [
-                    i,
-                    f"{gterr_means[i]:.6f}",
-                    f"{gterr_sat[i]:.6f}",
-                    f"{tcons_means[i]:.6f}" if has_pair else "",
-                    f"{tcons_sat[i]:.6f}" if has_pair else "",
+            row = [
+                i,
+                f"{gterr_means[i]:.6f}",
+                f"{gterr_sat[i]:.6f}",
+                f"{tcons_means[i]:.6f}" if has_pair else "",
+                f"{tcons_sat[i]:.6f}" if has_pair else "",
+            ]
+            if conf_np is not None:
+                row += [
+                    f"{conf_means[i]:.6f}",
+                    f"{conf_sat[i]:.6f}",
+                    f"{conf_corr[i]:.6f}",
                 ]
-            )
+            w.writerow(row)
     written += 1
     mean_gterr_sat = float(np.nanmean(gterr_sat)) if gterr_sat else float("nan")
     mean_tcons_sat = float(np.nanmean(tcons_sat)) if tcons_sat else float("nan")
-    for series, sat, vmax, flag in (
+    mean_conf_sat = float(np.nanmean(conf_sat)) if conf_sat else float("nan")
+    mean_conf_corr = float(np.nanmean(conf_corr)) if conf_corr else float("nan")
+    warn = [
         ("gterr", mean_gterr_sat, rel_vmax, "--rel-vmax"),
         ("tcons", mean_tcons_sat, tcons_vmax, "--tcons-vmax"),
-    ):
+    ]
+    if conf_np is not None:
+        warn.append(("conf", mean_conf_sat, conf_vmax, "--conf-vmax"))
+    for series, sat, vmax, flag in warn:
         if sat > 0.5:
             print(
                 f"  WARNING [{tag}]: {series} heatmaps are saturated at "
                 f"vmax={vmax} ({sat:.1%} of valid pixels clipped). The panels "
-                f"cannot show how large the error is -- raise {flag} and "
+                f"cannot show how large the value is -- raise {flag} and "
                 f"re-render before comparing them."
             )
+    if conf_np is not None:
+        # The panels are pictures of a field whose scale is arbitrary; this
+        # number is what says whether the field means anything at all.
+        verdict = (
+            "tracks error"
+            if mean_conf_corr < -0.1
+            else "ANTI-calibrated"
+            if mean_conf_corr > 0.1
+            else "uninformative"
+        )
+        print(
+            f"  [{tag}] conf: mean {np.nanmean(conf_means):.3f}, "
+            f"Spearman(conf, |pred-gt|/gt) = {mean_conf_corr:+.3f} ({verdict})"
+        )
 
     fig, ax = plt.subplots(figsize=(7, 3.2), constrained_layout=True)
     ax.plot(gterr_means, label="|pred-gt|/gt (per frame)", marker="o", ms=3)
@@ -420,10 +556,25 @@ def _export_heatmaps(
         )
     ax.set_xlabel("frame")
     ax.set_ylabel("mean relative error")
-    ax.set_title(
-        f"{tag}  (clipped: gterr {mean_gterr_sat:.0%}, tcons {mean_tcons_sat:.0%})"
-    )
-    ax.legend(fontsize=8)
+    title = f"{tag}  (clipped: gterr {mean_gterr_sat:.0%}, tcons {mean_tcons_sat:.0%}"
+    handles, labels = ax.get_legend_handles_labels()
+    if conf_np is not None:
+        # Twin axis: confidence is 1+exp(x) in arbitrary units, nothing like the
+        # relative-error scale on the left, so sharing one axis would flatten
+        # whichever series happens to be smaller.
+        ax2 = ax.twinx()
+        ax2.plot(conf_means, color="C2", marker="^", ms=3, lw=1, label="mean conf")
+        ax2.set_ylabel("mean predicted confidence")
+        h2, l2 = ax2.get_legend_handles_labels()
+        handles += h2
+        labels += l2
+        title += f", conf {mean_conf_sat:.0%}) rank corr {mean_conf_corr:+.2f}"
+    else:
+        title += ")"
+    ax.set_title(title, fontsize=9)
+    # no loc= -- matplotlib's "best" placement dodges the curves; a fixed corner
+    # sat on top of the gterr series
+    ax.legend(handles, labels, fontsize=8)
     fig.savefig(os.path.join(hm_dir, f"{tag}_summary.png"), dpi=150)
     plt.close(fig)
     return written + 1
@@ -500,10 +651,20 @@ def main() -> None:
         "--heatmaps",
         action="store_true",
         help="also write 2D PNG heatmaps per clip to <out-dir>/heatmaps: "
-        "colormapped predicted depth, |pred-gt|/gt accuracy maps, and "
-        "adjacent-pair warp self-consistency maps (the per-pixel field that "
-        "tae() reduces to a scalar), plus a per-frame summary curve and CSV. "
-        "Fixed color scale so base/finetuned panels are directly comparable.",
+        "colormapped predicted depth, |pred-gt|/gt accuracy maps, the model's "
+        "own predicted CONFIDENCE maps, and adjacent-pair warp self-consistency "
+        "maps (the per-pixel field that tae() reduces to a scalar), plus a "
+        "per-frame summary curve and CSV. Fixed color scales so base/finetuned "
+        "panels are directly comparable.",
+    )
+    ap.add_argument(
+        "--hm-scale",
+        type=int,
+        default=1,
+        help="integer upscale for heatmap PNGs (default 1 = native). Panels are "
+        "written at the model's working resolution (518x392), ~1.7in at 300dpi. "
+        "NEAREST block replication -- enlarges for print without inventing "
+        "structure, and adds NO information.",
     )
     ap.add_argument(
         "--rel-vmax",
@@ -523,8 +684,29 @@ def main() -> None:
         default=None,
         help="separate ceiling for the warp self-consistency maps (default: same "
         "as --rel-vmax). The two series diverge out of domain -- accuracy can run "
-        ">50% while consistency stays ~1% -- so one shared scale renders one of "
+        # NOTE the doubled %%: argparse runs every help string through
+        # %-expansion, so a bare % here makes --help itself raise ValueError
+        ">50%% while consistency stays ~1%% -- so one shared scale renders one of "
         "them useless. Set --rel-vmax 0.5 --tcons-vmax 0.03 for a scannet run.",
+    )
+    ap.add_argument(
+        "--conf-vmin",
+        type=float,
+        default=_CONF_VMIN,
+        help=f"confidence at the BOTTOM of the conf colormap (default {_CONF_VMIN}). "
+        "The depth head uses conf_activation='expp1' (1 + exp(x)), so 1.0 is its "
+        "hard floor; raise this to spread colour over a narrow high-confidence "
+        "band. Must match across the base and finetuned runs you pair.",
+    )
+    ap.add_argument(
+        "--conf-vmax",
+        type=float,
+        default=_CONF_VMAX,
+        help=f"confidence that saturates the conf colormap (default {_CONF_VMAX}). "
+        "expp1 is unbounded above, so a well-trained head can blow past this and "
+        "flatten every panel to one colour -- check the conf_saturated_frac column "
+        "of the summary CSV. Keep it IDENTICAL across the runs you pair, or the "
+        "two confidence panels are not comparable.",
     )
     ap.add_argument("--num-workers", type=int, default=4)
     args = ap.parse_args()
@@ -640,6 +822,7 @@ def main() -> None:
             )
             views, preds = result["views"], result["pred"]
             confs = _clip_confidences(preds)
+            conf_maps = _stack_depth_conf(preds)  # [B,S,H,W], the heatmap source
             # imgs is not in _stack_depth_batch; stack it the same way
             imgs = torch.stack([v["img"] for v in views], dim=1).float().cpu()
             pred, gt, valid, K, pose = _stack_depth_batch(views, preds)
@@ -667,6 +850,10 @@ def main() -> None:
                         pose[b],
                         rel_vmax=args.rel_vmax,
                         tcons_vmax=args.tcons_vmax,
+                        scale=args.hm_scale,
+                        conf=conf_maps[b],
+                        conf_vmin=args.conf_vmin,
+                        conf_vmax=args.conf_vmax,
                     )
                     print(f"  [{mode}] clip {exported}: {n_png} heatmap PNGs")
                 mean_c, min_c, max_c = confs[b]
