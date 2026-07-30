@@ -2,7 +2,7 @@
 #SBATCH --job-name=hypersim_preprocess
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=logs/hypersim_preprocess_%j.out
 # SBATCH --account=jdosch
 #SBATCH --partition=batch

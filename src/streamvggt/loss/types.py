@@ -113,7 +113,8 @@ class LossConfig:
     # and interacts with depth_metric. In scale-invariant mode residuals are
     # ~unit-normalized; in metric mode they are raw metres (much larger), which
     # swamps the -alpha*log(sigma) term -- retune depth_alpha (and depth_weights)
-    # when flipping depth_metric.
+    # when flipping depth_metric. Ignored entirely when depth_conf_weighting is
+    # False (there is no sigma term left to weight).
     depth_alpha: float = 0.1
     depth_trim: float = 0.2
     temp_grad_scales: int = 4
@@ -130,6 +131,24 @@ class LossConfig:
     # Retune depth_alpha when enabling: residuals shrink to ~relative units, so
     # the confidence scale (conf ~ alpha/err) shifts. Only DEPTH_TRAIN uses it.
     depth_log_space: bool = False
+    # The CONFIDENCE ABLATION knob (DEPTH_TRAIN only). True (default) keeps the
+    # shipped aleatoric-uncertainty depth term:
+    #     Ldepth = sigma*|pred - gt| + grad - depth_alpha*log(sigma)
+    # False removes BOTH confidence parts at once:
+    #     Ldepth = |pred - gt| + grad
+    # and depth_alpha becomes a no-op. The two must be removed together: with
+    # the weighting kept and the regularizer dropped (depth_alpha=0) the model
+    # minimizes sigma*err by driving sigma -> 0, which zeroes the accuracy term
+    # instead of ablating it. Nothing else consumes p["depth_conf"] in this
+    # recipe, so with the ablation on, the head's confidence channel gets no
+    # gradient and stays at its pretrained values.
+    #
+    # Cross-arm comparison: `total`/`Ldepth`/`Ldepth_main` are NOT on a common
+    # scale between the two settings (one carries a sigma factor and a log
+    # term, the other does not). Compare on the sigma-free readouts --
+    # absrel_metric / delta1 / TAE (also what checkpoint-best selects on) and
+    # the logged Ldepth_main_raw / Ldepth_grad.
+    depth_conf_weighting: bool = True
 
     # Regr3DPose / Regr3DPose_ScaleInv knobs.
     norm_mode: str = "?avg_dis"
@@ -188,6 +207,7 @@ class LossConfig:
                     diff_depth_th=self.diff_depth_th,
                     metric=self.depth_metric,
                     log_space=self.depth_log_space,
+                    conf_weighting=self.depth_conf_weighting,
                 )
 
             case Recipe.DISTILL:

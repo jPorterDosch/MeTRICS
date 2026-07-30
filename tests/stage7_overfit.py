@@ -7,6 +7,11 @@ the repo's real criterion:
   * grad checkpointing is on;
   * the experiment hash separates the two arms (different dirs) and the
     entrypoint fails fast on a directory collision with a completed run.
+
+Also runs the confidence-ablated objective (--loss.no-depth-conf-weighting)
+through the same real-model path, since the ablation changes what the criterion
+returns and a CPU/criterion-only check cannot see the model wiring. The loss
+ALGEBRA of that ablation is pinned separately in tests/loss_conf_ablation.py.
 """
 
 import os
@@ -37,10 +42,49 @@ from finetune_depth import (
 )
 
 
-def make_cfg(injection: InjectionType) -> FinetuneDepthCfg:
+def make_cfg(injection: InjectionType, conf_weighting: bool = True) -> FinetuneDepthCfg:
     cfg = FinetuneDepthCfg(pretrained=CKPT)
     cfg.depth_cond.injection = injection
+    cfg.loss.depth_conf_weighting = conf_weighting
     return cfg
+
+
+def _overfit(cfg: FinetuneDepthCfg, label: str, dev: torch.device) -> None:
+    """Build through the entrypoint and overfit one synthetic clip; asserts the
+    loss goes down and does not zigzag."""
+    mcfg = MetricCfg(
+        depth_cond=cfg.depth_cond,
+        lora=cfg.lora,
+        encoder_cache=cfg.encoder_cache,
+        train=cfg.train,
+    ).validate()
+    model, _ = build_model(cfg, mcfg, dev)
+    assert model.model.aggregator.grad_checkpointing, "grad checkpointing must be on"
+
+    batch = make_synthetic_clip(4, device=dev, seed=0)
+    simulate_sparse_depth(
+        batch,
+        mode=mcfg.depth_cond.sim_mode,
+        patch_size=mcfg.depth_cond.sim_patch_size,
+        mask_ratio=mcfg.depth_cond.sim_mask_ratio,
+    )
+    losses = overfit_steps(model, batch, cfg.loss, steps=5)
+    rises = sum(1 for a, b in zip(losses, losses[1:]) if b > a)
+    print(f"[stage7] {label}: {losses[0]:.4f} -> {losses[-1]:.4f} (rises {rises})")
+    assert losses[-1] < losses[0], f"{label}: loss did not decrease: {losses}"
+    assert rises <= 1, f"{label}: loss not monotonically-ish: {losses}"
+    free(model)
+
+
+def check_conf_ablation_overfit() -> None:
+    """The confidence-ablated depth objective (no sigma weighting, no
+    -alpha*log(sigma)) must still train the real model. Values are NOT
+    comparable to the arms above -- one loss carries a sigma factor and a log
+    term and the other does not -- so this checks the trend only."""
+    torch.manual_seed(0)
+    cfg = make_cfg(InjectionType.TOKEN, conf_weighting=False)
+    assert cfg.loss.describe() == "DepthTrainLoss(no_conf)", cfg.loss.describe()
+    _overfit(cfg, "token/no_conf", device())
 
 
 def check_overfit() -> None:
@@ -48,34 +92,7 @@ def check_overfit() -> None:
     for injection in (InjectionType.HEAD, InjectionType.TOKEN):
         torch.manual_seed(0)
         cfg = make_cfg(injection)
-        mcfg = MetricCfg(
-            depth_cond=cfg.depth_cond,
-            lora=cfg.lora,
-            encoder_cache=cfg.encoder_cache,
-            train=cfg.train,
-        ).validate()
-        model, _ = build_model(cfg, mcfg, dev)
-        assert model.model.aggregator.grad_checkpointing, (
-            "grad checkpointing must be on"
-        )
-
-        batch = make_synthetic_clip(4, device=dev, seed=0)
-        simulate_sparse_depth(
-            batch,
-            mode=mcfg.depth_cond.sim_mode,
-            patch_size=mcfg.depth_cond.sim_patch_size,
-            mask_ratio=mcfg.depth_cond.sim_mask_ratio,
-        )
-        losses = overfit_steps(model, batch, cfg.loss, steps=5)
-        rises = sum(1 for a, b in zip(losses, losses[1:]) if b > a)
-        print(
-            f"[stage7] {injection.value}: {losses[0]:.4f} -> {losses[-1]:.4f} (rises {rises})"
-        )
-        assert losses[-1] < losses[0], (
-            f"{injection.value}: loss did not decrease: {losses}"
-        )
-        assert rises <= 1, f"{injection.value}: loss not monotonically-ish: {losses}"
-        free(model)
+        _overfit(cfg, injection.value, dev)
 
 
 def check_hash_and_collision() -> None:
@@ -93,6 +110,17 @@ def check_hash_and_collision() -> None:
         build_manifest(make_cfg(InjectionType.HEAD))
     )
     print("[stage7] experiment hashes: stable, and arms separate")
+
+    # the confidence ablation must be part of run identity too -- otherwise the
+    # two arms of experiments/hammer_finetune/train_hammer_noconf.sh resolve to
+    # the same output dir and the second one refuses to launch.
+    mn = build_manifest(make_cfg(InjectionType.TOKEN, conf_weighting=False))
+    assert experiment_hash(mn) != experiment_hash(mt), (
+        "conf-ablation arm must not share the control's hash"
+    )
+    ndiff = {k for k in mt if mt[k] != mn[k]}
+    assert ndiff == {"loss.depth_conf_weighting"}, f"unexpected manifest diffs: {ndiff}"
+    print("[stage7] conf-ablation arm: separate hash, one manifest field apart")
 
     # collision fail-fast: ANY pre-existing output dir must refuse to relaunch.
     # The dir name is built from experiment_id (the single source of truth for
@@ -117,6 +145,7 @@ def check_hash_and_collision() -> None:
 def main() -> None:
     check_hash_and_collision()
     check_overfit()
+    check_conf_ablation_overfit()
     print("STAGE 7 PASS")
 
 

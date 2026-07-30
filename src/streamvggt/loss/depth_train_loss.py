@@ -18,6 +18,7 @@ class DepthTrainLoss(MultiLoss):
         diff_depth_th: float = 0.05,
         metric: bool = False,
         log_space: bool = False,
+        conf_weighting: bool = True,
     ) -> None:
         super().__init__()
         # metric=True supervises absolute depth end-to-end: the depth term skips
@@ -29,6 +30,11 @@ class DepthTrainLoss(MultiLoss):
         # background stops dominating. The temporal term is left in linear depth
         # (it already masks to near-static pixels via diff_depth_th).
         self.log_space = log_space
+        # conf_weighting=False drops the learned-confidence weighting AND its
+        # -alpha*log(sigma) regularizer from the depth term (alpha then has no
+        # effect); the temporal term never used confidence. See
+        # DepthOrPmapLoss.__init__ for why the two parts must go together.
+        self.conf_weighting = conf_weighting
         self.temporal_loss = TemporalGradientMatchingLoss(
             trim=trim,
             temp_grad_scales=temp_grad_scales,
@@ -37,7 +43,10 @@ class DepthTrainLoss(MultiLoss):
             diff_depth_th=diff_depth_th,
         )
         self.depth_loss = DepthOrPmapLoss(
-            alpha=alpha, metric=metric, log_space=log_space
+            alpha=alpha,
+            metric=metric,
+            log_space=log_space,
+            conf_weighting=conf_weighting,
         )
 
         if weights is None:
@@ -47,7 +56,10 @@ class DepthTrainLoss(MultiLoss):
         self.weights = weights
 
     def get_name(self) -> str:
-        return "DepthTrainLoss"
+        # the ablation is visible in the logged criterion string; only used for
+        # repr (compute_loss returns its own details dict, so this is not a
+        # metric key).
+        return "DepthTrainLoss" if self.conf_weighting else "DepthTrainLoss(no_conf)"
 
     def compute_loss(
         self,

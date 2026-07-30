@@ -12,6 +12,18 @@
 # 'sparse_depth', so for the first time the model is conditioned on genuine
 # sensor sparsity instead of simulated patch masking.
 #
+# Framing modes (SPOT's cameras are mounted sideways, so raw frames are
+# landscape but gravity points sideways):
+#   default              518x392 landscape, gravity WRONG
+#   --rotate cw          392x518 portrait, gravity right, aspect out of
+#                        distribution (the model trained on ~4:3 landscape)
+#   --rotate cw --landscape-crop
+#                        518x392 landscape, gravity right AND aspect in
+#                        distribution: crop a 4:3 window out of the rotated
+#                        frame, discarding top/bottom rather than sides.
+# The last two have identical patch counts (1036), so an A/B between them
+# isolates framing rather than model capacity.
+#
 # Cameras: the model predicts its own (pose_enc -> extrinsics + intrinsics).
 # To keep a base-vs-finetuned A/B attributable to DEPTH, the pose track is a
 # shared reference: the --base run caches its predicted K/pose to
@@ -45,9 +57,12 @@ from finetune_depth import (
 )
 from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
 from visualize_depth import (
+    _CONF_VMAX,
+    _CONF_VMIN,
     _REL_VMAX,
     _export_heatmaps,
     _per_frame_scene,
+    _stack_depth_conf,
     load_saved_args,
     rebuild_metric_cfg,
     resolve_checkpoint,
@@ -59,10 +74,12 @@ RAW_W, RAW_H = 640, 480
 _ROTATIONS = {"none": None, "cw": Image.ROTATE_270, "ccw": Image.ROTATE_90}
 
 
-def target_dims(rotate: str) -> tuple[int, int]:
+def target_dims(rotate: str, landscape_crop: bool = False) -> tuple[int, int]:
     """(width, height) of the model input. SPOT's cameras are mounted sideways,
-    so rotating to upright turns the raw landscape frames portrait."""
-    return (518, 392) if rotate == "none" else (392, 518)
+    so rotating to upright turns the raw landscape frames portrait -- unless
+    --landscape-crop re-crops a 4:3 window out of that tall frame, which puts
+    the model back at 518x392, the primary training resolution."""
+    return (392, 518) if rotate != "none" and not landscape_crop else (518, 392)
 
 
 def read_spot_depth(path: Path) -> np.ndarray:
@@ -79,38 +96,124 @@ def read_spot_depth(path: Path) -> np.ndarray:
 def _resize_crop(img: Image.Image, tw: int, th: int, resample) -> Image.Image:
     """Scale to cover (tw, th), then center-crop the overshoot (~5px here).
     Depth/mask must use NEAREST (no blending across holes); color BILINEAR."""
-    # TODO: might want floor instead of round here
     s = max(tw / img.width, th / img.height)
-    img = img.resize((round(img.width * s), round(img.height * s)), resample)
+    nw, nh = round(img.width * s), round(img.height * s)
+    # Image.crop pads with zeros instead of raising when the box overruns the
+    # source, so an undershoot here would be a silent black edge on every frame
+    if nw < tw or nh < th:
+        raise ValueError(f"resize {nw}x{nh} does not cover {tw}x{th}")
+    img = img.resize((nw, nh), resample)
     left, top = (img.width - tw) // 2, (img.height - th) // 2
     return img.crop((left, top, left + tw, top + th))
 
 
+def _landscape_crop(img: Image.Image, anchor: float) -> Image.Image:
+    """Crop the widest RAW_W:RAW_H (4:3) window out of an upright frame.
+
+    SPOT frames are 4:3, but the cameras are mounted sideways, so --rotate
+    turns them PORTRAIT -- an aspect the model essentially never trained on.
+    Discarding the top/bottom of the rotated frame (rather than the sides)
+    restores the training aspect while keeping gravity correct.
+
+    The crop aspect is RAW_W/RAW_H and deliberately NOT tw/th: 4:3 is what a
+    HAMMER/ScanNet frame arrives as, so this puts SPOT through the identical
+    downstream chain instead of a subtly different one.
+
+    `anchor` places the window vertically as a fraction of the DISCARDED band
+    (0=top, 0.5=center, 1=bottom). No-op on a frame that is already >= 4:3, so
+    this degrades safely under --rotate none.
+    """
+    a = RAW_W / RAW_H
+    if img.width / img.height >= a:
+        cw, ch = round(img.height * a), img.height
+    else:
+        cw, ch = img.width, round(img.width / a)
+    left = (img.width - cw) // 2
+    top = min(max(round(anchor * (img.height - ch)), 0), img.height - ch)
+    return img.crop((left, top, left + cw, top + ch))
+
+
+def _prep(img: Image.Image, rot, anchor: float | None, tw: int, th: int, resample):
+    """rotate -> optional 4:3 landscape crop -> scale-to-cover + center-crop.
+
+    Colour and depth MUST both go through this one function: the shared
+    rotation and the shared integer crop boxes are the whole reason they stay
+    pixel-aligned. `resample` is the ONLY thing allowed to differ between them
+    (BILINEAR for colour, NEAREST for depth so holes never blend).
+    """
+    if rot is not None:
+        img = img.transpose(rot)
+    if anchor is not None:
+        img = _landscape_crop(img, anchor)
+    return _resize_crop(img, tw, th, resample)
+
+
+_ANCHORS = {"top": 0.0, "center": 0.5, "bottom": 1.0}
+
+
+def parse_anchor(s: str) -> float:
+    """--crop-anchor: a named position or a raw float, both in [0,1]."""
+    v = _ANCHORS.get(s)
+    if v is None:
+        try:
+            v = float(s)
+        except ValueError:
+            raise SystemExit(
+                f"--crop-anchor {s!r} is neither {'/'.join(_ANCHORS)} nor a float"
+            )
+    if not 0.0 <= v <= 1.0:
+        raise SystemExit(f"--crop-anchor {s!r} outside [0,1]")
+    return v
+
+
+def geometry_key(args) -> str:
+    """Everything that changes WHAT the model saw, and therefore which image
+    frame the cached K/poses live in. Two runs whose keys differ cannot be
+    paired -- one fingerprint beats a growing chain of per-key checks, where
+    any key missing from an older cache silently degrades to 'matches'."""
+    tw, th = target_dims(args.rotate, args.landscape_crop)
+    a = parse_anchor(args.crop_anchor) if args.landscape_crop else None
+    return (
+        f"start={args.start}|stride={args.stride}|num_views={args.num_views}"
+        f"|rotate={args.rotate}|anchor={a}|wh={tw}x{th}"
+    )
+
+
 def load_spot_views(
-    seq_dir: Path, start: int, num_views: int, stride: int, rotate: str
+    seq_dir: Path,
+    start: int,
+    num_views: int,
+    stride: int,
+    rotate: str,
+    anchor: float | None = None,
 ) -> list[dict]:
     """Build the [S]-list of single-view dicts the streaming path consumes.
     img is ImgNorm-style [-1,1] (matching dataset output; _prepare_batch
     rescales to [0,1]); real sensor sparse depth rides along, so
-    simulate_sparse_depth will skip these views."""
-    tw, th = target_dims(rotate)
+    simulate_sparse_depth will skip these views.
+
+    `anchor` is None for the portrait path and a float in [0,1] to enable the
+    4:3 landscape crop (see _landscape_crop)."""
+    tw, th = target_dims(rotate, anchor is not None)
     rot = _ROTATIONS[rotate]
     views = []
     for i in range(num_views):
         idx = start + i * stride
-        rgb = Image.open(seq_dir / "color" / f"{idx}.png").convert("RGB")
-        if rot is not None:
-            rgb = rgb.transpose(rot)
-        rgb = _resize_crop(rgb, tw, th, Image.BILINEAR)
+        rgb = _prep(
+            Image.open(seq_dir / "color" / f"{idx}.png").convert("RGB"),
+            rot,
+            anchor,
+            tw,
+            th,
+            Image.BILINEAR,
+        )
         img = torch.from_numpy(np.asarray(rgb).copy()).float().permute(2, 0, 1) / 255.0
         img = img * 2.0 - 1.0  # ImgNorm mean=std=0.5
 
         depth_im = Image.fromarray(
             read_spot_depth(seq_dir / "depth" / str(idx)), mode="F"
         )
-        if rot is not None:
-            depth_im = depth_im.transpose(rot)
-        depth = np.asarray(_resize_crop(depth_im, tw, th, Image.NEAREST))
+        depth = np.asarray(_prep(depth_im, rot, anchor, tw, th, Image.NEAREST))
         depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
         mask = depth > 0
 
@@ -190,23 +293,89 @@ def main() -> None:
         default="none",
         help="rotate the raw frames to upright BEFORE the model (SPOT cameras "
         "are mounted sideways). Applied to color and depth alike; the model "
-        "then runs at the portrait 392x518 resolution from the training list, "
-        "and everything downstream (GLB, heatmaps, poses) is upright.",
+        "then runs at the portrait 392x518 resolution from the training list "
+        "(unless --landscape-crop), and everything downstream (GLB, heatmaps, "
+        "poses) is upright.",
+    )
+    ap.add_argument(
+        "--landscape-crop",
+        action="store_true",
+        help="after --rotate, crop a 4:3 LANDSCAPE window out of the tall "
+        "portrait frame and run at 518x392 -- the primary TRAINING resolution "
+        "-- instead of the portrait 392x518. Gravity stays correct AND the "
+        "aspect matches the training distribution. Patch count is identical "
+        "either way (1036), so a with/without A/B isolates FRAMING, not model "
+        "capacity. Requires --rotate cw|ccw.",
+    )
+    ap.add_argument(
+        "--crop-anchor",
+        default="0.75",
+        help="vertical placement of the --landscape-crop window as a fraction "
+        "of the DISCARDED band (280px): 'top'/'center'/'bottom' or a float in "
+        "[0,1]. Default 0.75 -> top row 210, keeping rows 210-569: slightly "
+        "below center, biased toward the ground SPOT walks on.",
     )
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--heatmaps", action="store_true")
     ap.add_argument(
+        "--hm-scale",
+        type=int,
+        default=1,
+        help="integer upscale for heatmap PNGs (default 1 = native). The panels "
+        "are written at the model's working resolution (518x392), i.e. ~1.7in "
+        "at 300dpi -- too small to print. 4 gives 2072x1568 (~7in at 300dpi). "
+        "NEAREST block replication: it enlarges without inventing structure and "
+        "adds NO information, it only stops a poster pipeline from resampling "
+        "for you.",
+    )
+    ap.add_argument(
         "--rel-vmax",
         type=float,
         default=_REL_VMAX,
-        help="relative error that saturates the gterr/tcons colormaps (default "
+        help="relative error that saturates the GTERR colormap (default "
         f"{_REL_VMAX}). On SPOT 'gterr' is deviation from the SENSOR's sparse "
         "depth rather than true GT, which can run well above the in-domain "
         "default; if the summary CSV's saturated_frac columns are near 1 the "
         "panels are flat and carry no comparable structure. Keep it identical "
         "across the base and finetuned runs you intend to pair.",
     )
+    ap.add_argument(
+        "--tcons-vmax",
+        type=float,
+        default=None,
+        help="separate ceiling for the warp self-consistency maps (default: "
+        "same as --rel-vmax). On SPOT the two series sit an order of magnitude "
+        "apart -- gterr runs ~0.15 while tcons stays ~0.01 -- so one shared "
+        "scale renders one of them useless. Try --rel-vmax 0.3 "
+        "--tcons-vmax 0.05.",
+    )
+    ap.add_argument(
+        "--conf-vmin",
+        type=float,
+        default=_CONF_VMIN,
+        help=f"bottom of the predicted-confidence colormap (default {_CONF_VMIN}, "
+        "the expp1 floor). Must match across the runs you pair.",
+    )
+    ap.add_argument(
+        "--conf-vmax",
+        type=float,
+        default=_CONF_VMAX,
+        help=f"confidence that saturates the conf colormap (default {_CONF_VMAX}). "
+        "SPOT is the furthest out of domain of anything here, so its confidences "
+        "sit lower than in-domain -- check conf_saturated_frac in the summary CSV "
+        "and lower this if every panel is dark. Keep it identical across the pair.",
+    )
     args = ap.parse_args()
+
+    # --rotate defaults to "none", on which the 4:3 crop is a silent no-op --
+    # so without this the operator gets the OLD path while believing they got
+    # the new one, and the geometry fingerprint below would happily accept it
+    if args.landscape_crop and args.rotate == "none":
+        raise SystemExit(
+            "--landscape-crop needs --rotate cw|ccw; the raw frame is already 4:3"
+        )
+    anchor = parse_anchor(args.crop_anchor) if args.landscape_crop else None
+    print(f"geometry: {geometry_key(args)}")
 
     ckpt_path = resolve_checkpoint(args.weights, args.checkpoint)
     print(f"Loading checkpoint: {ckpt_path}")
@@ -244,9 +413,9 @@ def main() -> None:
 
     seq_dir = Path(args.seq_dir)
     views = load_spot_views(
-        seq_dir, args.start, args.num_views, args.stride, args.rotate
+        seq_dir, args.start, args.num_views, args.stride, args.rotate, anchor
     )
-    tw, th = target_dims(args.rotate)
+    tw, th = target_dims(args.rotate, args.landscape_crop)
     sensor = torch.stack([v["sparse_depth"][0] for v in views])  # [S,H,W], pre-device
     sensor_mask = torch.stack([v["sparse_depth_mask"][0] for v in views])
     dens = sensor_mask.float().mean().item()
@@ -275,6 +444,11 @@ def main() -> None:
     pred_depth = torch.stack([p["depth"].detach() for p in preds], dim=1)
     pred_depth = pred_depth.squeeze(-1).float().cpu()[0]  # [S,H,W]
     print(f"pred depth: range [{pred_depth.min():.2f}, {pred_depth.max():.2f}] m")
+    pred_conf = _stack_depth_conf(preds)[0]  # [S,H,W], the model's own uncertainty
+    print(
+        f"pred conf: range [{pred_conf.min():.2f}, {pred_conf.max():.2f}], "
+        f"mean {pred_conf.mean():.2f}"
+    )
 
     # ---- shared pose track (see header) ----
     own_w2c, own_K = predicted_cameras(preds, (th, tw))
@@ -290,6 +464,9 @@ def main() -> None:
             stride=args.stride,
             num_views=args.num_views,
             rotate=args.rotate,
+            landscape_crop=args.landscape_crop,
+            crop_anchor=args.crop_anchor,
+            geometry=geometry_key(args),
         )
         print(f"pose cache written: {cache_path}")
         w2c, K = own_w2c, own_K
@@ -299,15 +476,32 @@ def main() -> None:
                 f"no pose cache at {cache_path}; run --base into this --out-dir first"
             )
         cached = np.load(cache_path)
-        for k in ("start", "stride", "num_views"):
-            if int(cached[k]) != getattr(args, k):
+        want = geometry_key(args)
+        if "geometry" in cached:
+            if str(cached["geometry"]) != want:
                 raise SystemExit(
-                    f"pose cache {k}={int(cached[k])} != {getattr(args, k)}; frames must match"
+                    f"pose cache geometry {str(cached['geometry'])!r} != {want!r}; "
+                    "the cached K/poses live in a different image frame. Re-run "
+                    "--base into this --out-dir, or use a fresh one."
                 )
-        if "rotate" in cached and str(cached["rotate"]) != args.rotate:
+        elif args.landscape_crop:
+            # a pre-fingerprint cache is portrait by construction; letting a
+            # landscape run attach to it would compare mismatched geometry
             raise SystemExit(
-                f"pose cache rotate={cached['rotate']} != {args.rotate}; frames must match"
+                f"{cache_path} predates --landscape-crop and cannot be paired "
+                "with it; re-run --base into a fresh --out-dir."
             )
+        else:
+            # legacy cache, legacy mode: the original per-key checks still hold
+            for k in ("start", "stride", "num_views"):
+                if int(cached[k]) != getattr(args, k):
+                    raise SystemExit(
+                        f"pose cache {k}={int(cached[k])} != {getattr(args, k)}; frames must match"
+                    )
+            if "rotate" in cached and str(cached["rotate"]) != args.rotate:
+                raise SystemExit(
+                    f"pose cache rotate={cached['rotate']} != {args.rotate}; frames must match"
+                )
         w2c, K = torch.from_numpy(cached["w2c"]), torch.from_numpy(cached["K"])
         print(f"pose divergence vs cached base track: {pose_divergence(own_w2c, w2c)}")
 
@@ -332,7 +526,10 @@ def main() -> None:
 
     if args.heatmaps:
         # 'gterr' here = deviation from the SENSOR's sparse metric depth at its
-        # ~valid pixels (dotted maps); tcons is dense and GT-free as always
+        # ~valid pixels (dotted maps); tcons and conf are dense and GT-free as
+        # always. NOTE the conf_err_corr column is computed against that sparse
+        # sensor depth, so on SPOT it is a correlation over ~a few percent of
+        # pixels, not the whole frame.
         n = _export_heatmaps(
             os.path.join(args.out_dir, "heatmaps"),
             f"{mode}_clip0",
@@ -342,6 +539,11 @@ def main() -> None:
             K,
             c2w,
             rel_vmax=args.rel_vmax,
+            tcons_vmax=args.tcons_vmax,
+            scale=args.hm_scale,
+            conf=pred_conf,
+            conf_vmin=args.conf_vmin,
+            conf_vmax=args.conf_vmax,
         )
         print(f"wrote {n} heatmap PNGs")
 
