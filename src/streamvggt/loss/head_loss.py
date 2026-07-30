@@ -43,6 +43,7 @@ class DepthOrPmapLoss(torch.nn.Module):
         metric: bool = False,
         log_space: bool = False,
         log_eps: float = 1e-3,
+        conf_weighting: bool = True,
     ) -> None:
         super().__init__()
         self.alpha = alpha
@@ -63,6 +64,20 @@ class DepthOrPmapLoss(torch.nn.Module):
         # log is on the [B,H,W,1] depth, not the pointmap branch).
         self.log_space = log_space
         self.log_eps = log_eps
+        # conf_weighting=False ABLATES the aleatoric-uncertainty formulation:
+        # the accuracy term becomes the plain masked error instead of
+        # sigma*error, and the -alpha*log(sigma) regularizer that keeps sigma
+        # from collapsing disappears with it. The two go together by
+        # construction -- dropping only the regularizer (alpha=0) leaves
+        # min sigma*err, which is trivially minimized by sigma -> 0 and kills
+        # the accuracy signal, so it is a degenerate objective, not an ablation.
+        # Implemented by substituting sigma == 1 rather than branching the
+        # algebra: main becomes the raw error and reg = -alpha*log(1) = 0
+        # exactly. Side effect (intended): p["depth_conf"] never enters the
+        # graph, so the head's confidence channel receives NO gradient and
+        # stays at its pretrained values -- the checkpoint is still
+        # export/viz-compatible, but its conf output is not trained.
+        self.conf_weighting = conf_weighting
 
     def gradient_loss_multi_scale(
         self, pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor | None = None
@@ -143,11 +158,21 @@ class DepthOrPmapLoss(torch.nn.Module):
                 pred_normalized, gt_normalized = pred, gt
             scale, shift = closed_form_scale_and_shift(pred_normalized, gt_normalized)
             pred_aligned = pred_normalized * scale + shift
-        sigma_p = sigma_p.clamp(min=1e-6)
-        if sigma_g is not None:
-            sigma_g = sigma_g.clamp(min=1e-6)
-        # sigma = 0.5 * (sigma_p + sigma_g)
-        sigma = sigma_p
+        if self.conf_weighting:
+            sigma_p = sigma_p.clamp(min=1e-6)
+            if sigma_g is not None:
+                sigma_g = sigma_g.clamp(min=1e-6)
+            # sigma = 0.5 * (sigma_p + sigma_g)
+            sigma = sigma_p
+        else:
+            # confidence ablation -- see __init__. ones_like carries no grad, so
+            # the predicted confidence is dropped from the objective entirely
+            # (it is not merely down-weighted). Shape follows sigma_p ([B,H,W])
+            # so the expand/mask indexing below is untouched; fall back to the
+            # prediction when the caller passes no confidence at all.
+            sigma = torch.ones_like(
+                pred_aligned[..., 0] if sigma_p is None else sigma_p
+            )
 
         # compare in log-depth (relative, scale-aware) when requested. clamp
         # keeps the log finite where pred is <=0 (the inv_log head can emit
@@ -186,6 +211,13 @@ class DepthOrPmapLoss(torch.nn.Module):
             # AbsRel), conf is mean sigma (the weight). If main rises on val while
             # main_raw stays flat, the overfit is confidence, not depth accuracy.
             # Neither is in `total` (both detached, logging only).
+            #
+            # Under conf_weighting=False the keys keep these meanings and hold
+            # their degenerate values: conf == 1 (the weight really is 1),
+            # main == main_raw, reg == 0. So `main_raw` and `grad` are the only
+            # criterion components comparable ACROSS a conf-weighting ablation --
+            # `main`/`total` are not on the same scale between the two arms. Read
+            # the arms off absrel_metric / delta1 / TAE, which are sigma-free.
             vm = valid_mask[..., None].expand(-1, -1, -1, C)
             main_raw = diff[vm].mean()
             conf = sigma[valid_mask].mean()
