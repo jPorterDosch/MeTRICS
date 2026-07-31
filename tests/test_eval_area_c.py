@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import pathlib
 import unittest
@@ -35,6 +36,28 @@ class CustomMaskAlignmentTest(unittest.TestCase):
                 np.testing.assert_allclose(
                     aligned.cpu().numpy()[custom_mask], np.array([2.0, 4.0]), atol=1e-5
                 )
+
+
+class VideoAffineRouteTest(unittest.TestCase):
+    def test_scale_and_shift_routes_to_exact_affine_solver(self):
+        source = (ROOT / "src/eval/video_depth/eval_depth.py").read_text()
+        tree = ast.parse(source)
+        affine_calls = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            if "args.align == 'scale&shift'" not in ast.unparse(node.test):
+                continue
+            affine_calls.extend(
+                call
+                for call in ast.walk(node.body[0])
+                if isinstance(call, ast.Call)
+                and getattr(call.func, "id", None) == "depth_evaluation"
+            )
+        self.assertEqual(len(affine_calls), 3)
+        for call in affine_calls:
+            keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+            self.assertTrue(ast.literal_eval(keywords["align_with_lstsq"]))
 
 
 if __name__ == "__main__":
