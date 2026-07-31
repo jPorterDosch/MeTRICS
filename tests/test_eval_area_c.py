@@ -77,5 +77,19 @@ class ExactDeltaThresholdTest(unittest.TestCase):
                 self.assertEqual(metrics["delta < 1."], 1.0)
 
 
+class ReprojectionOcclusionTest(unittest.TestCase):
+    def test_nearest_depth_wins_independent_of_source_order(self):
+        module = load_module(
+            "area_c_reprojection", "src/eval/temporal_consistency/metrics.py"
+        )
+        points = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 2.0]], dtype=np.float32)
+        warp_mask = np.ones((1, 1), dtype=bool)
+        transform = np.eye(4, dtype=np.float32)
+        near_far = module.point2depth(points, warp_mask, transform)
+        far_near = module.point2depth(points[::-1], warp_mask, transform)
+        np.testing.assert_array_equal(near_far, np.array([[1.0]], dtype=np.float32))
+        np.testing.assert_array_equal(far_near, near_far)
+
+
 if __name__ == "__main__":
     unittest.main()

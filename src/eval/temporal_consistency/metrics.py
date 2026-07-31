@@ -73,8 +73,9 @@ def point2depth(
     )
     depth = depth[mask]
     cam_coords = cam_coords[mask]
-    warp_depth = np.zeros((h, w), dtype=np.float32)
-    warp_depth[cam_coords[..., 1], cam_coords[..., 0]] = depth
+    warp_depth = np.full((h, w), np.inf, dtype=np.float32)
+    np.minimum.at(warp_depth, (cam_coords[..., 1], cam_coords[..., 0]), depth)
+    warp_depth[np.isinf(warp_depth)] = 0
     warp_depth = warp_depth * warp_mask
     return warp_depth
 
