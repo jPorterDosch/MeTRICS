@@ -295,18 +295,54 @@ def build_train_loader(
             # (epoch + 788), and ResizedDataset's 1000-slot mapping from
             # epoch + 777 -- val_loop pins both with set_epoch(0) each pass.
             # (make_sampler raises NotImplementedError on shuffle=False.)
-            return get_data_loader(
-                val_dataset,
-                batch_size=batch_size,
-                num_workers=args.num_workers,
-                shuffle=True,
-                drop_last=False,
-                accelerator=accelerator,
-                fixed_length=args.fixed_length,
-            )
+            return _test_loader(val_dataset, args, accelerator, batch_size)
 
         case _:
             raise ValueError(f"Expected split in {list(Split)}, got: {split}.")
+
+
+def _test_loader(
+    dataset, args: FinetuneDepthCfg, accelerator, batch_size: int
+) -> torch.utils.data.DataLoader:
+    """The evaluation loader settings, in one place (shared by the combined
+    TEST loader and the per-dataset val loaders)."""
+    return get_data_loader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=args.num_workers,
+        shuffle=True,
+        drop_last=False,
+        accelerator=accelerator,
+        fixed_length=args.fixed_length,
+    )
+
+
+def build_val_loaders(
+    args: FinetuneDepthCfg,
+    accelerator,
+    batch_size: int | None = None,
+) -> list[torch.utils.data.DataLoader]:
+    """One loader per configured val dataset -- never a CatDataset.
+
+    CatDataset concatenates into a flat index space and CustomRandomSampler
+    shuffles that space globally, so at batch_size > 1 a batch mixes datasets
+    (~88% of batches for a 50/50 pair at batch_size 4). The criterion reduces
+    over the whole batch, so such a batch has no honest per-dataset loss. One
+    dataset per loader makes homogeneity structural rather than hoped-for, and
+    val_loop asserts it per batch.
+
+    A single-dataset config delegates to build_train_loader: same dataset
+    object, same sampler, same seed as before this split existed."""
+    if len(args.val_dataset.dataset) == 1:
+        return [build_train_loader(args, Split.TEST, accelerator, batch_size)]
+
+    printer.info("Building per-dataset validation loaders %s", args.val_dataset)
+    if batch_size is None:
+        batch_size = args.batch_size
+    return [
+        _test_loader(dataset, args, accelerator, batch_size)
+        for dataset in args.val_dataset.build_all()
+    ]
 
 
 def build_model(
@@ -388,18 +424,18 @@ def run(
     cudnn.benchmark = args.benchmark
 
     data_loader_train = build_train_loader(args, Split.TRAIN, accelerator)
-    data_loader_val = (
-        build_train_loader(args, Split.TEST, accelerator) if args.val_freq > 0 else None
-    )
+    data_loaders_val = build_val_loaders(args, accelerator) if args.val_freq > 0 else []
     # streaming_eval drives StreamVGGT.inference, which folds the batch dim of
     # frame["img"] into the sequence, so it must see one clip at a time: give
     # it its own batch-1 loader over the val config instead of constraining
-    # the whole run's batch_size (reuse the val loader when it is already 1)
+    # the whole run's batch_size. Batch-1 is already one dataset per batch, so
+    # this one stays a single loader over the whole val mixture (its metrics are
+    # per-clip and keyed by the clip's own dataset label).
     data_loader_stream = None
-    if data_loader_val is not None:
+    if data_loaders_val:
         data_loader_stream = (
-            data_loader_val
-            if args.batch_size == 1
+            data_loaders_val[0]
+            if args.batch_size == 1 and len(data_loaders_val) == 1
             else build_train_loader(args, Split.TEST, accelerator, batch_size=1)
         )
 
@@ -423,13 +459,13 @@ def run(
     optimizer, model, data_loader_train = accelerator.prepare(
         optimizer, model, data_loader_train
     )
-    if data_loader_val is not None:
-        stream_is_val = data_loader_stream is data_loader_val
-        data_loader_val = accelerator.prepare(data_loader_val)
+    if data_loaders_val:
+        stream_is_val = data_loader_stream is data_loaders_val[0]
+        data_loaders_val = [accelerator.prepare(dl) for dl in data_loaders_val]
         # the stream loader is prepared too so it shards across ranks the same
-        # way (_reduce_depth_metrics assumes every rank walked its own shard)
+        # way (_reduce_metrics assumes every rank walked its own shard)
         data_loader_stream = (
-            data_loader_val
+            data_loaders_val[0]
             if stream_is_val
             else accelerator.prepare(data_loader_stream)
         )
@@ -480,13 +516,11 @@ def run(
         # the loop breaks at `epoch >= args.epochs` before training, so the
         # last epoch that reaches this point is args.epochs - 1
         is_last_epoch = epoch == args.epochs - 1
-        if data_loader_val is not None and (
-            epoch % args.val_freq == 0 or is_last_epoch
-        ):
+        if data_loaders_val and (epoch % args.val_freq == 0 or is_last_epoch):
             val_stats = val_loop(
                 model,
                 train_criterion,
-                data_loader_val,
+                data_loaders_val,
                 accelerator,
                 epoch,
                 # training already logged up to (epoch+1)*len this epoch, and
@@ -503,7 +537,7 @@ def run(
             # while AbsRel plateaus/worsens, so selecting on loss_avg pinned
             # "best" to the earliest epoch. absrel_metric_avg (metric-scale,
             # lower is better) tracks the actual objective and is already
-            # globally reduced across ranks (_reduce_depth_metrics), so it needs
+            # globally reduced across ranks (_reduce_metrics), so it needs
             # no median/avg caveat. Fall back to loss_avg only if the metric
             # never fired on any rank (e.g. a val pass with no valid GT pixels).
             selection = val_stats.get("absrel_metric_avg", val_stats["loss_avg"])
@@ -523,11 +557,11 @@ def run(
     # protocol, e.g. after the sequential-sampling change). step=0 keeps it
     # below/at the streaming_eval step so wandb drops neither. This IS the only
     # val pass, so it is the one that exports GLBs when asked.
-    if args.epochs == 0 and data_loader_val is not None:
+    if args.epochs == 0 and data_loaders_val:
         val_loop(
             model,
             train_criterion,
-            data_loader_val,
+            data_loaders_val,
             accelerator,
             0,
             step=0,
@@ -1046,20 +1080,23 @@ def _accumulate_batch_loss(
     loss_details: dict,
     sums: dict[str, float],
     counts: dict[str, int],
-) -> bool:
+) -> None:
     """Attribute one batch's criterion loss (and every scalar term in
     loss_details) to its dataset, into the same "<dataset>/<metric>" accumulator
-    shape _reduce_metrics consumes. Returns False and accumulates NOTHING when
-    the batch spans more than one dataset.
+    shape _reduce_metrics consumes.
 
-    The criterion reduces over the whole batch, so a mixed batch has no per-clip
-    decomposition to split -- attributing it to any one dataset would be a lie,
-    and splitting it evenly would smear one dataset's loss into another's series.
-    With the default batch_size=1 every batch is one clip, hence one dataset, so
-    nothing is dropped."""
+    The criterion reduces over the whole batch (a masked mean over its valid
+    pixels), so a mixed batch has no per-clip decomposition to split: build the
+    val loaders per dataset (build_val_loaders) and every batch is homogeneous
+    by construction."""
     labels = {clip_dataset_label(views, b) for b in range(views[0]["img"].shape[0])}
     if len(labels) != 1:
-        return False
+        # a mixed batch can only be mis-attributed or silently dropped, and a
+        # wrong per-dataset loss is worse than no run at all
+        raise ValueError(
+            f"val batch spans datasets {sorted(labels)}: the per-dataset loss "
+            "requires one dataset per batch (build_val_loaders guarantees this)"
+        )
     dataset = labels.pop()
 
     def scalar(v) -> float | None:
@@ -1133,7 +1170,7 @@ def _log_val_stats(
 def val_loop(
     model: torch.nn.Module,
     criterion: torch.nn.Module,
-    data_loader: DataLoader,
+    data_loaders: list[DataLoader],
     accelerator: Accelerator,
     epoch: int,
     step: int,
@@ -1146,6 +1183,13 @@ def val_loop(
     inference=False gives the criterion loss AND the predictions for the depth
     metrics in a single pass. Mirrors finetune.py::test_one_epoch.
 
+    Takes ONE LOADER PER VAL DATASET (build_val_loaders) and walks them in
+    sequence, accumulating into shared meters. Every batch is then a single
+    dataset by construction, which is what makes the per-dataset loss series
+    meaningful -- see _accumulate_batch_loss. The accumulators are reduced and
+    logged ONCE at the end, so a validation epoch is still one wandb row and
+    the blended figures cover every dataset.
+
     export_glb is decided by the CALLER (which pass counts as the last one is
     the caller's business -- the epochs==0 pure-eval path has no "last epoch"
     at all), and is still bounded by args.export_glb_max_clips here."""
@@ -1155,20 +1199,15 @@ def val_loop(
     model.eval()
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.meters = defaultdict(lambda: misc.SmoothedValue(window_size=9**9))
-    header = "Val Epoch: [{}]".format(epoch)
-    # pin to epoch 0 every pass: the sampler seeds its rng from epoch + 788
-    # and ResizedDataset its slot mapping from epoch + 777, so this yields the
-    # identical clip set and order on every validation
-    _set_data_epoch(data_loader, 0)
     depth_sums: dict[str, float] = defaultdict(float)
     depth_counts: dict[str, int] = defaultdict(int)
     loss_sums: dict[str, float] = defaultdict(float)
     loss_counts: dict[str, int] = defaultdict(int)
-    mixed_batches = 0
     glb_exported = 0
-    # main process only: the val loader shards the same clip set across ranks,
+    # main process only: the val loaders shard the same clip set across ranks,
     # so every rank would bank near-identical panels and only rank 0's survive
-    # accelerator.log anyway
+    # accelerator.log anyway. One sampler across all passes -> the image budget
+    # is spread over every val dataset by construction.
     sampler = (
         ValImageSampler(args.val_log_images)
         if args.val_log_images > 0 and accelerator.is_main_process
@@ -1180,57 +1219,58 @@ def val_loop(
     # stream is restored on exit
     devices = [accelerator.device] if accelerator.device.type == "cuda" else []
     with torch.random.fork_rng(devices=devices):
-        torch.manual_seed(args.seed)
-        if devices:
-            torch.cuda.manual_seed_all(args.seed)
-        for _, batch in enumerate(
-            metric_logger.log_every(data_loader, args.print_freq, accelerator, header)
-        ):
-            _prepare_batch(batch, mcfg)
-            result = loss_of_one_batch(
-                batch,
-                model,
-                criterion,
-                accelerator,
-                inference=False,
-                symmetrize_batch=False,
-                use_amp=bool(args.amp),
-            )
-            loss_value, loss_details = result["loss"]
-            metric_logger.update(loss=float(loss_value), **loss_details)
-            mixed_batches += not _accumulate_batch_loss(
-                result["views"], loss_value, loss_details, loss_sums, loss_counts
-            )
-            for k, vals in _val_depth_metrics(result["views"], result["pred"]).items():
-                depth_sums[k] += float(np.sum(vals))
-                depth_counts[k] += len(vals)
-            if sampler is not None:
-                sampler.add_batch(result["views"], result["pred"])
-            # gated by the caller (only the final val pass asks for GLBs -- a
-            # quick end-of-run sanity check, not one set per epoch;
-            # visualize_depth.py can render any checkpoint, incl. best, on
-            # demand). streaming_eval writes its own single set after training.
-            if export_glb:
-                glb_exported += _export_eval_glbs(
-                    result["views"],
-                    result["pred"],
-                    args.output_dir,
-                    tag=prefix,
-                    accelerator=accelerator,
-                    start_idx=glb_exported,
-                    max_clips=args.export_glb_max_clips,
+        for i, data_loader in enumerate(data_loaders):
+            # re-seed per loader, so each dataset's masks are independent of how
+            # many clips the earlier loaders happened to consume
+            torch.manual_seed(args.seed)
+            if devices:
+                torch.cuda.manual_seed_all(args.seed)
+            # pin to epoch 0 every pass: the sampler seeds its rng from
+            # epoch + 788 and ResizedDataset its slot mapping from epoch + 777,
+            # so this yields the identical clip set and order on every validation
+            _set_data_epoch(data_loader, 0)
+            header = f"Val Epoch: [{epoch}] ({i + 1}/{len(data_loaders)})"
+            for batch in metric_logger.log_every(
+                data_loader, args.print_freq, accelerator, header
+            ):
+                _prepare_batch(batch, mcfg)
+                result = loss_of_one_batch(
+                    batch,
+                    model,
+                    criterion,
+                    accelerator,
+                    inference=False,
+                    symmetrize_batch=False,
+                    use_amp=bool(args.amp),
                 )
-            del result, batch
+                loss_value, loss_details = result["loss"]
+                metric_logger.update(loss=float(loss_value), **loss_details)
+                _accumulate_batch_loss(
+                    result["views"], loss_value, loss_details, loss_sums, loss_counts
+                )
+                for k, vals in _val_depth_metrics(
+                    result["views"], result["pred"]
+                ).items():
+                    depth_sums[k] += float(np.sum(vals))
+                    depth_counts[k] += len(vals)
+                if sampler is not None:
+                    sampler.add_batch(result["views"], result["pred"])
+                # gated by the caller (only the final val pass asks for GLBs -- a
+                # quick end-of-run sanity check, not one set per epoch;
+                # visualize_depth.py can render any checkpoint, incl. best, on
+                # demand). streaming_eval writes its own single set after training.
+                if export_glb:
+                    glb_exported += _export_eval_glbs(
+                        result["views"],
+                        result["pred"],
+                        args.output_dir,
+                        tag=prefix,
+                        accelerator=accelerator,
+                        start_idx=glb_exported,
+                        max_clips=args.export_glb_max_clips,
+                    )
+                del result, batch
 
-    if mixed_batches:
-        # only reachable with batch_size > 1 over a mixed val set; the blended
-        # loss (metric_logger) still counts these batches, the per-dataset one
-        # cannot -- say so rather than showing a silently short series
-        printer.info(
-            "%d val batches spanned >1 dataset: excluded from the per-dataset "
-            "losses (blended loss still includes them)",
-            mixed_batches,
-        )
     depth_per_dataset, depth_blended = _reduce_metrics(
         depth_sums, depth_counts, accelerator
     )

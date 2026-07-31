@@ -106,13 +106,11 @@ python finetune_depth.py \
     --val-dataset.highres-root None \
     \
     `# --- optimization ------------------------------------------------------` \
-    `# batch-size 4: streaming_eval gets its own batch-1 loader now, so the`  \
-    `# train/val batch is unconstrained. 4 clips x 10 views assumes a`        \
-    `# >=40GB card -- plausible because the frozen backbone (no LoRA, head`   \
-    `# arm) stores no activations for backward -- but it is NOT memory-`      \
-    `# profiled: drop to 2 or 1 if the job OOMs. lr 1e-5 -> cosine to`        \
-    `# min-lr 1e-7 with 0.5-epoch warmup, AdamW wd 0.05, bf16 autocast`       \
-    `# (amp 1), grads clipped to 1.0 in the loop`                             \
+    `# batch-size 1: streaming_eval has its own batch-1 loader, so the train`  \
+    `# batch is unconstrained -- raising it was considered (4 clips x 10`      \
+    `# views on a >=40GB card) but never memory-profiled, so it stayed at 1.`  \
+    `# lr 1e-5 -> cosine to min-lr 1e-7 with 0.5-epoch warmup, AdamW wd 0.05,` \
+    `# bf16 autocast (amp 1), grads clipped to 1.0 in the loop`                \
     --batch-size 1 \
     --accum-iter 1 \
     --epochs 10 \
