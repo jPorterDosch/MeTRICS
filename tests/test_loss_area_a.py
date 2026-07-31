@@ -2,7 +2,7 @@ import torch
 
 from streamvggt.loss.depth_train_loss import DepthTrainLoss
 from streamvggt.loss.distill_loss import DistillLoss
-from streamvggt.loss.head_loss import DepthOrPmapLoss
+from streamvggt.loss.head_loss import CameraLoss, DepthOrPmapLoss
 from streamvggt.loss.trimmed_loss import TrimmedMAELoss
 from streamvggt.loss.types import LossConfig
 
@@ -120,6 +120,19 @@ def test_temporal_loss_handles_single_frame_and_rejects_bad_config() -> None:
             raise AssertionError(f"invalid {field} was accepted")
 
 
+def test_camera_loss_rejects_non_finite_inputs() -> None:
+    for name, prediction, target in (
+        ("pred_pose", torch.full((1, 9), torch.nan), torch.zeros(1, 9)),
+        ("gt_pose", torch.zeros(1, 9), torch.full((1, 9), torch.inf)),
+    ):
+        try:
+            CameraLoss()(prediction, target)
+        except ValueError as error:
+            assert name in str(error)
+        else:
+            raise AssertionError(f"non-finite {name} was accepted")
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
@@ -127,3 +140,4 @@ if __name__ == "__main__":
     test_loss_config_rejects_unknown_reduction()
     test_confidence_disabled_depth_does_not_require_confidence_key()
     test_temporal_loss_handles_single_frame_and_rejects_bad_config()
+    test_camera_loss_rejects_non_finite_inputs()

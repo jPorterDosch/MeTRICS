@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 
 from .utils import (
-    check_and_fix_inf_nan,
     closed_form_scale_and_shift,
     normalize_pointcloud,
     point_map_to_normal,
@@ -17,13 +16,14 @@ class CameraLoss(torch.nn.Module):
         self.weights = weights
 
     def forward(self, pred_pose: torch.Tensor, gt_pose: torch.Tensor) -> torch.Tensor:
+        if not torch.isfinite(pred_pose).all():
+            raise ValueError("pred_pose contains non-finite values")
+        if not torch.isfinite(gt_pose).all():
+            raise ValueError("gt_pose contains non-finite values")
+
         loss_T = (pred_pose[..., :3] - gt_pose[..., :3]).abs()
         loss_R = (pred_pose[..., 3:7] - gt_pose[..., 3:7]).abs()
         loss_FL = (pred_pose[..., 7:] - gt_pose[..., 7:]).abs()
-
-        loss_T = check_and_fix_inf_nan(loss_T, "loss_T")
-        loss_R = check_and_fix_inf_nan(loss_R, "loss_R")
-        loss_FL = check_and_fix_inf_nan(loss_FL, "loss_FL")
 
         # Clamp outlier translation loss to prevent instability, then average
         loss_T = loss_T.clamp(max=100).mean()
