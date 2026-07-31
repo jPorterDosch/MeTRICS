@@ -53,6 +53,7 @@ from streamvggt.depth_cond import (
 from eval.temporal_consistency.metrics import depth_evaluation, tae
 from finetune import save_current_code, setup_for_distributed  # reuse
 from streamvggt.utils.geometry import unproject_depth_map_to_point_map
+from val_images import ValImageSampler, clip_dataset_label
 from visual_util import predictions_to_glb
 from streamvggt.datasets import (
     CatDataset,
@@ -207,6 +208,12 @@ class FinetuneDepthCfg:
     export_glb: bool = False
     export_glb_max_clips: int = 4
 
+    # visualization: per-validation-pass [image | prediction | GT depth] panels
+    # logged to wandb, stratified over the configured val datasets. This is the
+    # whole knob -- how many panels per pass; 0 disables. Not part of the
+    # experiment identity.
+    val_log_images: int = 5
+
     # derived at startup (do not set on the CLI)
     output_dir: str = ""
 
@@ -227,6 +234,7 @@ _NON_IDENTITY_FIELDS = (
     "benchmark",
     "export_glb",
     "export_glb_max_clips",
+    "val_log_images",
 )
 
 
@@ -821,14 +829,41 @@ def _img2lidar(K: torch.Tensor, pose: torch.Tensor) -> np.ndarray:
 
 
 def _clip_dataset(views: list[dict], b: int) -> str:
-    """Dataset label of clip b (all views in a clip come from one scene, hence
-    one dataset). The collated 'dataset' field is a per-sample list/tuple; a
-    bare str covers the unbatched case. Lowercased so keys are consistent
-    regardless of loader casing (HAMMER_Multi emits 'hammer', ScanNet_Multi
-    'ScanNet')."""
-    d = views[0].get("dataset", "unknown")
-    label = d if isinstance(d, str) else d[b]
-    return str(label).lower()
+    """Dataset label of clip b -- see val_images.clip_dataset_label. Shared with
+    the sample-image sampler so the metric sections and the logged panels are
+    keyed by the same names."""
+    return clip_dataset_label(views, b)
+
+
+def _log_val_images(
+    sampler: ValImageSampler | None,
+    accelerator: Accelerator,
+    prefix: str,
+    epoch: int,
+    step: int,
+) -> int:
+    """Log the pass's [image | prediction | GT] panels as one wandb media row
+    and return how many went out. Same `step` as the pass's scalar row, so the
+    panels land on the epoch's existing row (wandb drops rows whose step is
+    below the current max -- equal is fine, lower is not).
+
+    No-ops when nothing was collected or no tracker is initialized (the sampler
+    is main-process-only, and so is accelerator.log)."""
+    if sampler is None or not accelerator.trackers:
+        return 0
+    figs = sampler.render(epoch)
+    if not figs:
+        return 0
+    import wandb
+    import matplotlib.pyplot as plt
+
+    accelerator.log(
+        {f"{prefix}/samples": [wandb.Image(fig, caption=cap) for cap, fig in figs]},
+        step=step,
+    )
+    for _, fig in figs:
+        plt.close(fig)
+    return len(figs)
 
 
 def _val_depth_metrics(views: list[dict], preds: list[dict]) -> dict[str, list[float]]:
@@ -1085,6 +1120,14 @@ def val_loop(
     depth_sums: dict[str, float] = defaultdict(float)
     depth_counts: dict[str, int] = defaultdict(int)
     glb_exported = 0
+    # main process only: the val loader shards the same clip set across ranks,
+    # so every rank would bank near-identical panels and only rank 0's survive
+    # accelerator.log anyway
+    sampler = (
+        ValImageSampler(args.val_log_images)
+        if args.val_log_images > 0 and accelerator.is_main_process
+        else None
+    )
 
     # fork + fix the torch RNG: the sparse-conditioning masks (torch.rand) and
     # query-point sampling are identical every epoch, and the training RNG
@@ -1112,6 +1155,8 @@ def val_loop(
             for k, vals in _val_depth_metrics(result["views"], result["pred"]).items():
                 depth_sums[k] += float(np.sum(vals))
                 depth_counts[k] += len(vals)
+            if sampler is not None:
+                sampler.add_batch(result["views"], result["pred"])
             # gated by the caller (only the final val pass asks for GLBs -- a
             # quick end-of-run sanity check, not one set per epoch;
             # visualize_depth.py can render any checkpoint, incl. best, on
@@ -1130,6 +1175,7 @@ def val_loop(
 
     depth_avgs = _reduce_depth_metrics(depth_sums, depth_counts, accelerator)
     results = _log_val_stats(metric_logger, depth_avgs, accelerator, prefix, step)
+    _log_val_images(sampler, accelerator, prefix, epoch, step)
     model.train(True)
     return results
 
