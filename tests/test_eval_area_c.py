@@ -60,5 +60,22 @@ class VideoAffineRouteTest(unittest.TestCase):
             self.assertTrue(ast.literal_eval(keywords["align_with_lstsq"]))
 
 
+class ExactDeltaThresholdTest(unittest.TestCase):
+    def test_perfect_depth_satisfies_delta_one(self):
+        depth = np.ones((1, 2), dtype=np.float32)
+        cases = [
+            ("temporal", "src/eval/temporal_consistency/metrics.py", {"metric_scale": True}),
+            ("monodepth", "src/eval/monodepth/tools.py", {"metric_scale": True}),
+            ("video", "src/eval/video_depth/tools.py", {"metric_scale": True}),
+        ]
+        for name, path, alignment in cases:
+            with self.subTest(name=name):
+                module = load_module(f"area_c_delta_{name}", path)
+                metrics, *_ = module.depth_evaluation(
+                    depth, depth, max_depth=None, **alignment
+                )
+                self.assertEqual(metrics["delta < 1."], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
