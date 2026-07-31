@@ -101,8 +101,22 @@ def test_nneg_is_an_absolute_count() -> None:
         raise AssertionError("nneg larger than n_corres was accepted")
 
 
+def test_invalid_depth_pixels_are_not_positive_correspondences() -> None:
+    view = {
+        "pts3d": np.zeros((2, 2, 3)),
+        "camera_intrinsics": np.eye(3),
+        "camera_pose": np.eye(4),
+        "valid_mask": np.zeros((2, 2), dtype=bool),
+    }
+    _, _, valid = extract_correspondences_from_pts3d(
+        view, view, 1, np.random.default_rng(0)
+    )
+    assert not valid.any()
+
+
 if __name__ == "__main__":
     test_ray_directions_ignore_camera_translation()
     test_irregular_stride_respects_effective_gap_range()
     test_metric_loaders_reject_nonmetric_label()
     test_nneg_is_an_absolute_count()
+    test_invalid_depth_pixels_are_not_positive_correspondences()

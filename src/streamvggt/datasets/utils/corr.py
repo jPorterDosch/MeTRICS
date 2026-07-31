@@ -65,6 +65,12 @@ def extract_correspondences_from_pts3d(
         corres1_to_2, corres2_to_1, ret_recip=True
     )
     is_reciprocal2 = corres1_to_2[corres2_to_1] == np.arange(len(corres2_to_1))
+    valid1 = view1["valid_mask"].reshape(-1)
+    valid2 = view2["valid_mask"].reshape(-1)
+    is_reciprocal1 &= valid1 & valid2[corres1_to_2]
+    is_reciprocal2 &= valid2 & valid1[corres2_to_1]
+    pos1 = is_reciprocal1.nonzero()[0]
+    pos2 = corres1_to_2[pos1]
 
     if target_n_corres is None:
         if ret_xy:
