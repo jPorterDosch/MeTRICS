@@ -5,7 +5,7 @@ from streamvggt.loss.distill_loss import DistillLoss
 from streamvggt.loss.head_loss import CameraLoss, DepthOrPmapLoss
 from streamvggt.loss.l_loss import L21
 from streamvggt.loss.regr_3d_pose import Regr3DPose
-from streamvggt.loss.gradient_loss import TemporalGradientMatchingLoss
+from streamvggt.loss.gradient_loss import GradientLoss, TemporalGradientMatchingLoss
 from streamvggt.loss.trimmed_loss import TrimmedMAELoss
 from streamvggt.loss.types import LossConfig, Recipe
 from streamvggt.loss.utils import (
@@ -82,13 +82,18 @@ def test_spatial_gradient_uses_valid_edges_without_cropping() -> None:
 
 
 def test_loss_config_rejects_unknown_reduction() -> None:
-    try:
-        LossConfig(reduction="typo")
-    except ValueError as error:
-        assert "reduction" in str(error)
-        assert "typo" in str(error)
-    else:
-        raise AssertionError("unknown reduction was accepted")
+    for constructor in (
+        lambda: LossConfig(reduction="typo"),
+        lambda: TrimmedMAELoss(reduction="typo"),
+        lambda: GradientLoss(reduction="typo"),
+    ):
+        try:
+            constructor()
+        except ValueError as error:
+            assert "reduction" in str(error)
+            assert "typo" in str(error)
+        else:
+            raise AssertionError("unknown reduction was accepted")
 
 
 def test_confidence_disabled_depth_does_not_require_confidence_key() -> None:

@@ -8,6 +8,8 @@ class GradientLoss(torch.nn.Module):
     def __init__(self, scales: int = 4, reduction: str = "batch-based") -> None:
         super().__init__()
 
+        if reduction not in {"batch-based", "image-based"}:
+            raise ValueError(f"invalid reduction {reduction!r}")
         if reduction == "batch-based":
             self.__reduction = reduction_batch_based
         else:

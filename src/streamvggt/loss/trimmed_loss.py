@@ -73,6 +73,8 @@ class TrimmedMAELoss(torch.nn.Module):
 
         if not 0 <= trim < 1:
             raise ValueError(f"invalid trim {trim!r}")
+        if reduction not in {"batch-based", "image-based"}:
+            raise ValueError(f"invalid reduction {reduction!r}")
 
         self.trim = trim
 
