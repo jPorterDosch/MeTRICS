@@ -1394,6 +1394,9 @@ def streaming_eval(
 
 
 def main(cfg: FinetuneDepthCfg) -> None:
+    if cfg.resume is None and cfg.start_epoch != 0:
+        raise ValueError("start_epoch must be 0 for a fresh run; use --resume to continue")
+
     mcfg = MetricCfg(
         depth_cond=cfg.depth_cond,
         lora=cfg.lora,

@@ -125,6 +125,18 @@ class TrainAreaDTests(unittest.TestCase):
             fd._check_finite_loss(1.0, {"loss": 1.0}, accel)
         self.assertEqual(accel.reduction, "min")
 
+    def test_fresh_run_rejects_nonzero_start_epoch(self) -> None:
+        cfg = fd.FinetuneDepthCfg(start_epoch=9)
+        original = fd.build_manifest
+        fd.build_manifest = lambda cfg: (_ for _ in ()).throw(
+            AssertionError("manifest must not be built")
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "start_epoch"):
+                fd.main(cfg)
+        finally:
+            fd.build_manifest = original
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
