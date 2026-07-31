@@ -8,7 +8,7 @@ Role: Defense, no-commit mode.
 
 ### R1-1 and R2-1 — all-invalid GT becomes all-valid supervision
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised independently by R1 (wrong-numbers lens) and R2 (contracts-and-runtime lens); these are the same defect.
+**Verdict: UPHELD — FIXED in bac1cac.** Raised independently by R1 (wrong-numbers lens) and R2 (contracts-and-runtime lens); these are the same defect.
 
 Failure scenario: with two all-invalid frames, zero stored GT depth, unit predicted depth, and unit confidence, `DepthTrainLoss(metric=True)` reports total `1.0`, `Ldepth=1.0`, and `Ltemporal=0.0`. The same GT is therefore invalid to the temporal term and fully supervised to the depth term. Equivalent `ones_like` fallbacks affect finetune depth and distillation depth/point maps.
 
@@ -16,7 +16,7 @@ Minimal patch, **NOT APPLIED**: in `depth_train_loss.py:117-124`, `finetune_loss
 
 ### R1-2 — scale/shift fit merges the batch and includes invalid pixels
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in 0a6a819.** Raised by R1.
 
 Failure scenario: two independently alignable samples with required scales 2 and 4 are flattened into one fit with scale 3. Invalid storage values also affect that fit because `closed_form_scale_and_shift` has no mask input.
 
@@ -24,7 +24,7 @@ Minimal patch, **NOT APPLIED**: in `utils.py:138-178`, retain the batch dimensio
 
 ### R1-3 — trimmed MAE loses its denominator and image ownership
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in c03c57b.** Raised by R1.
 
 Failure scenario: ten valid pixels with error 1 and `trim=0.2` return `0.800000011920929`, not 1, because eight retained errors are divided by the original count of ten. The globally flattened sort also makes image-based reduction associate sorted pixels with unrelated per-image counts.
 
@@ -32,7 +32,7 @@ Minimal patch, **NOT APPLIED**: in `trimmed_loss.py:92-103`, for batch-based red
 
 ### R1-4 — spatial gradients drop edge strips and average masked zeros
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in c018c86.** Raised by R1.
 
 Failure scenario: one valid horizontal edge of unit error produces `0.5` in a 2x2 image and `0.006172839552164078` in a 10x10 image. A horizontal edge on the last row is removed by cropping both directional fields to `(H-1,W-1)`.
 
@@ -40,7 +40,7 @@ Minimal patch, **NOT APPLIED**: in `head_loss.py:119-137`, remove the common `mi
 
 ### R1-5 — normal loss ignores returned normal-validity masks
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in c1175cd.** Raised by R1.
 
 Failure scenario: identical planar 3x3 point maps with every source pixel valid produce normal loss `0.1111111044883728`; undefined boundary normals enter the unmasked mean.
 
@@ -56,7 +56,7 @@ Reason deferred: the unused parameters and invariant results are real, but Area 
 
 ### R1-7 — robust median includes invalid zeros
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in 8c0caba.** Raised by R1.
 
 Failure scenario: valid values `[10,10]` plus four invalid pixels report median 0, scale 10, and normalized valid values `[1,1]`; the center changes with mask density.
 
@@ -64,7 +64,7 @@ Minimal patch, **NOT APPLIED**: in `utils.py:94-96`, compute each valid batch it
 
 ### R1-8 and R2-3 — temporal loss has no zero-stride or configuration-domain handling
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** R1-8 and R2-3(a) are the same `cnt == 0` defect for `T=1`; R2 additionally raised `temp_grad_scales=0`, `depth_trim=1.0`, and negative `diff_depth_th`.
+**Verdict: UPHELD — FIXED in 0c4b18e.** R1-8 and R2-3(a) are the same `cnt == 0` defect for `T=1`; R2 additionally raised `temp_grad_scales=0`, `depth_trim=1.0`, and negative `diff_depth_th`.
 
 Failure scenario: a one-frame tensor and a multi-frame loss configured with zero temporal scales both raise `ZeroDivisionError`. A full trim or negative threshold silently produces zero temporal signal.
 
@@ -72,7 +72,7 @@ Minimal patch, **NOT APPLIED**: in `gradient_loss.py:110`, return a graph-preser
 
 ### R2-2 — unknown reduction strings silently select image-based reduction
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in f14258c.** Raised by R2.
 
 Failure scenario: both `GradientLoss(reduction="typo")` and `TrimmedMAELoss(reduction="typo")` select `reduction_image_based`, so a spelling error changes the objective instead of failing configuration.
 
@@ -80,7 +80,7 @@ Minimal patch, **NOT APPLIED**: in `types.py:166-171`, validate that `reduction`
 
 ### R2-4 — non-finite camera predictions become zero error
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in e2fa480.** Raised by R2.
 
 Failure scenario: an all-NaN nine-component prediction against finite zero GT prints three replacement warnings and returns camera loss `0.0`, treating divergence as perfect.
 
@@ -96,7 +96,7 @@ Reason deferred: adding tracking to FINETUNE would be a larger recipe change req
 
 ### R2-6 — confidence-disabled depth still requires `depth_conf`
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in 999e1a7.** Raised by R2.
 
 Failure scenario: `DepthOrPmapLoss(metric=True, conf_weighting=False)` accepts `sigma_p=None`, but the containing `DepthTrainLoss` raises `KeyError: 'depth_conf'` before calling it when a depth-only prediction is supplied.
 
@@ -104,7 +104,7 @@ Minimal patch, **NOT APPLIED**: in `depth_train_loss.py:116`, set `sigma_p = p["
 
 ### R2-7 — scale-loss path has a deterministic call/signature mismatch
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised as a finding by R2 and previously raised as a question by R1.
+**Verdict: UPHELD — FIXED in 3e4d193.** Raised as a finding by R2 and previously raised as a question by R1.
 
 Failure scenario: either call in `get_all_pts3d_with_scale_loss` passes five positional lists plus `norm_self_only=` to `get_norm_factor_point_cloud`, whose signature accepts three positional lists plus that keyword, producing `TypeError` before a scale loss. Repository search found no caller, so the path is dormant but still broken as defined.
 
