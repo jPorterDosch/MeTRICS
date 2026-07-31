@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from collections import defaultdict
 
 import torch
 
@@ -38,6 +39,22 @@ class TrainAreaDTests(unittest.TestCase):
             fd.gather_object = original
         self.assertEqual(per_dataset, {"hammer": {"loss": 3.25}})
         self.assertEqual(blended, {"loss": 3.25})
+
+    def test_validation_loss_is_clip_weighted(self) -> None:
+        sums, counts = defaultdict(float), defaultdict(int)
+
+        def views(batch_size: int) -> list[dict]:
+            return [
+                {
+                    "img": torch.zeros(batch_size, 3, 1, 1),
+                    "dataset": ["hammer"] * batch_size,
+                }
+            ]
+
+        fd._accumulate_batch_loss(views(4), 1.0, {}, sums, counts)
+        fd._accumulate_batch_loss(views(1), 9.0, {}, sums, counts)
+        self.assertEqual(counts["hammer/loss"], 5)
+        self.assertAlmostEqual(sums["hammer/loss"] / counts["hammer/loss"], 2.6)
 
 
 if __name__ == "__main__":

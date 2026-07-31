@@ -1097,6 +1097,7 @@ def _accumulate_batch_loss(
             "requires one dataset per batch (build_val_loaders guarantees this)"
         )
     dataset = labels.pop()
+    batch_size = views[0]["img"].shape[0]
 
     def scalar(v) -> float | None:
         """Same coercion misc.MetricLogger.update applies, so the per-dataset
@@ -1112,8 +1113,8 @@ def _accumulate_batch_loss(
     for name, val in (("loss", loss_value), *loss_details.items()):
         v = scalar(val)
         if v is not None:
-            sums[f"{dataset}/{name}"] += v
-            counts[f"{dataset}/{name}"] += 1
+            sums[f"{dataset}/{name}"] += v * batch_size
+            counts[f"{dataset}/{name}"] += batch_size
     return True
 
 
