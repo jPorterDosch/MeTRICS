@@ -114,6 +114,17 @@ class TrainAreaDTests(unittest.TestCase):
         self.assertNotIn("hammer/tae", metrics)
         self.assertNotIn("hammer/tae_sq", metrics)
 
+    def test_remote_nonfinite_loss_fails_every_rank(self) -> None:
+        class RemoteFailureReducer(ReturningReducer):
+            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+                self.reduction = reduction
+                return torch.zeros_like(tensor)
+
+        accel = RemoteFailureReducer()
+        with self.assertRaisesRegex(FloatingPointError, "another rank"):
+            fd._check_finite_loss(1.0, {"loss": 1.0}, accel)
+        self.assertEqual(accel.reduction, "min")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

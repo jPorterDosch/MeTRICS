@@ -11,7 +11,6 @@ import datetime
 import json
 import math
 import os
-import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -638,6 +637,21 @@ def _prepare_batch(batch: list[dict], mcfg: MetricCfg) -> None:
     )
 
 
+def _check_finite_loss(
+    loss_value: float, loss_details: dict, accelerator: Accelerator
+) -> None:
+    local_finite = math.isfinite(loss_value)
+    finite = torch.tensor(local_finite, device=accelerator.device)
+    if accelerator.num_processes > 1:
+        finite = accelerator.reduce(finite, reduction="min")
+    if not finite.item():
+        if local_finite:
+            raise FloatingPointError("Non-finite loss detected on another rank")
+        raise FloatingPointError(
+            f"Loss is {loss_value}, loss details: {loss_details}"
+        )
+
+
 def train_loop(
     model: torch.nn.Module,
     criterion: torch.nn.Module,
@@ -686,11 +700,7 @@ def train_loop(
             )
             loss, loss_details = result["loss"]
             loss_value = float(loss)
-            if not math.isfinite(loss_value):
-                print(
-                    f"Loss is {loss_value}, stopping training, loss details: {loss_details}"
-                )
-                sys.exit(1)
+            _check_finite_loss(loss_value, loss_details, accelerator)
             if not result.get("already_backprop", False):
                 loss_scaler(
                     loss,
