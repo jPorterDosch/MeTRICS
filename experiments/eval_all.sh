@@ -159,8 +159,7 @@ spot_pair () {  # $1 = out dir, $2 = --start
     # unprojects with the CACHED track so the A/B stays attributable to depth.
     # All geometry flags are one variable -- they are hashed into the cache's
     # fingerprint, so a mismatch between the two runs hard-fails by design.
-    # local geom=(--rotate cw --landscape-crop --crop-anchor top
-    local geom=(--rotate cw
+    local geom=(--rotate cw --landscape-crop --crop-anchor top
                 --start "$start" --stride 2 --num-views "$NUM_VIEWS"
                 --seq-dir "$SPOT_SEQ" --heatmaps "${SPOT_SCALES[@]}"
                 "${TIMING_ARGS[@]}" --out-dir "$out")
