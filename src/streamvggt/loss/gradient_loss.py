@@ -107,4 +107,4 @@ class TemporalGradientMatchingLoss(torch.nn.Module):
                 ) * pow(self.temp_grad_decay, scale)
                 cnt += 1
 
-        return total / cnt
+        return total / cnt if cnt else prediction.sum() * 0.0

@@ -97,9 +97,33 @@ def test_confidence_disabled_depth_does_not_require_confidence_key() -> None:
     assert torch.isfinite(loss)
 
 
+def test_temporal_loss_handles_single_frame_and_rejects_bad_config() -> None:
+    prediction = torch.zeros(1, 1, 2, 2, requires_grad=True)
+    target = torch.zeros_like(prediction)
+    mask = torch.ones_like(prediction, dtype=torch.bool)
+    loss = LossConfig().build().temporal_loss(prediction, target, mask)
+    assert loss.item() == 0.0
+    loss.backward()
+    assert prediction.grad is not None
+
+    for field, value in (
+        ("temp_grad_scales", 0),
+        ("depth_trim", 1.0),
+        ("diff_depth_th", -0.1),
+    ):
+        try:
+            LossConfig(**{field: value})
+        except ValueError as error:
+            assert field in str(error)
+            assert str(value) in str(error)
+        else:
+            raise AssertionError(f"invalid {field} was accepted")
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
     test_spatial_gradient_uses_valid_edges_without_cropping()
     test_loss_config_rejects_unknown_reduction()
     test_confidence_disabled_depth_does_not_require_confidence_key()
+    test_temporal_loss_handles_single_frame_and_rejects_bad_config()
