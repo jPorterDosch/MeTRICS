@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from collections import defaultdict
 
@@ -136,6 +137,35 @@ class TrainAreaDTests(unittest.TestCase):
                 fd.main(cfg)
         finally:
             fd.build_manifest = original
+
+    def test_checkpoint_commit_fsyncs_then_replaces(self) -> None:
+        class Accel:
+            is_main_process = True
+
+            def wait_for_everyone(self) -> None:
+                self.waited = True
+
+        accel = Accel()
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "checkpoint-last.pth")
+            temporary = os.path.join(directory, "checkpoint-.last.tmp-1.pth")
+            with open(target, "wb") as handle:
+                handle.write(b"old")
+            with open(temporary, "wb") as handle:
+                handle.write(b"new")
+            original_fsync = fd.os.fsync
+            calls = []
+            fd.os.fsync = lambda descriptor: calls.append(descriptor)
+            try:
+                fd._commit_checkpoint(
+                    directory, "last", ".last.tmp-1", accel
+                )
+            finally:
+                fd.os.fsync = original_fsync
+            with open(target, "rb") as handle:
+                self.assertEqual(handle.read(), b"new")
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(accel.waited)
 
 
 if __name__ == "__main__":

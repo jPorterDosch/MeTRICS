@@ -370,6 +370,18 @@ def build_model(
     return model, stats
 
 
+def _commit_checkpoint(
+    output_dir: str, fname: str, temporary_fname: str, accelerator: Accelerator
+) -> None:
+    if accelerator.is_main_process:
+        temporary = os.path.join(output_dir, f"checkpoint-{temporary_fname}.pth")
+        target = os.path.join(output_dir, f"checkpoint-{fname}.pth")
+        with open(temporary, "rb") as checkpoint:
+            os.fsync(checkpoint.fileno())
+        os.replace(temporary, target)
+    accelerator.wait_for_everyone()
+
+
 def run(
     args: FinetuneDepthCfg, mcfg: MetricCfg, manifest: dict, run_hash: str, run_id: str
 ) -> None:
@@ -471,6 +483,7 @@ def run(
     def save_model(
         epoch: int, fname: str, best_so_far: float, data_iter_step: int
     ) -> None:
+        temporary_fname = f".{fname}.tmp-{os.getpid()}"
         misc.save_model(
             accelerator=accelerator,
             args=picklable_args(args),
@@ -479,9 +492,10 @@ def run(
             loss_scaler=loss_scaler,
             epoch=epoch,
             step=data_iter_step,
-            fname=fname,
+            fname=temporary_fname,
             best_so_far=best_so_far,
         )
+        _commit_checkpoint(args.output_dir, fname, temporary_fname, accelerator)
 
     printer.info(f"Start training for {args.epochs} epochs")
     start_time = time.time()
