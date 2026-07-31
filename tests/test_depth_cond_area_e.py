@@ -7,6 +7,7 @@ from unittest import mock
 
 import torch
 
+from streamvggt.depth_cond import cache as cache_module
 from streamvggt.depth_cond.cache import EncoderFeatureCache
 from streamvggt.depth_cond.config import DepthCondCfg, InjectionType, LoRACfg, NormType
 
@@ -69,6 +70,16 @@ def test_concurrent_cache_writers_use_private_temp_files() -> None:
         assert os.path.isfile(cache._path("shared-key"))
 
 
+def test_cache_contract_discloses_fp32_autocast_difference() -> None:
+    with tempfile.TemporaryDirectory() as cache_dir:
+        cache = EncoderFeatureCache(cache_dir)
+        cache.save("frame", torch.tensor([1.5], dtype=torch.bfloat16))
+        assert cache.load("frame").dtype == torch.float32
+
+    assert "numerically identical" not in cache_module.__doc__
+    assert "may differ from an autocast live path" in cache_module.__doc__
+
+
 def test_fixed_normalization_requires_finite_positive_constant() -> None:
     for constant in (0.0, -1.0, float("nan"), float("inf")):
         assert_value_error(
@@ -116,6 +127,7 @@ def test_enabled_lora_requires_targets() -> None:
 
 if __name__ == "__main__":
     test_concurrent_cache_writers_use_private_temp_files()
+    test_cache_contract_discloses_fp32_autocast_difference()
     test_fixed_normalization_requires_finite_positive_constant()
     test_enabled_lora_requires_finite_positive_alpha()
     test_enabled_head_injection_requires_a_head()

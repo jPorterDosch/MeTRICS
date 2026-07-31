@@ -5,8 +5,8 @@ deterministic given RGB. Features are computed once and stored per frame,
 keyed by a stable frame id; training then forwards/backwards only through the
 conditioner + decoder (LoRA) + heads.
 
-Features are stored in fp32 exactly as produced, so the cached path is
-numerically identical to the live path (Stage 4 check).
+Features are computed and stored in fp32. This keeps one stable representation
+on disk, but it may differ from an autocast live path.
 """
 
 import hashlib

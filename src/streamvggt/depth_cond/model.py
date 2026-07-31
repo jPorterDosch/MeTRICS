@@ -256,10 +256,8 @@ class MetricStreamVGGT(nn.Module):
                     loaded[(s, b)] = t.to(dtype=param.dtype)
 
         if missing:
-            # autocast is disabled explicitly: the training loop wraps the whole
-            # model call in bf16 autocast, and cached features must be the exact
-            # fp32 values the live fp32 path would produce (Stage 4 contract) --
-            # otherwise the first epoch would persist bf16-quantized features.
+            # Keep the persistent representation fp32 instead of making cache
+            # contents depend on the caller's current autocast mode.
             with (
                 torch.no_grad(),
                 torch.autocast(device_type=images.device.type, enabled=False),
