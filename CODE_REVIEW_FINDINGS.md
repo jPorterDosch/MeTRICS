@@ -1217,14 +1217,204 @@ nevertheless found three cycle-created files:
 removed. The `src/__pycache__` directory could not and was not removed because it
 pre-existed with older bytecode files, which were left untouched.
 
+## Area E — `src/streamvggt/depth_cond/`
+
+Role: Defense, report-only round. No source fix was applied. Area E is project-owned
+code; none of its files is under the vendored `src/croco/`, `src/dust3r/`,
+`src/vggt/`, or `cloud_opt/` trees.
+
+### E-R1-1 — cache-enabled AMP changes patch-encoder arithmetic
+
+**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R1
+(wrong-numbers lens). **(assessed against uncommitted working-tree state)**
+
+Failure scenario: with outer autocast enabled, the normal live path runs the frozen
+patch encoder under autocast, while a cache miss explicitly disables autocast and
+the cache stores fp32; a warm hit also returns fp32. Enabling a feature described as
+a numerically identical optimization therefore changes patch tokens, attention,
+losses, and gradients. R1's CPU analogue measured a maximum token difference of
+`0.0228300`; a GPU is needed only to quantify the CUDA/bf16 magnitude, not to
+establish the divergent execution modes.
+
+Minimal patch, **NOT FIXED**: in `model.py:247-275`, let cache misses execute under
+the caller's existing autocast mode and stop coercing warm hits to the fp32 parameter
+dtype. In `cache.py:43-48`, preserve the feature tensor's produced dtype instead of
+unconditionally converting it to fp32. Namespace cache entries by the effective
+encoder execution dtype along with the encoder identity addressed by E-R1-2/E-R2-2,
+so a cache created under one arithmetic mode cannot be reused under another.
+
+### E-R1-2 and E-R2-2 — cache identity omits encoder, checkpoint, and schema
+
+**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised independently
+by R1 (wrong-numbers lens) and R2 (contracts-and-runtime lens); these are the same
+defect. **(assessed against uncommitted working-tree state)**
+
+Failure scenario: checkpoint A and checkpoint B use the same cache directory and raw
+processed-frame key. `cache.py` hashes only that raw key and stores a bare tensor, so
+B accepts A's same-shaped token tensor and bypasses B's encoder without warning.
+Changing sparse-depth conditioning alone does not stale this RGB-only cache; the
+missing ownership is specifically encoder weights/architecture and cache schema.
+
+Minimal patch, **NOT FIXED**: make `EncoderFeatureCache` in `cache.py:20-48` require an
+immutable namespace containing the loaded patch encoder/checkpoint fingerprint and a
+cache-schema version, and include that namespace in `_path`'s digest. In the cache
+construction/lookup path in `model.py:247-280`, supply the namespace after pretrained
+weights are loaded and include the effective encoder execution dtype required by
+E-R1-1. Do not hash sparse-depth inputs; they are not part of the cached computation.
+
+### E-R1-3 — sparse simulation uses nearest-integer rather than ceiling density
+
+**Verdict: REJECTED.** Raised by R1 (wrong-numbers lens).
+
+For a discrete patch count, `round(n_patches * (1 - mask_ratio))` is the nearest
+representable density and therefore minimizes absolute density error; `ceil` would
+systematically bias visibility upward. No external configuration contract promises
+ceiling. The lone contrary statement is the private helper's docstring, while the
+implementation and the field's public description consistently define a ratio, not
+a minimum count. The `B=1,H=1,W=5,mask_ratio=0.5` result of two visible patches is
+therefore defensible behavior; at most the word `ceil` in `sparse.py:25` is stale
+documentation and does not justify changing the sampling arithmetic.
+
+### E-R2-1 — concurrent cache misses share one temporary filename
+
+**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised as a finding
+by R2 (contracts-and-runtime lens) and previously as a question by R1. R2's
+two-thread reproduction promotes the question to a confirmed finding.
+
+Failure scenario: two workers miss the same key and both write `<final>.tmp`; one
+worker replaces that shared path, after which the other worker's `os.replace` raises
+`FileNotFoundError`. In distributed training, that rank-local exception can leave
+peers waiting at a later trainer collective even though Area E itself has no
+collective.
+
+Minimal patch, **NOT FIXED**: in `cache.py:43-48`, give each save a unique sibling
+temporary path (for example, append a UUID), write to that private path, atomically
+replace the common final path, and remove only that writer's temporary file in a
+`finally` block if it remains. Keep the final filename and last-completed-writer
+semantics unchanged.
+
+### E-R2-3 — fixed normalization accepts zero, negative, and non-finite constants
+
+**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+(contracts-and-runtime lens).
+
+Failure scenario: `norm=fixed,norm_constant_m=0,log_depth=true` converts every valid
+distance to signal zero while retaining mask one, silently reducing conditioning to
+mask-only. A negative constant can put `log1p` outside its domain, and NaN passes the
+current validation and propagates.
+
+Minimal patch, **NOT FIXED**: in `DepthCondCfg.validate` at `config.py:92-112`, when
+`enabled` and `norm is NormType.FIXED`, require `norm_constant_m` to be finite and
+strictly positive and raise `ValueError` naming the value otherwise. Do not mutate
+the constant or validate the frozen-but-unread value in raw mode.
+
+### E-R2-4 — enabled LoRA accepts zero or non-finite alpha
+
+**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+(contracts-and-runtime lens).
+
+Failure scenario: `enabled=true,alpha=0` constructs nominal adapters whose scaling is
+zero, so their output and A/B/input gradients remain zero; the run is labeled LoRA
+enabled but cannot train LoRA. `alpha=NaN` makes even the zero-initialized branch
+produce NaN through `0 * NaN`.
+
+Minimal patch, **NOT FIXED**: in `LoRACfg.validate` at `config.py:125-130`, when LoRA
+is enabled, require `alpha` to be finite and strictly positive and raise `ValueError`
+otherwise. Leave disabled-mode identity behavior and all frozen fields unchanged.
+
+### E-R2-5 — enabled head injection accepts an empty head list
+
+**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+(contracts-and-runtime lens).
+
+Failure scenario: `enabled=true,injection=head,heads=[]` builds no injection modules
+and returns `{'depth': None, 'point': None}`. The experiment is labeled as depth
+conditioning while injecting depth into no output, a silent no-op rather than merely
+a low-quality user choice.
+
+Minimal patch, **NOT FIXED**: in `DepthCondCfg.validate` at `config.py:92-112`, raise
+`ValueError` when depth conditioning is enabled, injection is `HEAD`, and `heads` is
+empty. Do not alter token-injection handling of the inactive `heads` field.
+
+### E-R2-6 — enabled LoRA accepts no targets and over-reports wrapping
+
+**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+(contracts-and-runtime lens).
+
+Failure scenario: `enabled=true,targets=[]` leaves every qkv/proj as a plain
+`Linear`, but `apply_lora` increments its counter for every attention block. Startup
+therefore reports wrapped adapters even though no adapter exists.
+
+Minimal patch, **NOT FIXED**: in `LoRACfg.validate` at `config.py:125-130`, raise
+`ValueError` when LoRA is enabled and `targets` is empty. This fail-fast makes the
+existing counter reachable only for configurations that wrap at least one projection
+per visited attention module; do not add fallback targets or alter disabled mode.
+
+### E-R2-7 — malformed supplied cache-key cardinality silently disables caching
+
+**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+(contracts-and-runtime lens). **(assessed against uncommitted working-tree state)**
+
+Failure scenario: for batch size two, a supplied one-element cache-key value is
+converted to one key, rejected only by an internal length comparison, and then
+treated like an absent key. Every batch recomputes encoder tokens while the run still
+reports the cache enabled.
+
+Minimal patch, **NOT FIXED**: in `model.py:227-245`, preserve the documented live-path
+fallback only when `cache_key` is absent. When the field is supplied but its type or
+cardinality does not provide exactly one string key per batch item, raise `ValueError`
+naming the expected batch size and received shape/count.
+
+### E-R2-8 — stale gate wording promises a removed scalar gate
+
+**Verdict: REJECTED.** Raised by R2 (contracts-and-runtime lens).
+
+Current behavior is internally coherent: the only zero-init token component is
+`token_proj`, it receives a step-zero gradient, current same-config strict reload
+works, and `conditioner.py:193-203` explicitly records that the scalar gate was
+removed and old gated checkpoints require the pre-removal revision. The word
+“gated” in one return-shape docstring and historical stage notes does not define a
+public `conditioner.gate` state-dict key. Treating those historical notes as a live
+checkpoint API would duplicate the already documented compatibility limitation and
+create churn without fixing current execution.
+
+### Verified correct
+
+- Current same-config strict self-reload succeeds after applying identical LoRA
+  wrapping; there are no missing or unexpected state keys.
+- `freeze_for_finetune` selects LoRA A/B, configured output heads, and the
+  conditioner, while optimizer grouping omits frozen parameters.
+- Enum fallthroughs raise, unsupported MAE/token-append modes raise, and cache S>1,
+  injection shapes, per-frame conditioning lengths, and DPT residual counts are
+  checked.
+- The current zero-initialized `token_proj` closes the former scalar-gate gradient
+  deadlock and can train at step zero.
+- Area E contains no collective or barrier and no new Area A/B interaction defect
+  was found: Area A commit `bac1cac` preserves all-invalid masks through sparse
+  simulation, and Area B commit `5ac844e` rejects false metric labels for supported
+  metric datasets.
+
+### Reviewer questions (not findings)
+
+- R1's shared-temp-path question is resolved above as the UPHELD E-R2-1 finding.
+- R1's positive non-metric depth question remains hypothetical because all currently
+  supported selectable metric loaders require `is_metric=True`; it is not promoted.
+- R2's inactive-mode identity and processed-RGB hash questions require experiment
+  identity and preprocessing policy. The frozen `FinetuneDepthCfg` and
+  `_NON_IDENTITY_FIELDS` are not changed or proposed for change here.
+
+No Area E CPU probe was run in this defense round. The verdicts use static inspection
+of permitted files and the reviewers' supplied CPU reproductions. No GPU, checkpoint,
+dataset, training, evaluation, or export path was used.
+
 ## Uncovered areas
 
-- Areas A, B, C and D were reviewed, and their UPHELD findings were fixed with
-  CPU regression evidence on local branch `review/codebase-sweep`. Nothing was
-  pushed or merged to `main`.
-- **Area E — `src/streamvggt/depth_cond/` (injection paths, gate init, LoRA
-  ordering, encoder cache) was NOT REVIEWED AT ALL.** The review's round budget
-  was exhausted. No agent read it; nothing about it is implied.
-- Never in scope for this run: `datasets_preprocess/`, export and visualization
-  scripts, `tests/`, `experiments/`, `config/`.
-- Findings marked DEFERRED across Areas A-D remain open and unfixed.
+- All five areas A-E have now been reviewed. Areas A-D had their UPHELD findings
+  fixed with CPU regression evidence on branch `review/codebase-sweep`.
+- Area E findings have been judged but are **NOT yet fixed**. Its separate
+  implementation round is pending and blocked on a user-owned uncommitted change to
+  `src/streamvggt/depth_cond/model.py`.
+- Findings marked DEFERRED across all areas remain open and unfixed.
+- Nothing was pushed or merged to `main`.
+- Permanently out of scope: `datasets_preprocess/`, export and visualization scripts,
+  `tests/`, `experiments/`, `config/`.
