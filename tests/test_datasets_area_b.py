@@ -9,6 +9,7 @@ from streamvggt.datasets.base.base_multiview_dataset import (
     BaseMultiViewDataset,
     get_ray_map,
 )
+from streamvggt.datasets.base.easy_dataset import EasyDataset
 from streamvggt.datasets.config import DatasetConfig
 from streamvggt.datasets.hammer import HAMMER_Multi
 from streamvggt.datasets.hypersim import HyperSim_Multi
@@ -128,6 +129,23 @@ def test_resize_intrinsics_use_floored_raster_scales() -> None:
     np.testing.assert_allclose(scaled[1, 1], 500.0 * output.height / 480)
 
 
+def test_variable_length_sampler_rejects_fewer_than_four_views() -> None:
+    class TinyDataset(EasyDataset):
+        _resolutions = [(1, 1)]
+        num_views = 3
+
+        def __len__(self):
+            return 3
+
+    try:
+        TinyDataset().make_sampler(1, fixed_length=False)
+    except ValueError as error:
+        assert "num_views" in str(error)
+        assert "3" in str(error)
+    else:
+        raise AssertionError("variable-length sampler accepted num_views=3")
+
+
 if __name__ == "__main__":
     test_ray_directions_ignore_camera_translation()
     test_irregular_stride_respects_effective_gap_range()
@@ -135,3 +153,4 @@ if __name__ == "__main__":
     test_nneg_is_an_absolute_count()
     test_invalid_depth_pixels_are_not_positive_correspondences()
     test_resize_intrinsics_use_floored_raster_scales()
+    test_variable_length_sampler_rejects_fewer_than_four_views()
