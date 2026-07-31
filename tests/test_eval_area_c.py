@@ -170,6 +170,19 @@ class PointCloudFinitenessTest(unittest.TestCase):
         missing_log_if = next(node for node in loops[0].body if isinstance(node, ast.If))
         self.assertTrue(any(isinstance(node, ast.Continue) for node in missing_log_if.body))
 
+    def test_unsupported_confidence_threshold_is_not_advertised(self):
+        tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
+        parser_names = {
+            call.args[0].value
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "add_argument"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+        }
+        self.assertNotIn("--conf_thresh", parser_names)
+
 
 class PointNormalizationTest(unittest.TestCase):
     def test_average_distance_uses_each_samples_valid_count(self):
