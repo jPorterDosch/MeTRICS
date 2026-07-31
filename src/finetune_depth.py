@@ -410,11 +410,12 @@ def _validate_resume_step(args: FinetuneDepthCfg) -> None:
 
 
 def _wandb_init_kwargs(args: FinetuneDepthCfg, run_id: str) -> dict:
+    tracker_id = experiment_id({"exp_group": args.exp_group, "run_id": run_id})
     kwargs = {
         "name": f"{args.exp_group}_{run_id}",
         "group": args.exp_group,
         "dir": args.output_dir,
-        "id": run_id,
+        "id": tracker_id,
         "resume": "allow",
     }
     if WANDB_ENTITY:

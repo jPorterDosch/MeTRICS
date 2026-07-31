@@ -182,7 +182,12 @@ class TrainAreaDTests(unittest.TestCase):
     def test_wandb_resume_uses_stable_experiment_id(self) -> None:
         cfg = fd.FinetuneDepthCfg(exp_group="resume-test")
         kwargs = fd._wandb_init_kwargs(cfg, "stable-id")
-        self.assertEqual(kwargs["id"], "stable-id")
+        same = fd._wandb_init_kwargs(cfg, "stable-id")
+        other_group = fd._wandb_init_kwargs(
+            fd.FinetuneDepthCfg(exp_group="other-group"), "stable-id"
+        )
+        self.assertEqual(kwargs["id"], same["id"])
+        self.assertNotEqual(kwargs["id"], other_group["id"])
         self.assertEqual(kwargs["resume"], "allow")
         self.assertEqual(kwargs["name"], "resume-test_stable-id")
 
