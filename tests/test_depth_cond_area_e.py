@@ -23,7 +23,7 @@ def assert_value_error(message: str, callback) -> None:
 
 def test_concurrent_cache_writers_use_private_temp_files() -> None:
     with tempfile.TemporaryDirectory() as cache_dir:
-        cache = EncoderFeatureCache(cache_dir)
+        cache = EncoderFeatureCache(cache_dir, "checkpoint")
         barrier = threading.Barrier(2)
         temp_paths: list[str] = []
         errors: list[BaseException] = []
@@ -72,12 +72,23 @@ def test_concurrent_cache_writers_use_private_temp_files() -> None:
 
 def test_cache_contract_discloses_fp32_autocast_difference() -> None:
     with tempfile.TemporaryDirectory() as cache_dir:
-        cache = EncoderFeatureCache(cache_dir)
+        cache = EncoderFeatureCache(cache_dir, "checkpoint")
         cache.save("frame", torch.tensor([1.5], dtype=torch.bfloat16))
         assert cache.load("frame").dtype == torch.float32
 
     assert "numerically identical" not in cache_module.__doc__
     assert "may differ from an autocast live path" in cache_module.__doc__
+
+
+def test_cache_namespace_separates_encoder_checkpoints() -> None:
+    with tempfile.TemporaryDirectory() as cache_dir:
+        checkpoint_a = EncoderFeatureCache(cache_dir, "checkpoint-a")
+        checkpoint_b = EncoderFeatureCache(cache_dir, "checkpoint-b")
+        checkpoint_a.save("frame", torch.tensor([1.0]))
+
+        assert checkpoint_a.load("frame") is not None
+        assert checkpoint_b.load("frame") is None
+        assert checkpoint_a._path("frame") != checkpoint_b._path("frame")
 
 
 def test_fixed_normalization_requires_finite_positive_constant() -> None:
@@ -128,6 +139,7 @@ def test_enabled_lora_requires_targets() -> None:
 if __name__ == "__main__":
     test_concurrent_cache_writers_use_private_temp_files()
     test_cache_contract_discloses_fp32_autocast_difference()
+    test_cache_namespace_separates_encoder_checkpoints()
     test_fixed_normalization_requires_finite_positive_constant()
     test_enabled_lora_requires_finite_positive_alpha()
     test_enabled_head_injection_requires_a_head()

@@ -7,6 +7,7 @@ the frozen-encoder feature cache. Nothing here branches on values outside the
 MetricCfg object.
 """
 
+import hashlib
 import time
 
 import torch
@@ -68,11 +69,10 @@ class MetricStreamVGGT(nn.Module):
                 cfg.depth_cond, out_spec, patch_size=patch_size
             )
 
-        self.cache = (
-            EncoderFeatureCache(cfg.encoder_cache.dir)
-            if cfg.encoder_cache.enabled
-            else None
+        self._encoder_cache_dir = (
+            cfg.encoder_cache.dir if cfg.encoder_cache.enabled else None
         )
+        self.cache = None
         self.model.aggregator.grad_checkpointing = cfg.train.grad_checkpoint
         self._lora_applied = False
 
@@ -106,7 +106,16 @@ class MetricStreamVGGT(nn.Module):
             and not any(k.startswith("aggregator.") for k in sd)
         ):
             sd = sd["model"]
-        return self.model.load_state_dict(sd, strict=True)
+        result = self.model.load_state_dict(sd, strict=True)
+        if self._encoder_cache_dir is not None:
+            checkpoint_hash = hashlib.sha256()
+            with open(path, "rb") as checkpoint:
+                for chunk in iter(lambda: checkpoint.read(1024 * 1024), b""):
+                    checkpoint_hash.update(chunk)
+            self.cache = EncoderFeatureCache(
+                self._encoder_cache_dir, checkpoint_hash.hexdigest()
+            )
+        return result
 
     def apply_lora_adapters(self) -> int:
         if self.cfg.lora.enabled and not self._lora_applied:
@@ -230,6 +239,10 @@ class MetricStreamVGGT(nn.Module):
         that change pixels per epoch would poison the cache. If any view lacks
         a key, the whole batch falls back to the live encoder.
         """
+        if self.cache is None and self._encoder_cache_dir is not None:
+            raise RuntimeError(
+                "encoder cache requires load_pretrained before its first use"
+            )
         if self.cache is None:
             return None
         B, S, _, H, W = images.shape

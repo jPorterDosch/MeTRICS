@@ -19,15 +19,18 @@ import torch
 
 
 class EncoderFeatureCache:
-    def __init__(self, cache_dir: str) -> None:
+    def __init__(self, cache_dir: str, encoder_fingerprint: str) -> None:
+        if not encoder_fingerprint:
+            raise ValueError("encoder_fingerprint must be non-empty")
         self.dir = cache_dir
+        self.namespace = f"encoder-features-v1:{encoder_fingerprint}"
         os.makedirs(cache_dir, exist_ok=True)
 
     def _path(self, key: str) -> str:
         # The readable prefix is lossy (distinct keys can sanitize identically,
-        # e.g. 'a/b' and 'a_b'), so a digest of the RAW key is always appended:
-        # filename uniqueness must never depend on the sanitization.
-        digest = hashlib.sha1(key.encode()).hexdigest()[:16]
+        # e.g. 'a/b' and 'a_b'), so a digest of the namespace and RAW key is
+        # always appended: filename uniqueness never depends on sanitization.
+        digest = hashlib.sha1(f"{self.namespace}\0{key}".encode()).hexdigest()[:16]
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", key)[:80]
         return os.path.join(self.dir, f"{safe}_{digest}.pt")
 
