@@ -409,6 +409,19 @@ def _validate_resume_step(args: FinetuneDepthCfg) -> None:
         )
 
 
+def _wandb_init_kwargs(args: FinetuneDepthCfg, run_id: str) -> dict:
+    kwargs = {
+        "name": f"{args.exp_group}_{run_id}",
+        "group": args.exp_group,
+        "dir": args.output_dir,
+        "id": run_id,
+        "resume": "allow",
+    }
+    if WANDB_ENTITY:
+        kwargs["entity"] = WANDB_ENTITY
+    return kwargs
+
+
 def run(
     args: FinetuneDepthCfg, mcfg: MetricCfg, manifest: dict, run_hash: str, run_id: str
 ) -> None:
@@ -435,15 +448,8 @@ def run(
             json.dump({**manifest, **record}, f, indent=2, sort_keys=True)
 
     wandb_config = {**to_primitive(args), **manifest, **record}
-    wandb_init_kwargs = {
-        "name": f"{args.exp_group}_{run_id}",
-        # group -> every run sharing exp_group is bucketed together in the wandb
-        # UI (e.g. all arms of one ablation ladder); run_id keeps names unique
-        "group": args.exp_group,
-        "dir": args.output_dir,
-    }
-    if WANDB_ENTITY:
-        wandb_init_kwargs["entity"] = WANDB_ENTITY
+    # Stable id reconnects resumes; "allow" admits older checkpoints.
+    wandb_init_kwargs = _wandb_init_kwargs(args, run_id)
     accelerator.init_trackers(
         project_name=WANDB_PROJECT,
         config=wandb_config,

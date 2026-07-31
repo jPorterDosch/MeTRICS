@@ -179,6 +179,13 @@ class TrainAreaDTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mid-epoch.*start_step=600"):
             fd._validate_resume_step(cfg)
 
+    def test_wandb_resume_uses_stable_experiment_id(self) -> None:
+        cfg = fd.FinetuneDepthCfg(exp_group="resume-test")
+        kwargs = fd._wandb_init_kwargs(cfg, "stable-id")
+        self.assertEqual(kwargs["id"], "stable-id")
+        self.assertEqual(kwargs["resume"], "allow")
+        self.assertEqual(kwargs["name"], "resume-test_stable-id")
+
     def test_checkpoint_commit_fsyncs_then_replaces(self) -> None:
         class Accel:
             is_main_process = True
