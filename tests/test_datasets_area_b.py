@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from streamvggt.datasets import get_data_loader
 from streamvggt.datasets.arkitscenes import ARKitScenes_Multi
 from streamvggt.datasets.arkitscenes_highres import ARKitScenesHighRes_Multi
 from streamvggt.datasets.base.base_multiview_dataset import (
@@ -173,6 +174,21 @@ def test_negative_correspondence_settings_are_rejected() -> None:
         raise AssertionError("direct constructor accepted negative nneg")
 
 
+def test_data_loader_supports_default_accelerator() -> None:
+    class TinyDataset(EasyDataset):
+        _resolutions = [(1, 1)]
+        num_views = 4
+
+        def __len__(self):
+            return 4
+
+        def __getitem__(self, index):
+            return index
+
+    loader = get_data_loader(TinyDataset(), 1, num_workers=0)
+    assert loader is not None
+
+
 if __name__ == "__main__":
     test_ray_directions_ignore_camera_translation()
     test_irregular_stride_respects_effective_gap_range()
@@ -182,3 +198,4 @@ if __name__ == "__main__":
     test_resize_intrinsics_use_floored_raster_scales()
     test_variable_length_sampler_rejects_fewer_than_four_views()
     test_negative_correspondence_settings_are_rejected()
+    test_data_loader_supports_default_accelerator()

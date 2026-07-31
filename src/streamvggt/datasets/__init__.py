@@ -65,7 +65,7 @@ def get_data_loader(
         batch_size,
         shuffle=shuffle,
         drop_last=drop_last,
-        world_size=accelerator.num_processes,
+        world_size=1 if accelerator is None else accelerator.num_processes,
         fixed_length=fixed_length,
     )
     return torch.utils.data.DataLoader(
