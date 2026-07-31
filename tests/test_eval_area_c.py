@@ -183,6 +183,25 @@ class Co3dCliTest(unittest.TestCase):
         }
         self.assertIn("fast_eval", parser_names)
 
+    def test_unimplemented_bundle_adjustment_fails_fast(self):
+        tree = ast.parse(
+            (ROOT / "src/eval/pose_evaluation/test_co3d.py").read_text()
+        )
+        main = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        guards = [
+            node
+            for node in ast.walk(main)
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "args.use_ba"
+        ]
+        self.assertEqual(len(guards), 1)
+        self.assertTrue(
+            any(isinstance(node, ast.Raise) for node in ast.walk(guards[0]))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -308,6 +308,8 @@ def main():
     """Main function to evaluate VGGT on CO3D dataset."""
     # Parse command-line arguments
     args = setup_args()
+    if args.use_ba:
+        raise NotImplementedError("--use_ba is not implemented")
 
     # Setup device and data type
     device = "cuda" if torch.cuda.is_available() else "cpu"
