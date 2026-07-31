@@ -1418,3 +1418,23 @@ dataset, training, evaluation, or export path was used.
 - Nothing was pushed or merged to `main`.
 - Permanently out of scope: `datasets_preprocess/`, export and visualization scripts,
   `tests/`, `experiments/`, `config/`.
+
+## F821 audit
+
+- `pts3d` — `src/eval/mv_recon/criterion.py:132`, the fallback return in
+  `get_pred_pts3d`: **DEAD CODE — unreachable, no caller**. The only repository
+  call is from `Regr3D_t.get_all_pts3d_t`, and the reachable StreamVGGT evaluation
+  path supplies `pts3d_in_other_view`, which returns at line 131. No binding or
+  star-import supplies `pts3d`. Git `-S` and blame attribute the line to `49656da`;
+  it is present at baseline `489d28f`, so it is pre-existing, not introduced by
+  this review. No fix was made because the dead fallback's intended source is
+  ambiguous and guessing could change evaluation values.
+- `apply_distortion` — `src/eval/pose_evaluation/tensor_to_pycolmap.py:326`, the
+  `extra_params is not None` branch of `img_from_cam`: **DEAD CODE — unreachable,
+  no caller**. The sole repository projection call does not pass `extra_params`,
+  `run_vggt_with_ba` rejects radial cameras, and the CO3D launcher rejects
+  `--use_ba` before BA. No binding or star-import supplies the helper. Git `-S`
+  and blame attribute the line to `49656da`; it is present at baseline `489d28f`,
+  so it is pre-existing, not introduced by this review. No fix was made because
+  there is no live distortion path and choosing a distortion model would require
+  guessing intent.
