@@ -426,17 +426,16 @@ def run(
     data_loader_train = build_train_loader(args, Split.TRAIN, accelerator)
     data_loaders_val = build_val_loaders(args, accelerator) if args.val_freq > 0 else []
     # streaming_eval drives StreamVGGT.inference, which folds the batch dim of
-    # frame["img"] into the sequence, so it must see one clip at a time: give
-    # it its own batch-1 loader over the val config instead of constraining
-    # the whole run's batch_size. Batch-1 is already one dataset per batch, so
-    # this one stays a single loader over the whole val mixture (its metrics are
-    # per-clip and keyed by the clip's own dataset label).
-    data_loader_stream = None
+    # frame["img"] into the sequence, so it must see one clip at a time: give it
+    # its own batch-1 loaders instead of constraining the whole run's
+    # batch_size. At batch_size 1 the val loaders already are that -- reuse them
+    # rather than rebuilding every val dataset a second time.
+    data_loaders_stream = []
     if data_loaders_val:
-        data_loader_stream = (
-            data_loaders_val[0]
-            if args.batch_size == 1 and len(data_loaders_val) == 1
-            else build_train_loader(args, Split.TEST, accelerator, batch_size=1)
+        data_loaders_stream = (
+            data_loaders_val
+            if args.batch_size == 1
+            else build_val_loaders(args, accelerator, batch_size=1)
         )
 
     printer.info("Loading depth-conditioned model")
@@ -460,14 +459,14 @@ def run(
         optimizer, model, data_loader_train
     )
     if data_loaders_val:
-        stream_is_val = data_loader_stream is data_loaders_val[0]
+        stream_is_val = data_loaders_stream is data_loaders_val
         data_loaders_val = [accelerator.prepare(dl) for dl in data_loaders_val]
-        # the stream loader is prepared too so it shards across ranks the same
-        # way (_reduce_metrics assumes every rank walked its own shard)
-        data_loader_stream = (
-            data_loaders_val[0]
+        # the stream loaders are prepared too so they shard across ranks the
+        # same way (_reduce_metrics assumes every rank walked its own shard)
+        data_loaders_stream = (
+            data_loaders_val
             if stream_is_val
-            else accelerator.prepare(data_loader_stream)
+            else [accelerator.prepare(dl) for dl in data_loaders_stream]
         )
 
     def save_model(
@@ -572,10 +571,10 @@ def run(
         )
 
     # final causal evaluation on the deployment (per-frame KV-cache) path.
-    if data_loader_stream is not None:
+    if data_loaders_stream:
         streaming_eval(
             model,
-            data_loader_stream,
+            data_loaders_stream,
             accelerator,
             step=args.epochs * len(data_loader_train),
             args=args,
@@ -588,6 +587,17 @@ def run(
     # the (weight-preserving) streaming_eval runs since, so checkpoint-last.pth
     # already holds the end-of-training weights (plus optimizer state).
     accelerator.end_training()
+
+
+def _check_loader_list(data_loaders, caller: str) -> None:
+    """A bare DataLoader here would iterate BATCHES as if they were loaders and
+    die deep in the forward, naming nothing useful. One dataset per loader is
+    the contract (build_val_loaders); say so at the door."""
+    if not isinstance(data_loaders, (list, tuple)):
+        raise TypeError(
+            f"{caller} takes a list of per-dataset loaders (build_val_loaders), "
+            f"got {type(data_loaders).__name__}"
+        )
 
 
 def _set_data_epoch(data_loader: DataLoader, epoch: int) -> None:
@@ -706,7 +716,7 @@ def train_loop(
                     torch.tensor(loss_value).to(accelerator.device)
                 ).mean()
                 # "/"-namespaced keys so wandb groups metrics into sections
-                # (train/..., val/<dataset>/..., stream/<dataset>/...)
+                # (train/..., val/<dataset>/..., final_stream/<dataset>/...)
                 log_dict = {
                     "train/loss": loss_value_reduce,
                     "train/lr": lr,
@@ -808,34 +818,33 @@ def _clip_predictions(
     }
 
 
-def _export_eval_glbs(
-    views: list[dict],
-    preds: list[dict],
+def _export_selected_glbs(
+    sampler: ValImageSampler | None,
     out_dir: str,
     tag: str,
-    accelerator: Accelerator,
-    start_idx: int,
     max_clips: int,
 ) -> int:
-    """Write up to (max_clips - start_idx) predicted-depth point clouds from
-    THIS batch to <out_dir>/glb/<tag>_clipN.glb and return how many were
-    written, so the caller can accumulate across batches until it reaches
-    max_clips. N is a pass-global index so clips from successive batches do not
-    collide. Main process only: the export is redundant across ranks (the val /
-    stream loaders shard the same clip set), and predictions_to_glb prints /
-    does file IO we do not want N-fold."""
-    if not accelerator.is_main_process or start_idx >= max_clips:
+    """Write the sampler's selected clips as predicted-depth point clouds to
+    <out_dir>/glb/<tag>_clipN_<dataset>.glb, and return how many were written.
+
+    N is the SELECTION index, the same one render() puts in a panel caption, so
+    <tag>_clip2_hammer.glb is the cloud of the clip whose panel reads
+    "hammer clip2". The selection is round-robin over datasets, so a mixed val
+    set gets clouds from each rather than max_clips of whichever dataset the
+    loader happened to reach first.
+
+    Main process only, implicitly: the sampler is built there alone (the export
+    is redundant across ranks, which walk shards of the same clip set, and
+    predictions_to_glb prints / does file IO we do not want N-fold)."""
+    if sampler is None or max_clips <= 0:
         return 0
     glb_dir = os.path.join(out_dir, "glb")
     os.makedirs(glb_dir, exist_ok=True)
-    # img is not in _stack_depth_batch; stack it the same way ([B,S,3,H,W])
-    imgs = torch.stack([v["img"] for v in views], dim=1).float().cpu()
-    pred, _, valid, K, pose = _stack_depth_batch(views, preds)
     written = 0
-    for b in range(pred.shape[0]):
-        if start_idx + written >= max_clips:
-            break
-        predictions = _clip_predictions(imgs[b], pred[b], valid[b], K[b], pose[b])
+    for n, label, clip in sampler.clips(limit=max_clips):
+        predictions = _clip_predictions(
+            clip["img"], clip["depth"], clip["valid"], clip["K"], clip["pose"]
+        )
         # prediction_mode without "Pointmap" takes the world_points_from_depth
         # branch directly (no missing-key fallback warning)
         scene = predictions_to_glb(
@@ -844,9 +853,7 @@ def _export_eval_glbs(
             show_cam=True,
             prediction_mode="Depthmap and Camera",
         )
-        scene.export(
-            file_obj=os.path.join(glb_dir, f"{tag}_clip{start_idx + written}.glb")
-        )
+        scene.export(file_obj=os.path.join(glb_dir, f"{tag}_clip{n}_{label}.glb"))
         written += 1
     return written
 
@@ -867,17 +874,21 @@ def _log_val_images(
     prefix: str,
     epoch: int,
     step: int,
+    limit: int,
 ) -> int:
-    """Log the pass's [image | prediction | GT] panels as one wandb media row
-    and return how many went out. Same `step` as the pass's scalar row, so the
-    panels land on the epoch's existing row (wandb drops rows whose step is
-    below the current max -- equal is fine, lower is not).
+    """Log the first `limit` of the pass's [image | prediction | GT] panels as
+    one wandb media row and return how many went out. Same `step` as the pass's
+    scalar row, so the panels land on the epoch's existing row (wandb drops rows
+    whose step is below the current max -- equal is fine, lower is not).
+
+    `limit` because the sampler may be sized for the larger GLB budget; the
+    selection is round-robin, so its prefix is still spread over the datasets.
 
     No-ops when nothing was collected or no tracker is initialized (the sampler
     is main-process-only, and so is accelerator.log)."""
-    if sampler is None or not accelerator.trackers:
+    if sampler is None or limit <= 0 or not accelerator.trackers:
         return 0
-    figs = sampler.render(epoch)
+    figs = sampler.render(epoch, limit=limit)
     if not figs:
         return 0
     accelerator.log(
@@ -1012,21 +1023,9 @@ def _streaming_depth_metrics(
     return out
 
 
-# the depth metrics, in one canonical order. The accumulator keys are
-# "<dataset>/<metric>"; logged as "<prefix>/<dataset>/<metric>_avg" per dataset
-# and "<prefix>/all/<metric>_avg" for the blend.
-_DEPTH_METRIC_KEYS = (
-    "absrel_affine",
-    "delta1_affine",
-    "rmse_affine",
-    "absrel_metric",
-    "delta1_metric",
-    "rmse_metric",
-    "tae",
-    "tae_sq",
-)
-
-
+# Accumulator keys are "<dataset>/<metric>", logged as
+# "<prefix>/<dataset>/<metric>_avg" per dataset and "<prefix>/all/<metric>_avg"
+# for the blend.
 def _reduce_metrics(
     sums: dict[str, float], counts: dict[str, int], accelerator: Accelerator
 ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
@@ -1195,6 +1194,7 @@ def val_loop(
     at all), and is still bounded by args.export_glb_max_clips here."""
     if not torch.backends.cuda.matmul.allow_tf32:
         raise RuntimeError("TF32 matmul must stay enabled (set at module import)")
+    _check_loader_list(data_loaders, "val_loop")
 
     model.eval()
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -1203,14 +1203,17 @@ def val_loop(
     depth_counts: dict[str, int] = defaultdict(int)
     loss_sums: dict[str, float] = defaultdict(float)
     loss_counts: dict[str, int] = defaultdict(int)
-    glb_exported = 0
-    # main process only: the val loaders shard the same clip set across ranks,
-    # so every rank would bank near-identical panels and only rank 0's survive
-    # accelerator.log anyway. One sampler across all passes -> the image budget
-    # is spread over every val dataset by construction.
+    # one sampler across all passes, feeding BOTH the wandb panels and the glb
+    # export, so clipN is the same sequence in each. Sized for the larger of the
+    # two budgets; each takes its own prefix of the (round-robin) selection.
+    # Main process only: the val loaders shard the same clip set across ranks,
+    # so every rank would bank near-identical clips and only rank 0's survive
+    # accelerator.log / the file write anyway.
+    glb_clips = args.export_glb_max_clips if export_glb else 0
+    n_select = max(args.val_log_images, glb_clips)
     sampler = (
-        ValImageSampler(args.val_log_images)
-        if args.val_log_images > 0 and accelerator.is_main_process
+        ValImageSampler(n_select, keep_clip=glb_clips > 0)
+        if n_select > 0 and accelerator.is_main_process
         else None
     )
 
@@ -1255,27 +1258,13 @@ def val_loop(
                     depth_counts[k] += len(vals)
                 if sampler is not None:
                     sampler.add_batch(result["views"], result["pred"])
-                # gated by the caller (only the final val pass asks for GLBs -- a
-                # quick end-of-run sanity check, not one set per epoch;
-                # visualize_depth.py can render any checkpoint, incl. best, on
-                # demand). streaming_eval writes its own single set after training.
-                if export_glb:
-                    glb_exported += _export_eval_glbs(
-                        result["views"],
-                        result["pred"],
-                        args.output_dir,
-                        tag=prefix,
-                        accelerator=accelerator,
-                        start_idx=glb_exported,
-                        max_clips=args.export_glb_max_clips,
-                    )
                 del result, batch
 
     depth_per_dataset, depth_blended = _reduce_metrics(
         depth_sums, depth_counts, accelerator
     )
-    # blended losses come from metric_logger (it counts the mixed batches too),
-    # so only the per-dataset half of this reduction is used
+    # the meters already carry the blended losses over every loader (and the
+    # medians), so only the per-dataset half of this reduction is used
     loss_per_dataset, _ = _reduce_metrics(loss_sums, loss_counts, accelerator)
     per_dataset = {
         ds: {**depth_per_dataset.get(ds, {}), **loss_per_dataset.get(ds, {})}
@@ -1284,7 +1273,12 @@ def val_loop(
     results = _log_val_stats(
         metric_logger, per_dataset, depth_blended, accelerator, prefix, step
     )
-    _log_val_images(sampler, accelerator, prefix, epoch, step)
+    _log_val_images(sampler, accelerator, prefix, epoch, step, args.val_log_images)
+    # gated by the caller (only the final val pass asks for GLBs -- a quick
+    # end-of-run sanity check, not one set per epoch; visualize_depth.py can
+    # render any checkpoint, incl. best, on demand)
+    if export_glb:
+        _export_selected_glbs(sampler, args.output_dir, prefix, glb_clips)
     model.train(True)
     return results
 
@@ -1292,7 +1286,7 @@ def val_loop(
 @torch.no_grad()
 def streaming_eval(
     model: torch.nn.Module,
-    data_loader: DataLoader,
+    data_loaders: list[DataLoader],
     accelerator: Accelerator,
     step: int,
     args: FinetuneDepthCfg,
@@ -1305,60 +1299,66 @@ def streaming_eval(
     so no criterion runs here. Keys are namespaced by the prefix, keeping
     them apart from the non-causal val_* series.
 
-    data_loader must yield ONE clip per batch (run() builds a dedicated
-    batch-1 loader over the val config): StreamVGGT.inference folds the batch
-    dim of frame["img"] into the sequence, so B>1 would silently interleave
-    clips into one KV-cache stream. Checked per batch below."""
+    Takes the same per-dataset loader list as val_loop (run() hands over the
+    val loaders themselves when they are already batch-1), walks them in
+    sequence and logs one row. Every loader must yield ONE clip per batch:
+    StreamVGGT.inference folds the batch dim of frame["img"] into the sequence,
+    so B>1 would silently interleave clips into one KV-cache stream. Checked
+    per batch below."""
+    _check_loader_list(data_loaders, "streaming_eval")
     model.eval()
     net = accelerator.unwrap_model(model)  # the DDP wrapper has no .inference
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.meters = defaultdict(lambda: misc.SmoothedValue(window_size=9**9))
-    header = "Streaming eval:"
-    _set_data_epoch(data_loader, 0)  # same epoch-0 pin as val_loop
     depth_sums: dict[str, float] = defaultdict(float)
     depth_counts: dict[str, int] = defaultdict(int)
-    glb_exported = 0
+    # GLBs only (no wandb panels on this path -- the spec is one set of panels
+    # per VALIDATION epoch), but the same round-robin selection, so the clouds
+    # cover every dataset instead of the first max_clips the loader reached
+    glb_clips = args.export_glb_max_clips if args.export_glb else 0
+    sampler = (
+        ValImageSampler(glb_clips, keep_clip=True)
+        if glb_clips > 0 and accelerator.is_main_process
+        else None
+    )
 
     devices = [accelerator.device] if accelerator.device.type == "cuda" else []
     with torch.random.fork_rng(devices=devices):
-        torch.manual_seed(args.seed)
-        if devices:
-            torch.cuda.manual_seed_all(args.seed)
-        for _, batch in enumerate(
-            metric_logger.log_every(data_loader, args.print_freq, accelerator, header)
-        ):
-            if batch[0]["img"].shape[0] != 1:
-                raise ValueError(
-                    "streaming_eval needs a batch-1 loader (got batch size "
-                    f"{batch[0]['img'].shape[0]}): StreamVGGT.inference treats "
-                    "the batch dim of frame['img'] as extra frames"
+        for i, data_loader in enumerate(data_loaders):
+            torch.manual_seed(args.seed)  # per loader, as in val_loop
+            if devices:
+                torch.cuda.manual_seed_all(args.seed)
+            _set_data_epoch(data_loader, 0)  # same epoch-0 pin as val_loop
+            header = f"Streaming eval: ({i + 1}/{len(data_loaders)})"
+            for batch in metric_logger.log_every(
+                data_loader, args.print_freq, accelerator, header
+            ):
+                if batch[0]["img"].shape[0] != 1:
+                    raise ValueError(
+                        "streaming_eval needs batch-1 loaders (got batch size "
+                        f"{batch[0]['img'].shape[0]}): StreamVGGT.inference treats "
+                        "the batch dim of frame['img'] as extra frames"
+                    )
+                _prepare_batch(batch, mcfg)
+                result = loss_of_one_batch(
+                    batch,
+                    net,
+                    None,
+                    accelerator,
+                    inference=True,
+                    symmetrize_batch=False,
+                    use_amp=bool(args.amp),
                 )
-            _prepare_batch(batch, mcfg)
-            result = loss_of_one_batch(
-                batch,
-                net,
-                None,
-                accelerator,
-                inference=True,
-                symmetrize_batch=False,
-                use_amp=bool(args.amp),
-            )
-            stats = _streaming_depth_metrics(result["views"], result["pred"])
-            for k, vals in stats.items():
-                depth_sums[k] += float(np.sum(vals))
-                depth_counts[k] += len(vals)
-            if args.export_glb:
-                glb_exported += _export_eval_glbs(
-                    result["views"],
-                    result["pred"],
-                    args.output_dir,
-                    tag=prefix,
-                    accelerator=accelerator,
-                    start_idx=glb_exported,
-                    max_clips=args.export_glb_max_clips,
-                )
-            del result, batch
+                stats = _streaming_depth_metrics(result["views"], result["pred"])
+                for k, vals in stats.items():
+                    depth_sums[k] += float(np.sum(vals))
+                    depth_counts[k] += len(vals)
+                if sampler is not None:
+                    sampler.add_batch(result["views"], result["pred"])
+                del result, batch
 
+    if glb_clips:
+        _export_selected_glbs(sampler, args.output_dir, prefix, glb_clips)
     # no criterion on this path, so the metric_logger holds no loss meters and
     # the per-dataset groups carry depth metrics only
     per_dataset, blended = _reduce_metrics(depth_sums, depth_counts, accelerator)

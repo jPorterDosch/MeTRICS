@@ -9,7 +9,7 @@
 # clips, and writes each clip's predicted-depth point cloud to a .glb.
 #
 # It deliberately reuses the training code's helpers -- build_model,
-# build_train_loader, _prepare_batch, _set_data_epoch, _export_eval_glbs and
+# build_train_loader, _prepare_batch, _set_data_epoch, _clip_predictions and
 # loss_of_one_batch -- so the visualized geometry is produced by the SAME path
 # that eval uses; there is no second, drifting reconstruction of the pipeline.
 #
@@ -237,7 +237,7 @@ def _clip_confidences(preds: list[dict]) -> list[tuple[float, float, float]]:
     the whole clip -- a quick read on whether the learned confidences are
     degenerate/saturating (cf. the metric-mode depth_alpha caveat: raw-metre
     residuals can swamp the -alpha*log(sigma) regularizer). Returns one tuple
-    per batch element b, in b order (matches _export_eval_glbs's export
+    per batch element b, in b order (matches this script's own export
     order)."""
     flat = _stack_depth_conf(preds).flatten(1)
     return [

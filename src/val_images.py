@@ -1,8 +1,13 @@
-"""Validation-sample figures for wandb: [image | predicted depth | GT depth].
+"""Validation-sample selection and figures for wandb:
+[image | predicted depth | GT depth].
 
 One panel per sampled frame, a handful per validation pass, so a run can be
 inspected by eye while it trains -- the scalar metrics say a run got worse, a
 picture says whether it lost scale, went flat, or blew up in the GT holes.
+
+The same selection also drives the .glb point-cloud export, so clip N's panel
+and clip N's cloud are the same sequence -- one picture to read the error off,
+one scene to fly through.
 
 Kept out of finetune_depth.py so collection and rendering are importable (and
 testable) without the training stack; the entrypoint only decides when to call
@@ -16,6 +21,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless: compute nodes have no display
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 
 def clip_dataset_label(views: list[dict], b: int) -> str:
@@ -46,11 +52,17 @@ class ValImageSampler:
     distinct clips shows strictly more. Deterministic given the val loader's
     epoch-0 pin -- the same clips are drawn every pass, so the panels are
     comparable across epochs.
+
+    keep_clip additionally banks each candidate's WHOLE clip (every view's
+    image, predicted depth, mask and camera), which is what the .glb export
+    needs. That is ~S x the memory of a panel candidate, so it is opt-in: only
+    a run that asked for GLBs pays it.
     """
 
-    def __init__(self, n_images: int, frame_idx: int = 0):
+    def __init__(self, n_images: int, frame_idx: int = 0, keep_clip: bool = False):
         self.n_images = int(n_images)
         self.frame_idx = frame_idx
+        self.keep_clip = keep_clip
         self._pool: dict[str, list[dict]] = {}
 
     def add_batch(self, views: list[dict], preds: list[dict]) -> None:
@@ -67,17 +79,18 @@ class ValImageSampler:
             slot = self._pool.setdefault(label, [])
             if len(slot) >= self.n_images:
                 continue
-            slot.append(
-                {
-                    "label": label,
-                    "frame": i,
-                    # img is already rescaled to [0, 1] by _prepare_batch
-                    "img": view["img"][b].detach().float().cpu().numpy(),
-                    "pred": pred["depth"][b].detach().squeeze(-1).float().cpu().numpy(),
-                    "gt": view["depthmap"][b].detach().float().cpu().numpy(),
-                    "valid": view["valid_mask"][b].detach().cpu().numpy().astype(bool),
-                }
-            )
+            candidate = {
+                "label": label,
+                "frame": i,
+                # img is already rescaled to [0, 1] by _prepare_batch
+                "img": view["img"][b].detach().float().cpu().numpy(),
+                "pred": pred["depth"][b].detach().squeeze(-1).float().cpu().numpy(),
+                "gt": view["depthmap"][b].detach().float().cpu().numpy(),
+                "valid": view["valid_mask"][b].detach().cpu().numpy().astype(bool),
+            }
+            if self.keep_clip:
+                candidate["clip"] = _clip_tensors(views, preds, b)
+            slot.append(candidate)
 
     def select(self) -> list[dict]:
         """Round-robin over the datasets seen (label order, for determinism)
@@ -101,9 +114,9 @@ class ValImageSampler:
             rank += 1
         return picked
 
-    def render(self, epoch: int) -> list[tuple[str, object]]:
-        """(caption, matplotlib Figure) for each selected frame. The caller owns
-        the figures and must close them."""
+    def render(self, epoch: int, limit: int | None = None) -> list[tuple[str, object]]:
+        """(caption, matplotlib Figure) for the first `limit` selected frames.
+        The caller owns the figures and must close them."""
         return [
             (
                 f"{s['label']} clip{n} frame{s['frame']} (epoch {epoch})",
@@ -111,8 +124,50 @@ class ValImageSampler:
                     s["img"], s["pred"], s["gt"], s["valid"], title=s["label"]
                 ),
             )
-            for n, s in enumerate(self.select())
+            for n, s in self.enumerate_selected(limit)
         ]
+
+    def clips(self, limit: int | None = None) -> list[tuple[int, str, dict]]:
+        """(index, label, clip tensors) for the first `limit` selected clips --
+        the .glb export's half of the same selection, so index N here and
+        "clipN" in a render() caption are the same sequence. Requires
+        keep_clip."""
+        if not self.keep_clip:
+            raise ValueError("clips() needs ValImageSampler(keep_clip=True)")
+        return [(n, s["label"], s["clip"]) for n, s in self.enumerate_selected(limit)]
+
+    def enumerate_selected(self, limit: int | None = None) -> list[tuple[int, dict]]:
+        """(index, candidate) over the selection, truncated to `limit`. The
+        index is the selection's own, so every consumer of a prefix agrees on
+        which clip is clipN -- and because select() is round-robin, a prefix is
+        still spread over the datasets."""
+        picked = self.select()
+        if limit is not None:
+            picked = picked[:limit]
+        return list(enumerate(picked))
+
+
+def _clip_tensors(views: list[dict], preds: list[dict], b: int) -> dict:
+    """Clip b's whole sequence, in the [S,...] cpu layout _clip_predictions
+    wants: img [S,3,H,W] in [0,1], depth/valid [S,H,W], K [S,3,3],
+    pose [S,4,4] cam2world."""
+    return {
+        "img": torch.stack([v["img"][b] for v in views]).detach().float().cpu(),
+        "depth": torch.stack([p["depth"][b] for p in preds])
+        .detach()
+        .squeeze(-1)
+        .float()
+        .cpu(),
+        "valid": torch.stack([v["valid_mask"][b] for v in views]).detach().cpu().bool(),
+        "K": torch.stack([v["camera_intrinsics"][b] for v in views])
+        .detach()
+        .float()
+        .cpu(),
+        "pose": torch.stack([v["camera_pose"][b] for v in views])
+        .detach()
+        .float()
+        .cpu(),
+    }
 
 
 def render_panel(
