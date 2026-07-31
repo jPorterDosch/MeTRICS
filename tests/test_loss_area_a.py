@@ -2,6 +2,7 @@ import torch
 
 from streamvggt.loss.depth_train_loss import DepthTrainLoss
 from streamvggt.loss.distill_loss import DistillLoss
+from streamvggt.loss.head_loss import DepthOrPmapLoss
 from streamvggt.loss.trimmed_loss import TrimmedMAELoss
 
 
@@ -60,6 +61,19 @@ def test_trimmed_mae_uses_retained_counts_per_reduction() -> None:
     assert image_loss.item() == 1.5
 
 
+def test_spatial_gradient_uses_valid_edges_without_cropping() -> None:
+    criterion = DepthOrPmapLoss(metric=True)
+    for size, row in ((2, 0), (10, 0), (10, 9)):
+        prediction = torch.zeros(1, size, size, 1)
+        target = torch.zeros_like(prediction)
+        prediction[0, row, 1, 0] = 1.0
+        mask = torch.zeros(1, size, size, dtype=torch.bool)
+        mask[0, row, :2] = True
+        loss = criterion.image_gradient_loss(prediction, target, mask)
+        assert loss.item() == 0.5
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
+    test_spatial_gradient_uses_valid_edges_without_cropping()

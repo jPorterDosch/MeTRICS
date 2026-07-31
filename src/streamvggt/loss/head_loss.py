@@ -105,9 +105,6 @@ class DepthOrPmapLoss(torch.nn.Module):
         assert pred.dim() == 4 and pred.shape[-1] == 1
         assert gt.shape == pred.shape
 
-        B, H, W, _ = pred.shape
-        _ = pred.device
-
         dx_pred = pred[:, :, 1:] - pred[:, :, :-1]  # [B,H,W-1,1]
         dx_gt = gt[:, :, 1:] - gt[:, :, :-1]
         dx_mask = mask[:, :, 1:] & mask[:, :, :-1]  # [B,H,W-1]
@@ -116,22 +113,15 @@ class DepthOrPmapLoss(torch.nn.Module):
         dy_gt = gt[:, 1:, :] - gt[:, :-1, :]
         dy_mask = mask[:, 1:, :] & mask[:, :-1, :]  # [B,H-1,W]
 
-        min_h = min(dy_pred.shape[1], dx_pred.shape[1])
-        min_w = min(dx_pred.shape[2], dy_pred.shape[2])
-
-        dx_pred = dx_pred[:, :min_h, :min_w, :]  # [B,H-1,W-1,1]
-        dx_gt = dx_gt[:, :min_h, :min_w, :]
-        dx_mask = dx_mask[:, :min_h, :min_w]  # [B,H-1,W-1]
-
-        dy_pred = dy_pred[:, :min_h, :min_w, :]  # [B,H-1,W-1,1]
-        dy_gt = dy_gt[:, :min_h, :min_w, :]
-        dy_mask = dy_mask[:, :min_h, :min_w]  # [B,H-1,W-1]
-
-        loss_dx = F.l1_loss(
-            dx_pred * dx_mask.unsqueeze(-1), dx_gt * dx_mask.unsqueeze(-1)
+        loss_dx = (
+            (dx_pred - dx_gt).abs()[dx_mask].mean()
+            if dx_mask.any()
+            else pred.sum() * 0.0
         )
-        loss_dy = F.l1_loss(
-            dy_pred * dy_mask.unsqueeze(-1), dy_gt * dy_mask.unsqueeze(-1)
+        loss_dy = (
+            (dy_pred - dy_gt).abs()[dy_mask].mean()
+            if dy_mask.any()
+            else pred.sum() * 0.0
         )
 
         return (loss_dx + loss_dy) / 2
