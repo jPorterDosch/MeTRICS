@@ -136,6 +136,8 @@ class LoRACfg:
 
     def validate(self) -> None:
         self.targets = [LoRATarget(t) for t in self.targets]
+        if self.enabled and not self.targets:
+            raise ValueError("lora.targets must be non-empty when LoRA is enabled")
         if self.enabled and (not math.isfinite(self.alpha) or self.alpha <= 0):
             raise ValueError(
                 "lora.alpha must be finite and positive when LoRA is enabled, "

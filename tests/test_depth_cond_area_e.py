@@ -106,8 +106,17 @@ def test_enabled_head_injection_requires_a_head() -> None:
     DepthCondCfg(enabled=False, injection=InjectionType.HEAD, heads=[]).validate()
 
 
+def test_enabled_lora_requires_targets() -> None:
+    assert_value_error(
+        "lora.targets",
+        lambda: LoRACfg(enabled=True, targets=[]).validate(),
+    )
+    LoRACfg(enabled=False, targets=[]).validate()
+
+
 if __name__ == "__main__":
     test_concurrent_cache_writers_use_private_temp_files()
     test_fixed_normalization_requires_finite_positive_constant()
     test_enabled_lora_requires_finite_positive_alpha()
     test_enabled_head_injection_requires_a_head()
+    test_enabled_lora_requires_targets()
