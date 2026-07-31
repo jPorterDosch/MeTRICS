@@ -33,6 +33,8 @@ class HyperSim_Multi(BaseMultiViewDataset):
         is_metric=True,
         **kwargs,
     ):
+        if is_metric is not True:
+            raise ValueError(f"HyperSim is_metric must be True, got {is_metric!r}")
         self.ROOT = ROOT
         self.video = True
         self.is_metric = is_metric

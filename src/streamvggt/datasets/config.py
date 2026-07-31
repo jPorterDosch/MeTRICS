@@ -107,6 +107,11 @@ class DatasetConfig:
         self.dataset = DatasetName(self.dataset)
         self.split = Split(self.split)
         self.transform = TransformName(self.transform)
+        if self.is_metric is not True:
+            raise ValueError(
+                f"{self.dataset.value} provides metric depth; is_metric must be True, "
+                f"got {self.is_metric!r}"
+            )
         if self.num_views < 1:
             raise ValueError(f"num_views must be >= 1, got {self.num_views}")
         # one shared guard (see base_multiview_dataset): a scalar left over from
