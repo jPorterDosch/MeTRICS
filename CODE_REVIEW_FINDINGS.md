@@ -848,33 +848,29 @@ save/load callers and loop in `src/finetune_depth.py`, not vendored
 
 ### R1-3 — `val/all/*_med` is rank-local
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R1.
+**Verdict: UPHELD — FIXED in 2160b1c.** Raised by R1.
 
 Failure scenario: rank 0's loss deque contains `[0,0]` and rank 1's contains
 `[100,100,100]`. `SmoothedValue.synchronize_between_processes` does not pool the
 deques, so the main rank emits `val/all/loss_med=0` although the global median is
 100. The source docstring acknowledges that the median is rank-local.
 
-Minimal patch, **NOT APPLIED**: in editable `src/finetune_depth.py`, in
-`_log_val_stats`, emit `*_med` only when `accelerator.num_processes == 1`. This
-removes the falsely global distributed number without renaming or changing any
-frozen `*_avg` or `val/samples` key. A true pooled median would require gathering
-all observations and is not the minimal fix.
+Implemented patch: `_log_val_stats` gathers the supported scalar observations
+from every rank and computes their genuine global median. The frozen
+`val/all/loss_med` key remains present.
 
 This is distinct from R2-1: R1-3 concerns the local deque used for medians; R2-1
 concerns discarded returned tensors used for averages.
 
 ### R1-4 — validation loss averages batch means rather than clips
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R1.
+**Verdict: UPHELD — FIXED in f941f65.** Raised by R1.
 
 Failure scenario: a four-clip batch with loss 1 followed by a one-clip batch with
 loss 9 reports `(1+9)/2=5.0`; equal clip support is `2.6`. This affects per-dataset
 and blended `loss_avg`, including the checkpoint-selection fallback.
 
-Minimal patch, **NOT APPLIED**: in editable `src/finetune_depth.py`, make
+Implemented patch: in `src/finetune_depth.py`, make
 `_accumulate_batch_loss` multiply each scalar batch value by the batch clip count
 and increment its count by that clip count. In `val_loop`, retain the reduced
 `loss_blended` result and pass it to `_log_val_stats`, so the existing frozen
@@ -884,14 +880,13 @@ the criterion.
 
 ### R1-5 — streaming TAE bridges across an invalid frame
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R1.
+**Verdict: UPHELD — FIXED in c3da4b7.** Raised by R1.
 
 Failure scenario: frames 0 and 2 are valid, frame 1 is invalid, and predictions are
 1, 2, 3. The loop retains frame 0 across the gap and emits TAE 2 and TAE-squared 4,
 although there is no adjacent valid pair.
 
-Minimal patch, **NOT APPLIED**: in editable `src/finetune_depth.py`, in
+Implemented patch: in `src/finetune_depth.py`, in
 `_streaming_depth_metrics`, set `prev = None` immediately before continuing on an
 invalid frame. No metric definition or key changes.
 
@@ -920,8 +915,7 @@ merge risk.
 
 ### R2-1 — distributed reductions discard their returned tensors
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R2.
+**Verdict: UPHELD — FIXED in ebe25d7.** Raised by R2.
 
 Failure scenario: a fake two-rank reducer returned global sum/count `[13,4]`, but
 `_reduce_metrics` read the unchanged local `[10,1]` and returned 10. The installed
@@ -931,7 +925,7 @@ loss averages are also rank-local unless the repo-owned caller supplies its own
 reduced blend. This can select a checkpoint using rank 0's shard rather than global
 validation.
 
-Minimal patch, **NOT APPLIED**: in editable `src/finetune_depth.py`, assign
+Implemented patch: in `src/finetune_depth.py`, assign
 `t = accelerator.reduce(t, reduction="sum")` in `_reduce_metrics`. In `val_loop`,
 retain both values from the existing loss reduction and merge `loss_blended` with
 `depth_blended` before `_log_val_stats`; that repo-owned result overwrites the unsafe
@@ -955,15 +949,14 @@ collective per batch and reduce only after every rank completes its shard.
 
 ### R2-3 — rank-local non-finite loss exits before peers reach backward
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R2.
+**Verdict: UPHELD — FIXED in 19e7a88.** Raised by R2.
 
 Failure scenario: one live depth-training rank gets NaN and executes `sys.exit(1)`;
 another gets a finite loss and enters DDP backward, where it can wait until the long
 process-group timeout. A genuine multi-rank run was not permitted, but the divergent
 branch before the collective is explicit.
 
-Minimal patch, **NOT APPLIED**: in editable `src/finetune_depth.py`, immediately
+Implemented patch: in `src/finetune_depth.py`, immediately
 after computing `loss_value`, reduce a scalar finite flag with `min`, assign the
 returned tensor, and raise the same `FloatingPointError` on every rank before any
 rank calls the scaler/backward path. Include local loss details only on the offending
@@ -971,15 +964,14 @@ rank. No vendored edit is needed.
 
 ### R2-6 — fresh nonzero `start_epoch` changes work without changing identity
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R2.
+**Verdict: UPHELD — FIXED in 26caa22.** Raised by R2.
 
 Failure scenario: fresh `start_epoch=0` and `start_epoch=9` configurations produce
 the same experiment ID, yet the latter trains only the final epoch. The field is
 correctly frozen as resume bookkeeping, but no guard prevents it from controlling a
 fresh run.
 
-Minimal patch, **NOT APPLIED**: in editable `src/finetune_depth.py::main`, before
+Implemented patch: in `src/finetune_depth.py::main`, before
 building the manifest, raise `ValueError` when `cfg.resume is None` and
 `cfg.start_epoch != 0`. Leave every `FinetuneDepthCfg` field and
 `_NON_IDENTITY_FIELDS` unchanged; checkpoint loading remains the only sanctioned
@@ -987,14 +979,13 @@ source of a nonzero start epoch.
 
 ### R2-7 — live checkpoint replacement is not atomic
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R2.
+**Verdict: UPHELD — FIXED in 08a0f49.** Raised by R2.
 
 Failure scenario: writing a new `checkpoint-last.pth` directly over the old target
 and being preempted mid-write can leave only a truncated resume artifact. The unsafe
 primitive is vendored, but the live call site is editable.
 
-Minimal patch, **NOT APPLIED**: in the nested `save_model` function in editable
+Implemented patch: in the nested `save_model` function in
 `src/finetune_depth.py`, ask `misc.save_model` to write a sibling temporary filename,
 then on the main process call `os.replace` from that fully closed temporary file to
 `checkpoint-<fname>.pth`, followed by the existing process synchronization. This
@@ -1037,14 +1028,13 @@ guard solely into unused trainers is unnecessary churn.
 
 ### R2-12 — fresh-run collision check is a race
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R2.
+**Verdict: UPHELD — FIXED in f540818.** Raised by R2.
 
 Failure scenario: two identical jobs can both pass `os.path.exists` before either
 later calls `mkdir(..., exist_ok=True)`, then share manifest and checkpoint paths.
 This is a standard check-then-create race and needs no concurrent GPU run to establish.
 
-Minimal patch, **NOT APPLIED**: in editable `src/train_utils.py::resolve_output_dir`,
+Implemented patch: in `src/train_utils.py::resolve_output_dir`,
 replace the rank-zero fresh-run existence check with an atomic ownership claim using
 `os.makedirs(output_dir, exist_ok=False)` and translate `FileExistsError` to the
 current precise collision message. Nonzero ranks still only derive the path; the
@@ -1053,15 +1043,14 @@ not claim a new directory.
 
 ### R2-13 — empty loaders fail in vendored progress reporting
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by
-R2.
+**Verdict: UPHELD — FIXED in 9c642cb.** Raised by R2.
 
 Failure scenario: a dataset shorter than the training batch size with
 `drop_last=True`, or an empty validation dataset, gives a zero-length loader.
 Vendored `MetricLogger.log_every` then divides elapsed time by zero; the error does
 not identify the bad dataset/configuration.
 
-Minimal patch, **NOT APPLIED**: in editable `src/finetune_depth.py::run`, immediately
+Implemented patch: in `src/finetune_depth.py::run`, immediately
 after constructing the raw training, validation, and streaming loaders and before
 model construction/preparation, raise `ValueError` naming any loader whose length is
 zero. This is the preferred fail-fast contract and avoids modifying vendored
@@ -1230,16 +1219,12 @@ pre-existed with older bytecode files, which were left untouched.
 
 ## Uncovered areas
 
-- Areas A, B, C and D were each cycled through two independent adversarial
-  reviewers and one defense agent. Verdicts are recorded; **no fix was applied
-  and no commit was made**, because `.git` was mounted read-only for the entire
-  run.
+- Areas A, B, C and D were reviewed, and their UPHELD findings were fixed with
+  CPU regression evidence on local branch `review/codebase-sweep`. Nothing was
+  pushed or merged to `main`.
 - **Area E — `src/streamvggt/depth_cond/` (injection paths, gate init, LoRA
   ordering, encoder cache) was NOT REVIEWED AT ALL.** The review's round budget
   was exhausted. No agent read it; nothing about it is implied.
 - Never in scope for this run: `datasets_preprocess/`, export and visualization
   scripts, `tests/`, `experiments/`, `config/`.
-- The review plan's per-commit test gate ("a CPU test that fails before the fix
-  and passes after") was **unsatisfiable and is not claimed** for any finding.
-- `CODE_REVIEW_FINDINGS.md` is itself untracked and will not survive a clean
-  checkout; it must be committed once `.git` is writable.
+- Findings marked DEFERRED across Areas A-D remain open and unfixed.
