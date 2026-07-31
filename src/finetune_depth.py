@@ -1162,6 +1162,7 @@ def _accumulate_batch_loss(
         if v is not None:
             sums[f"{dataset}/{name}"] += v * batch_size
             counts[f"{dataset}/{name}"] += batch_size
+    return True
 
 
 def _criterion_per_clip(
