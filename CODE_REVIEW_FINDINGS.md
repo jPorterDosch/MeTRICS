@@ -483,7 +483,7 @@ Role: Defense, no-commit mode.
 
 ### R1-1 — video `scale&shift` does not solve an exactly affine case
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in 9b39ce6.** Raised by R1.
 
 Failure scenario: the shipped video evaluator routes all three datasets' `scale&shift` mode through 1,000 fixed-step Adam iterations on summed L1. For prediction `[1,2,3]` and GT `[3,5,7]`, the live route reports AbsRel `0.0793723538517952`; the already-available least-squares route reports `0.0`. This mode is live, not merely a bad dormant default. `monodepth/tools.py` has the duplicate implementation, but its current evaluator does not select this advertised video mode.
 
@@ -491,7 +491,7 @@ Minimal patch, **NOT APPLIED**: in the three `args.align == "scale&shift"` calls
 
 ### R1-2 and R2-1 — affine fitting includes `custom_mask` exclusions
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised independently by R1 and R2; these are the same defect.
+**Verdict: UPHELD — FIXED in db38142.** Raised independently by R1 and R2; these are the same defect.
 
 Failure scenario: prediction `[1,2,100]`, GT `[2,4,1]`, and mask `[true,true,false]` have an exact scale of 2 on the evaluated pixels, but the excluded outlier participates in the fit. The live validation function reports AbsRel `0.37813687324523926` and aligned valid depths `[3.0049467,2.9847984]`. `finetune_depth.py` uses this path for affine headline metrics and TAE input. The legacy tool copies expose the same callable bug, although current video/monodepth scripts do not pass `custom_mask`.
 
@@ -499,7 +499,7 @@ Minimal patch, **NOT APPLIED**: in `temporal_consistency/metrics.py:201-209`, in
 
 ### R1-3 and R2 TAE-collision question — reprojection collisions use last-write wins
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** R1 promoted this as a finding; R2's separate question describes the same behavior.
+**Verdict: UPHELD — FIXED in 6005530.** R1 promoted this as a finding; R2's separate question describes the same behavior.
 
 Failure scenario: two positive camera-space points projecting to one target pixel produce depth 2 in near/far input order and depth 1 in far/near order. TAE is intended to compare the visible reprojected surface, so choosing an occluded sample by flatten order is a real wrong-number path in the live validation implementation.
 
@@ -507,7 +507,7 @@ Minimal patch, **NOT APPLIED**: in `temporal_consistency/metrics.py:76-78`, init
 
 ### R1-4 and R2-6 — MV finiteness filtering destroys point tuples
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised independently by R1 and R2; these are the same defect.
+**Verdict: UPHELD — FIXED in 5ba721c.** Raised independently by R1 and R2; these are the same defect.
 
 Failure scenario: two points `[[0,0,1],[1,NaN,2]]` produce a component mask of shape `(2,3)` and five retained scalars; reshaping raises `ValueError`. Other component counts can silently regroup coordinates, and the computed GT mask is ignored.
 
@@ -515,7 +515,7 @@ Minimal patch, **NOT APPLIED**: in `mv_recon/launch.py:300-308`, compute one joi
 
 ### R1-5 — `avg_dis` normalization uses a batch-wide denominator
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in 08e3951.** Raised by R1.
 
 Failure scenario: two samples with one valid point at distance 2 and 4 return factors `[1,2]`, not `[2,4]`, because both numerators are divided by the batch count 2. The shipped MV launcher mitigates this by constructing `Regr3D_t(..., norm_mode=False)`, but `Regr3D_t` publicly defaults to the selectable broken `avg_dis`; dormancy does not make that default correct.
 
@@ -523,7 +523,7 @@ Minimal patch, **NOT APPLIED**: in `mv_recon/criterion.py:177`, replace the scal
 
 ### R1-6 and R2-11 — alignment modes are not mutually exclusive
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised independently by R1 and R2; these are the same defect.
+**Verdict: UPHELD — FIXED in 294039c.** Raised independently by R1 and R2; these are the same defect.
 
 Failure scenario: `metric_scale=True, scale_and_shift=True` silently takes the metric branch and reports AbsRel `0.5` for prediction half of GT instead of rejecting the contradictory request. Current in-repo callers select one mode, but this is a selectable public API trap with a self-evident fail-fast fix.
 
@@ -543,7 +543,7 @@ Failure scenario: the launcher catches selected OOM/covariance/eigenvalue failur
 
 ### R2-4 — scale-only alignment accepts an all-zero prediction
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in 2e89c94.** Raised by R2.
 
 Failure scenario: a zero 2x2 prediction against positive GT returns NaN AbsRel/SqRel/RMSE/Log RMSE while claiming four valid pixels. A diverged or undefined scale therefore reaches headline aggregation.
 
@@ -557,7 +557,7 @@ Failure scenario: equal-length lists containing one missing and one stale predic
 
 ### R2-7 — CO3D reads undefined `args.fast_eval`
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in c5f82cc.** Raised by R2.
 
 Failure scenario: any loaded category reaches `args.fast_eval`, but AST inspection found `fast_eval` as the sole `args` attribute read without a parser definition. Evaluation fails with `AttributeError` before reporting the category.
 
@@ -565,7 +565,7 @@ Minimal patch, **NOT APPLIED**: in `pose_evaluation/test_co3d.py:206-216`, add `
 
 ### R2-8 — CO3D `--use_ba` is a silent no-op
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in ebc8dea.** Raised by R2.
 
 Failure scenario: AST inspection found zero loads of the `use_ba` parameter and no BA call in `process_sequence`; both CLI modes execute the same inference branch while one claims BA.
 
@@ -573,7 +573,7 @@ Minimal patch, **NOT APPLIED**: immediately after argument parsing in `pose_eval
 
 ### R2-9 — MV log aggregation hard-codes eight ranks and breaks at gaps
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in 6fd172d.** Raised by R2.
 
 Failure scenario: rank 8 from a nine-process Accelerate run is never aggregated; a missing low-index log also makes `break` discard later ranks. The shell wrapper uses one process, but the Python launcher actively shards by Accelerate rank and therefore exposes this contract.
 
@@ -587,7 +587,7 @@ The record is not presented as valid or perfect: `valid_pixels=0` explicitly ide
 
 ### R2-12 — `delta < 1.` cannot recognize an exact prediction
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in cf9a799.** Raised by R2.
 
 Failure scenario: an exact positive prediction has ratio exactly 1, yet strict `< 1.0` reports `delta < 1. = 0.0` while every conventional delta field is 1.0. The logged key is protected and need not be renamed.
 
@@ -595,7 +595,7 @@ Minimal patch, **NOT APPLIED**: change only the threshold-zero comparison from `
 
 ### R2-13 — launcher flags are ignored or overridden
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git), limited to `--conf_thresh`.** Raised by R2.
+**Verdict: UPHELD — FIXED in b12dd98, limited to `--conf_thresh`.** Raised by R2.
 
 Failure scenario: `mv_recon/launch.py` advertises a confidence threshold, never reads it, and uses a commented hard-coded confidence comparison. A user-selected threshold therefore has no effect. The device and video crop observations are real ergonomics, but current launchers are explicitly CUDA-oriented and unconditionally choose the shipped no-crop flow; changing those paths is not needed to protect reported numbers and is rejected as unnecessary churn.
 
