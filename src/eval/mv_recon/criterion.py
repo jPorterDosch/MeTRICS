@@ -175,7 +175,7 @@ def get_norm_factor(pts, norm_mode="avg_dis", valids=None, fix_first=True):
         else:
             raise ValueError(f"bad {dis_mode=}")
 
-        norm_factor = all_dis.sum(dim=1) / (torch.cat(nnzs).sum() + 1e-8)
+        norm_factor = all_dis.sum(dim=1) / (torch.stack(nnzs).sum(dim=0) + 1e-8)
     else:
         raise ValueError(f"Not implemented {norm_mode=}")
 

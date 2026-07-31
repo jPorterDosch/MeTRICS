@@ -5,6 +5,7 @@ import textwrap
 import unittest
 
 import numpy as np
+import torch
 
 
 ROOT = pathlib.Path(__file__).parents[1]
@@ -153,6 +154,17 @@ class PointCloudFinitenessTest(unittest.TestCase):
         self.assertEqual(namespace["pts_all_masked"].shape, (1, 3))
         self.assertEqual(namespace["pts_gt_all_masked"].shape, (1, 3))
         self.assertEqual(namespace["images_all_masked"].shape, (1, 3))
+
+
+class PointNormalizationTest(unittest.TestCase):
+    def test_average_distance_uses_each_samples_valid_count(self):
+        module = load_module("area_c_criterion", "src/eval/mv_recon/criterion.py")
+        points = torch.tensor([[[[2.0, 0.0, 0.0]]], [[[4.0, 0.0, 0.0]]]])
+        valid = torch.ones((2, 1, 1), dtype=torch.bool)
+        factors = module.get_norm_factor(
+            [points, None], "avg_dis", [valid, None], fix_first=True
+        )
+        torch.testing.assert_close(factors.reshape(-1), torch.tensor([2.0, 4.0]))
 
 
 if __name__ == "__main__":
