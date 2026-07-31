@@ -91,5 +91,21 @@ class ReprojectionOcclusionTest(unittest.TestCase):
         np.testing.assert_array_equal(far_near, near_far)
 
 
+class ScaleOnlyValidationTest(unittest.TestCase):
+    def test_zero_prediction_is_rejected(self):
+        pred = np.zeros((2, 2), dtype=np.float32)
+        gt = np.ones((2, 2), dtype=np.float32)
+        cases = [
+            ("temporal", "src/eval/temporal_consistency/metrics.py", {"scale_only": True}),
+            ("monodepth", "src/eval/monodepth/tools.py", {"align_with_scale": True}),
+            ("video", "src/eval/video_depth/tools.py", {"align_with_scale": True}),
+        ]
+        for name, path, alignment in cases:
+            with self.subTest(name=name):
+                module = load_module(f"area_c_scale_{name}", path)
+                with self.assertRaisesRegex(ValueError, "scale-only alignment"):
+                    module.depth_evaluation(pred, gt, max_depth=None, **alignment)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -232,6 +232,8 @@ def depth_evaluation(
         s, t = closed_form_scale_and_shift(predicted_depth, ground_truth_depth)
         predicted_depth = s * predicted_depth + t
     elif scale_only:
+        if not torch.isfinite(predicted_depth).all() or predicted_depth.abs().sum() == 0:
+            raise ValueError("scale-only alignment requires finite, nonzero predictions")
         # Compute initial scale factor 's' using the closed-form solution (L2 norm)
         dot_pred_gt = torch.nanmean(ground_truth_depth)
         dot_pred_pred = torch.nanmean(predicted_depth)
