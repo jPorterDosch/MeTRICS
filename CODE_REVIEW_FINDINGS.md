@@ -1514,5 +1514,5 @@ rank-asymmetric behavior; the former scalar-only clip-loss test hid the real
 criterion denominator and is now strengthened with `DepthOrPmapLoss`. The
 scale-loss arity probe remains a seam test. Ruff reports five pre-existing unused
 imports, all in the user-owned vendored `src/dust3r/inference.py`; they were not
-modified. Format check reports 12 pre-existing/unrelated files and was not
-auto-fixed, preserving the user's carried work and avoiding incidental churn.
+modified. After formatting this round's non-user changes, format check reports
+four pre-existing user-owned files; they were not auto-fixed.
