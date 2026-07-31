@@ -1277,7 +1277,7 @@ documentation and does not justify changing the sampling arithmetic.
 
 ### E-R2-1 — concurrent cache misses share one temporary filename
 
-**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised as a finding
+**Verdict: UPHELD — FIXED in 0a8e997.** Raised as a finding
 by R2 (contracts-and-runtime lens) and previously as a question by R1. R2's
 two-thread reproduction promotes the question to a confirmed finding.
 
@@ -1295,7 +1295,7 @@ semantics unchanged.
 
 ### E-R2-3 — fixed normalization accepts zero, negative, and non-finite constants
 
-**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+**Verdict: UPHELD — FIXED in 711f575.** Raised by R2
 (contracts-and-runtime lens).
 
 Failure scenario: `norm=fixed,norm_constant_m=0,log_depth=true` converts every valid
@@ -1310,7 +1310,7 @@ the constant or validate the frozen-but-unread value in raw mode.
 
 ### E-R2-4 — enabled LoRA accepts zero or non-finite alpha
 
-**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+**Verdict: UPHELD — FIXED in aa60671.** Raised by R2
 (contracts-and-runtime lens).
 
 Failure scenario: `enabled=true,alpha=0` constructs nominal adapters whose scaling is
@@ -1324,7 +1324,7 @@ otherwise. Leave disabled-mode identity behavior and all frozen fields unchanged
 
 ### E-R2-5 — enabled head injection accepts an empty head list
 
-**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+**Verdict: UPHELD — FIXED in b372de1.** Raised by R2
 (contracts-and-runtime lens).
 
 Failure scenario: `enabled=true,injection=head,heads=[]` builds no injection modules
@@ -1338,7 +1338,7 @@ empty. Do not alter token-injection handling of the inactive `heads` field.
 
 ### E-R2-6 — enabled LoRA accepts no targets and over-reports wrapping
 
-**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
+**Verdict: UPHELD — FIXED in e4770b0.** Raised by R2
 (contracts-and-runtime lens).
 
 Failure scenario: `enabled=true,targets=[]` leaves every qkv/proj as a plain
@@ -1411,9 +1411,9 @@ dataset, training, evaluation, or export path was used.
 
 - All five areas A-E have now been reviewed. Areas A-D had their UPHELD findings
   fixed with CPU regression evidence on branch `review/codebase-sweep`.
-- Area E findings have been judged but are **NOT yet fixed**. Its separate
-  implementation round is pending and blocked on a user-owned uncommitted change to
-  `src/streamvggt/depth_cond/model.py`.
+- Area E's five scoped findings were fixed with CPU regression evidence.
+- E-R1-1, E-R2-7, and E-R1-2/E-R2-2 remain unfixed because
+  `src/streamvggt/depth_cond/model.py` had uncommitted user changes during this round.
 - Findings marked DEFERRED across all areas remain open and unfixed.
 - Nothing was pushed or merged to `main`.
 - Permanently out of scope: `datasets_preprocess/`, export and visualization scripts,
