@@ -12,6 +12,7 @@ numerically identical to the live path (Stage 4 check).
 import hashlib
 import os
 import re
+import uuid
 from typing import Optional
 
 import torch
@@ -43,6 +44,10 @@ class EncoderFeatureCache:
     def save(self, key: str, feats: torch.Tensor) -> None:
         # atomic write: partial files must never be readable as cache hits
         p = self._path(key)
-        tmp = p + ".tmp"
-        torch.save(feats.detach().to(torch.float32).cpu(), tmp)
-        os.replace(tmp, p)
+        tmp = f"{p}.{uuid.uuid4().hex}.tmp"
+        try:
+            torch.save(feats.detach().to(torch.float32).cpu(), tmp)
+            os.replace(tmp, p)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
