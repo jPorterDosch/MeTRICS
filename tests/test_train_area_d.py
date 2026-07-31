@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import finetune_depth as fd  # noqa: E402
 import croco.utils.misc as misc  # noqa: E402
 import train_utils  # noqa: E402
+from streamvggt.loss.head_loss import DepthOrPmapLoss  # noqa: E402
 
 PartialState()
 
@@ -49,18 +50,38 @@ class TrainAreaDTests(unittest.TestCase):
     def test_validation_loss_is_clip_weighted(self) -> None:
         sums, counts = defaultdict(float), defaultdict(int)
 
-        def views(batch_size: int) -> list[dict]:
-            return [
-                {
-                    "img": torch.zeros(batch_size, 3, 1, 1),
-                    "dataset": ["hammer"] * batch_size,
-                }
-            ]
+        class Criterion:
+            loss = DepthOrPmapLoss(metric=True, conf_weighting=False)
 
-        fd._accumulate_batch_loss(views(4), 1.0, {}, sums, counts)
-        fd._accumulate_batch_loss(views(1), 9.0, {}, sums, counts)
-        self.assertEqual(counts["hammer/loss"], 5)
-        self.assertAlmostEqual(sums["hammer/loss"] / counts["hammer/loss"], 2.6)
+            def __call__(self, views, preds):
+                return self.loss(
+                    preds[0]["depth"],
+                    views[0]["depthmap"].unsqueeze(-1),
+                    valid_mask=views[0]["valid_mask"],
+                    return_components=True,
+                )
+
+        def accumulate(errors, masks):
+            batch_size = len(errors)
+            views = [{
+                "img": torch.zeros(batch_size, 3, 1, 3),
+                "depthmap": torch.zeros(batch_size, 1, 3),
+                "valid_mask": torch.tensor(masks, dtype=torch.bool).reshape(batch_size, 1, 3),
+                "dataset": ["hammer"] * batch_size,
+            }]
+            preds = [{
+                "depth": torch.tensor(errors).reshape(batch_size, 1, 1, 1).expand(-1, 1, 3, 1)
+            }]
+            batch_loss, _ = Criterion()(views, preds)
+            for clip_views, loss, details in fd._criterion_per_clip(Criterion(), views, preds):
+                fd._accumulate_batch_loss(clip_views, loss, details, sums, counts)
+            return batch_loss
+
+        batch_loss = accumulate([0.0, 4.0], [[True, False, False], [True, True, True]])
+        accumulate([0.0], [[True, True, True]])
+        self.assertEqual(batch_loss.item(), 3.0)
+        self.assertEqual(counts["hammer/loss"], 3)
+        self.assertAlmostEqual(sums["hammer/loss"] / counts["hammer/loss"], 4 / 3)
 
     def test_log_val_stats_gathers_global_median(self) -> None:
         logger = misc.MetricLogger()

@@ -1162,7 +1162,34 @@ def _accumulate_batch_loss(
         if v is not None:
             sums[f"{dataset}/{name}"] += v * batch_size
             counts[f"{dataset}/{name}"] += batch_size
-    return True
+
+
+def _criterion_per_clip(
+    criterion: torch.nn.Module, views: list[dict], preds: list[dict]
+):
+    batch_size = views[0]["img"].shape[0]
+
+    def one_clip(items: list[dict], index: int) -> list[dict]:
+        out = []
+        for item in items:
+            out.append(
+                {
+                    key: value[index : index + 1]
+                    if (
+                        isinstance(value, torch.Tensor)
+                        and value.ndim > 0
+                        and value.shape[0] == batch_size
+                    )
+                    or (isinstance(value, list) and len(value) == batch_size)
+                    else value
+                    for key, value in item.items()
+                }
+            )
+        return out
+
+    for index in range(batch_size):
+        clip_views = one_clip(views, index)
+        yield clip_views, *criterion(clip_views, one_clip(preds, index))
 
 
 def _log_val_stats(
@@ -1303,9 +1330,16 @@ def val_loop(
                 )
                 loss_value, loss_details = result["loss"]
                 metric_logger.update(loss=float(loss_value), **loss_details)
-                _accumulate_batch_loss(
-                    result["views"], loss_value, loss_details, loss_sums, loss_counts
-                )
+                for clip_views, clip_loss, clip_details in _criterion_per_clip(
+                    criterion, result["views"], result["pred"]
+                ):
+                    _accumulate_batch_loss(
+                        clip_views,
+                        clip_loss,
+                        clip_details,
+                        loss_sums,
+                        loss_counts,
+                    )
                 for k, vals in _val_depth_metrics(
                     result["views"], result["pred"]
                 ).items():
