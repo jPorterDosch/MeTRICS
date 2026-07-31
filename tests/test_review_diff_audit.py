@@ -33,7 +33,7 @@ def test_cuda_timing_is_selected_from_input_device() -> None:
         "src/streamvggt/depth_cond/model.py",
     ):
         source = (ROOT / relative).read_text()
-        assert "cuda_timing = timing and timing_device.type == \"cuda\"" in source
+        assert 'cuda_timing = timing and timing_device.type == "cuda"' in source
 
 
 if __name__ == "__main__":

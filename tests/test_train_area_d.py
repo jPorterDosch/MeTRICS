@@ -63,17 +63,27 @@ class TrainAreaDTests(unittest.TestCase):
 
         def accumulate(errors, masks):
             batch_size = len(errors)
-            views = [{
-                "img": torch.zeros(batch_size, 3, 1, 3),
-                "depthmap": torch.zeros(batch_size, 1, 3),
-                "valid_mask": torch.tensor(masks, dtype=torch.bool).reshape(batch_size, 1, 3),
-                "dataset": ["hammer"] * batch_size,
-            }]
-            preds = [{
-                "depth": torch.tensor(errors).reshape(batch_size, 1, 1, 1).expand(-1, 1, 3, 1)
-            }]
+            views = [
+                {
+                    "img": torch.zeros(batch_size, 3, 1, 3),
+                    "depthmap": torch.zeros(batch_size, 1, 3),
+                    "valid_mask": torch.tensor(masks, dtype=torch.bool).reshape(
+                        batch_size, 1, 3
+                    ),
+                    "dataset": ["hammer"] * batch_size,
+                }
+            ]
+            preds = [
+                {
+                    "depth": torch.tensor(errors)
+                    .reshape(batch_size, 1, 1, 1)
+                    .expand(-1, 1, 3, 1)
+                }
+            ]
             batch_loss, _ = Criterion()(views, preds)
-            for clip_views, loss, details in fd._criterion_per_clip(Criterion(), views, preds):
+            for clip_views, loss, details in fd._criterion_per_clip(
+                Criterion(), views, preds
+            ):
                 fd._accumulate_batch_loss(clip_views, loss, details, sums, counts)
             return batch_loss
 

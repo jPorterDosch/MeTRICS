@@ -467,9 +467,7 @@ def run(
             if args.batch_size == 1
             else build_val_loaders(args, accelerator, batch_size=1)
         )
-    _validate_loader_lengths(
-        data_loader_train, data_loaders_val, data_loaders_stream
-    )
+    _validate_loader_lengths(data_loader_train, data_loaders_val, data_loaders_stream)
 
     printer.info("Loading depth-conditioned model")
     model, _ = build_model(args, mcfg, device)
@@ -683,9 +681,7 @@ def _check_finite_loss(
     if not finite.item():
         if local_finite:
             raise FloatingPointError("Non-finite loss detected on another rank")
-        raise FloatingPointError(
-            f"Loss is {loss_value}, loss details: {loss_details}"
-        )
+        raise FloatingPointError(f"Loss is {loss_value}, loss details: {loss_details}")
 
 
 def train_loop(
@@ -1225,9 +1221,7 @@ def _log_val_stats(
             observations = list(meter.deque)
             if accelerator.num_processes > 1:
                 observations = [
-                    value
-                    for part in gather_object([observations])
-                    for value in part
+                    value for part in gather_object([observations]) for value in part
                 ]
             results[f"{name}_med"] = torch.tensor(observations).median().item()
     results.update({f"{k}_avg": v for k, v in blended.items()})
@@ -1475,7 +1469,9 @@ def streaming_eval(
 
 def main(cfg: FinetuneDepthCfg) -> None:
     if cfg.resume is None and cfg.start_epoch != 0:
-        raise ValueError("start_epoch must be 0 for a fresh run; use --resume to continue")
+        raise ValueError(
+            "start_epoch must be 0 for a fresh run; use --resume to continue"
+        )
 
     mcfg = MetricCfg(
         depth_cond=cfg.depth_cond,

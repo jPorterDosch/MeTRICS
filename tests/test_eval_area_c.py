@@ -24,7 +24,11 @@ class CustomMaskAlignmentTest(unittest.TestCase):
         gt = np.array([[2.0, 4.0, 1.0]], dtype=np.float32)
         custom_mask = np.array([[True, True, False]])
         cases = [
-            ("temporal", "src/eval/temporal_consistency/metrics.py", {"scale_and_shift": True}),
+            (
+                "temporal",
+                "src/eval/temporal_consistency/metrics.py",
+                {"scale_and_shift": True},
+            ),
             ("monodepth", "src/eval/monodepth/tools.py", {"align_with_lstsq": True}),
             ("video", "src/eval/video_depth/tools.py", {"align_with_lstsq": True}),
         ]
@@ -66,7 +70,11 @@ class ExactDeltaThresholdTest(unittest.TestCase):
     def test_perfect_depth_satisfies_delta_one(self):
         depth = np.ones((1, 2), dtype=np.float32)
         cases = [
-            ("temporal", "src/eval/temporal_consistency/metrics.py", {"metric_scale": True}),
+            (
+                "temporal",
+                "src/eval/temporal_consistency/metrics.py",
+                {"metric_scale": True},
+            ),
             ("monodepth", "src/eval/monodepth/tools.py", {"metric_scale": True}),
             ("video", "src/eval/video_depth/tools.py", {"metric_scale": True}),
         ]
@@ -98,7 +106,11 @@ class ScaleOnlyValidationTest(unittest.TestCase):
         pred = np.zeros((2, 2), dtype=np.float32)
         gt = np.ones((2, 2), dtype=np.float32)
         cases = [
-            ("temporal", "src/eval/temporal_consistency/metrics.py", {"scale_only": True}),
+            (
+                "temporal",
+                "src/eval/temporal_consistency/metrics.py",
+                {"scale_only": True},
+            ),
             ("monodepth", "src/eval/monodepth/tools.py", {"align_with_scale": True}),
             ("video", "src/eval/video_depth/tools.py", {"align_with_scale": True}),
         ]
@@ -113,7 +125,11 @@ class ScaleOnlyValidationTest(unittest.TestCase):
         gt = np.ones((2, 2), dtype=np.float32)
         custom_mask = np.zeros((2, 2), dtype=bool)
         cases = [
-            ("temporal", "src/eval/temporal_consistency/metrics.py", {"scale_only": True}),
+            (
+                "temporal",
+                "src/eval/temporal_consistency/metrics.py",
+                {"scale_only": True},
+            ),
             ("monodepth", "src/eval/monodepth/tools.py", {"align_with_scale": True}),
             ("video", "src/eval/video_depth/tools.py", {"align_with_scale": True}),
         ]
@@ -161,10 +177,13 @@ class AlignmentModeValidationTest(unittest.TestCase):
 class PointCloudFinitenessTest(unittest.TestCase):
     def test_joint_point_mask_preserves_tuples_and_colors(self):
         source = (ROOT / "src/eval/mv_recon/launch.py").read_text()
-        block = source.split("                    mask = np.isfinite(pts_all_masked)", 1)[1]
-        block = "                    mask = np.isfinite(pts_all_masked)" + block.split(
-            "                    if args.use_proj:", 1
-        )[0]
+        block = source.split(
+            "                    mask = np.isfinite(pts_all_masked)", 1
+        )[1]
+        block = (
+            "                    mask = np.isfinite(pts_all_masked)"
+            + block.split("                    if args.use_proj:", 1)[0]
+        )
         namespace = {
             "np": np,
             "pts_all_masked": np.array([[0.0, 0.0, 1.0], [1.0, np.nan, 2.0]]),
@@ -188,8 +207,12 @@ class PointCloudFinitenessTest(unittest.TestCase):
             and ast.unparse(node.iter.args[0]) == "accelerator.num_processes"
         ]
         self.assertEqual(len(loops), 1)
-        missing_log_if = next(node for node in loops[0].body if isinstance(node, ast.If))
-        self.assertTrue(any(isinstance(node, ast.Continue) for node in missing_log_if.body))
+        missing_log_if = next(
+            node for node in loops[0].body if isinstance(node, ast.If)
+        )
+        self.assertTrue(
+            any(isinstance(node, ast.Continue) for node in missing_log_if.body)
+        )
 
     def test_unsupported_confidence_threshold_is_not_advertised(self):
         tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
@@ -218,9 +241,7 @@ class PointNormalizationTest(unittest.TestCase):
 
 class Co3dCliTest(unittest.TestCase):
     def test_fast_eval_read_has_parser_definition(self):
-        tree = ast.parse(
-            (ROOT / "src/eval/pose_evaluation/test_co3d.py").read_text()
-        )
+        tree = ast.parse((ROOT / "src/eval/pose_evaluation/test_co3d.py").read_text())
         parser_names = {
             call.args[0].value.lstrip("-").replace("-", "_")
             for call in ast.walk(tree)
@@ -233,9 +254,7 @@ class Co3dCliTest(unittest.TestCase):
         self.assertIn("fast_eval", parser_names)
 
     def test_unimplemented_bundle_adjustment_fails_fast(self):
-        tree = ast.parse(
-            (ROOT / "src/eval/pose_evaluation/test_co3d.py").read_text()
-        )
+        tree = ast.parse((ROOT / "src/eval/pose_evaluation/test_co3d.py").read_text())
         main = next(
             node
             for node in tree.body

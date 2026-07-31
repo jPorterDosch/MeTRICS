@@ -132,7 +132,9 @@ def test_temporal_loss_handles_single_frame_and_rejects_bad_config() -> None:
             raise AssertionError(f"invalid {field} was accepted")
 
     for recipe in (Recipe.FINETUNE_TRAIN, Recipe.FINETUNE_TEST, Recipe.DISTILL):
-        LossConfig(recipe=recipe, temp_grad_scales=0, depth_trim=1.0, diff_depth_th=-0.1)
+        LossConfig(
+            recipe=recipe, temp_grad_scales=0, depth_trim=1.0, diff_depth_th=-0.1
+        )
 
     for constructor in (
         lambda: TemporalGradientMatchingLoss(temp_grad_scales=0),
@@ -144,7 +146,9 @@ def test_temporal_loss_handles_single_frame_and_rejects_bad_config() -> None:
         except ValueError:
             pass
         else:
-            raise AssertionError("invalid public loss constructor argument was accepted")
+            raise AssertionError(
+                "invalid public loss constructor argument was accepted"
+            )
 
 
 def test_camera_loss_rejects_non_finite_inputs() -> None:
