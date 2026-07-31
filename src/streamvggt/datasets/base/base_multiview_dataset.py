@@ -108,6 +108,10 @@ class BaseMultiViewDataset(EasyDataset):
 
         self.n_corres = n_corres
         self.nneg = nneg
+        if isinstance(self.n_corres, int) and self.n_corres < 0:
+            raise ValueError(f"n_corres must be >= 0, got {self.n_corres}")
+        if self.nneg < 0:
+            raise ValueError(f"nneg must be >= 0, got {self.nneg}")
         assert (
             self.n_corres == "all"
             or isinstance(self.n_corres, int)

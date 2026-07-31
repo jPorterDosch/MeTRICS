@@ -146,6 +146,33 @@ def test_variable_length_sampler_rejects_fewer_than_four_views() -> None:
         raise AssertionError("variable-length sampler accepted num_views=3")
 
 
+def test_negative_correspondence_settings_are_rejected() -> None:
+    config = DatasetConfig(
+        root=Path("."),
+        dataset=DatasetName.HAMMER,
+        num_views=1,
+        stride_range=(1, 1),
+        resolution=((1, 1),),
+        n_corres=-1,
+    )
+    try:
+        config.validate()
+    except ValueError as error:
+        assert "n_corres" in str(error)
+    else:
+        raise AssertionError("negative n_corres was accepted")
+
+    class SequenceDataset(BaseMultiViewDataset):
+        pass
+
+    try:
+        SequenceDataset(num_views=1, resolution=(1, 1), nneg=-1)
+    except ValueError as error:
+        assert "nneg" in str(error)
+    else:
+        raise AssertionError("direct constructor accepted negative nneg")
+
+
 if __name__ == "__main__":
     test_ray_directions_ignore_camera_translation()
     test_irregular_stride_respects_effective_gap_range()
@@ -154,3 +181,4 @@ if __name__ == "__main__":
     test_invalid_depth_pixels_are_not_positive_correspondences()
     test_resize_intrinsics_use_floored_raster_scales()
     test_variable_length_sampler_rejects_fewer_than_four_views()
+    test_negative_correspondence_settings_are_rejected()
