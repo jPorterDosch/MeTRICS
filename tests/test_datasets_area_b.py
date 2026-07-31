@@ -1,5 +1,7 @@
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+from PIL import Image
 
 from streamvggt.datasets.arkitscenes import ARKitScenes_Multi
 from streamvggt.datasets.arkitscenes_highres import ARKitScenesHighRes_Multi
@@ -13,6 +15,7 @@ from streamvggt.datasets.hypersim import HyperSim_Multi
 from streamvggt.datasets.scannet import ScanNet_Multi
 from streamvggt.datasets.types import DatasetName
 from streamvggt.datasets.utils.corr import extract_correspondences_from_pts3d
+from streamvggt.datasets.utils.cropping import rescale_image_depthmap
 
 
 def test_ray_directions_ignore_camera_translation() -> None:
@@ -114,9 +117,21 @@ def test_invalid_depth_pixels_are_not_positive_correspondences() -> None:
     assert not valid.any()
 
 
+def test_resize_intrinsics_use_floored_raster_scales() -> None:
+    image = Image.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
+    depth = np.zeros((480, 640), dtype=np.float32)
+    intrinsics = np.array([[500.0, 0.0, 320.0], [0.0, 500.0, 240.0], [0, 0, 1]])
+    output, _, scaled = rescale_image_depthmap(
+        image, depth, intrinsics, np.array((518, 392))
+    )
+    np.testing.assert_allclose(scaled[0, 0], 500.0 * output.width / 640)
+    np.testing.assert_allclose(scaled[1, 1], 500.0 * output.height / 480)
+
+
 if __name__ == "__main__":
     test_ray_directions_ignore_camera_translation()
     test_irregular_stride_respects_effective_gap_range()
     test_metric_loaders_reject_nonmetric_label()
     test_nneg_is_an_absolute_count()
     test_invalid_depth_pixels_are_not_positive_correspondences()
+    test_resize_intrinsics_use_floored_raster_scales()
