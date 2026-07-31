@@ -401,6 +401,14 @@ def _validate_loader_lengths(
             raise ValueError(f"{name} is empty")
 
 
+def _validate_resume_step(args: FinetuneDepthCfg) -> None:
+    if args.start_step != 0:
+        raise ValueError(
+            "mid-epoch resume is unsupported because sampler and RNG state are not "
+            f"restored (checkpoint start_step={args.start_step})"
+        )
+
+
 def run(
     args: FinetuneDepthCfg, mcfg: MetricCfg, manifest: dict, run_hash: str, run_id: str
 ) -> None:
@@ -482,6 +490,7 @@ def run(
     best_so_far = misc.load_model(
         args=args, model_without_ddp=model, optimizer=optimizer, loss_scaler=loss_scaler
     )
+    _validate_resume_step(args)
     if best_so_far is None:
         best_so_far = float("inf")
 

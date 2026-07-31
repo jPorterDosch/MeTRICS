@@ -174,6 +174,11 @@ class TrainAreaDTests(unittest.TestCase):
         finally:
             fd.build_manifest = original
 
+    def test_mid_epoch_resume_is_rejected(self) -> None:
+        cfg = fd.FinetuneDepthCfg(resume="checkpoint-last.pth", start_step=600)
+        with self.assertRaisesRegex(ValueError, "mid-epoch.*start_step=600"):
+            fd._validate_resume_step(cfg)
+
     def test_checkpoint_commit_fsyncs_then_replaces(self) -> None:
         class Accel:
             is_main_process = True
