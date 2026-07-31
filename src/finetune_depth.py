@@ -1057,7 +1057,7 @@ def _reduce_metrics(
     )
     if accelerator.num_processes > 1:
         accelerator.wait_for_everyone()
-        accelerator.reduce(t, reduction="sum")
+        t = accelerator.reduce(t, reduction="sum")
 
     per_dataset: dict[str, dict[str, float]] = defaultdict(dict)
     blended_sum: dict[str, float] = defaultdict(float)
@@ -1265,13 +1265,20 @@ def val_loop(
     )
     # the meters already carry the blended losses over every loader (and the
     # medians), so only the per-dataset half of this reduction is used
-    loss_per_dataset, _ = _reduce_metrics(loss_sums, loss_counts, accelerator)
+    loss_per_dataset, loss_blended = _reduce_metrics(
+        loss_sums, loss_counts, accelerator
+    )
     per_dataset = {
         ds: {**depth_per_dataset.get(ds, {}), **loss_per_dataset.get(ds, {})}
         for ds in set(depth_per_dataset) | set(loss_per_dataset)
     }
     results = _log_val_stats(
-        metric_logger, per_dataset, depth_blended, accelerator, prefix, step
+        metric_logger,
+        per_dataset,
+        {**depth_blended, **loss_blended},
+        accelerator,
+        prefix,
+        step,
     )
     _log_val_images(sampler, accelerator, prefix, epoch, step, args.val_log_images)
     # gated by the caller (only the final val pass asks for GLBs -- a quick
