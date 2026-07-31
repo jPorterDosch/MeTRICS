@@ -167,5 +167,22 @@ class PointNormalizationTest(unittest.TestCase):
         torch.testing.assert_close(factors.reshape(-1), torch.tensor([2.0, 4.0]))
 
 
+class Co3dCliTest(unittest.TestCase):
+    def test_fast_eval_read_has_parser_definition(self):
+        tree = ast.parse(
+            (ROOT / "src/eval/pose_evaluation/test_co3d.py").read_text()
+        )
+        parser_names = {
+            call.args[0].value.lstrip("-").replace("-", "_")
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "add_argument"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+        }
+        self.assertIn("fast_eval", parser_names)
+
+
 if __name__ == "__main__":
     unittest.main()
