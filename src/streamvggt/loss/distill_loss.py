@@ -36,7 +36,7 @@ class DistillLoss(MultiLoss):
                 sigma_g = g["depth_conf"]
                 valid_mask = g["valid_mask"]
                 if not valid_mask.any():
-                    valid_mask = torch.ones_like(g["valid_mask"])
+                    continue
                 depth_terms.append(
                     self.depth_loss(
                         p["depth"], g["depth"], sigma_p, sigma_g, valid_mask
@@ -55,7 +55,7 @@ class DistillLoss(MultiLoss):
             sigma_g = g["conf"]
             valid_mask = g["valid_mask"]
             if not valid_mask.any():
-                valid_mask = torch.ones_like(g["valid_mask"])
+                continue
             pmap_terms.append(
                 self.pmap_loss(
                     p["pts3d_in_other_view"],
@@ -65,7 +65,11 @@ class DistillLoss(MultiLoss):
                     valid_mask,
                 )
             )
-        Lpmap = torch.stack(pmap_terms).mean()
+        Lpmap = (
+            torch.stack(pmap_terms).mean()
+            if pmap_terms
+            else torch.zeros_like(Lcamera)
+        )
 
         # ---------- Ltrack ----------
         if ("track" in gts[0]) and ("track" in preds[0]):

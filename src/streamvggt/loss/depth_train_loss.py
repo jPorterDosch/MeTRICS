@@ -116,7 +116,7 @@ class DepthTrainLoss(MultiLoss):
                 sigma_p = p["depth_conf"]
                 valid_mask = g["valid_mask"]
                 if not valid_mask.any():
-                    valid_mask = torch.ones_like(g["valid_mask"])
+                    continue
                 term, comps = self.depth_loss(
                     p["depth"],
                     g["depthmap"].unsqueeze(-1),
