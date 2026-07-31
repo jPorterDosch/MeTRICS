@@ -12,6 +12,7 @@ from streamvggt.datasets.hammer import HAMMER_Multi
 from streamvggt.datasets.hypersim import HyperSim_Multi
 from streamvggt.datasets.scannet import ScanNet_Multi
 from streamvggt.datasets.types import DatasetName
+from streamvggt.datasets.utils.corr import extract_correspondences_from_pts3d
 
 
 def test_ray_directions_ignore_camera_translation() -> None:
@@ -68,7 +69,40 @@ def test_metric_loaders_reject_nonmetric_label() -> None:
             raise AssertionError(f"{loader.__name__} accepted is_metric=False")
 
 
+def test_nneg_is_an_absolute_count() -> None:
+    y, x = np.mgrid[:3, :3]
+    points = np.stack((x, y, np.ones_like(x)), axis=-1).astype(float)
+    points.reshape(-1, 3)[5:] = [0.0, 0.0, 1.0]
+    view = {
+        "pts3d": points,
+        "camera_intrinsics": np.eye(3),
+        "camera_pose": np.eye(4),
+        "valid_mask": np.ones((3, 3), dtype=bool),
+    }
+    _, _, valid = extract_correspondences_from_pts3d(
+        view, view, 4, np.random.default_rng(0), nneg=1
+    )
+    assert valid.sum() == 3
+
+    config = DatasetConfig(
+        root=Path("."),
+        dataset=DatasetName.HAMMER,
+        num_views=1,
+        stride_range=(1, 1),
+        resolution=((1, 1),),
+        n_corres=2,
+        nneg=3,
+    )
+    try:
+        config.validate()
+    except ValueError as error:
+        assert "nneg" in str(error)
+    else:
+        raise AssertionError("nneg larger than n_corres was accepted")
+
+
 if __name__ == "__main__":
     test_ray_directions_ignore_camera_translation()
     test_irregular_stride_respects_effective_gap_range()
     test_metric_loaders_reject_nonmetric_label()
+    test_nneg_is_an_absolute_count()

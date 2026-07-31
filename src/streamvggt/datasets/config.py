@@ -131,6 +131,11 @@ class DatasetConfig:
                 raise ValueError(
                     f"each resolution must be a positive (width, height), got {wh!r}"
                 )
+        if self.n_corres > 0 and not 0 <= self.nneg <= self.n_corres:
+            raise ValueError(
+                f"nneg must satisfy 0 <= nneg <= n_corres, got "
+                f"nneg={self.nneg}, n_corres={self.n_corres}"
+            )
         if self.nneg and self.n_corres <= 0:
             raise ValueError("nneg requires n_corres > 0")
         if self.epoch_size is not None and self.epoch_size < 1:
