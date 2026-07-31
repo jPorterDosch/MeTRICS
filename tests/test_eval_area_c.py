@@ -108,6 +108,27 @@ class ScaleOnlyValidationTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "scale-only alignment"):
                     module.depth_evaluation(pred, gt, max_depth=None, **alignment)
 
+    def test_empty_support_returns_zero_valid_record(self):
+        pred = np.ones((2, 2), dtype=np.float32)
+        gt = np.ones((2, 2), dtype=np.float32)
+        custom_mask = np.zeros((2, 2), dtype=bool)
+        cases = [
+            ("temporal", "src/eval/temporal_consistency/metrics.py", {"scale_only": True}),
+            ("monodepth", "src/eval/monodepth/tools.py", {"align_with_scale": True}),
+            ("video", "src/eval/video_depth/tools.py", {"align_with_scale": True}),
+        ]
+        for name, path, alignment in cases:
+            with self.subTest(name=name):
+                module = load_module(f"area_c_empty_{name}", path)
+                metrics, *_ = module.depth_evaluation(
+                    pred,
+                    gt,
+                    max_depth=None,
+                    custom_mask=custom_mask,
+                    **alignment,
+                )
+                self.assertEqual(metrics["valid_pixels"], 0)
+
 
 class AlignmentModeValidationTest(unittest.TestCase):
     def test_contradictory_modes_are_rejected(self):
