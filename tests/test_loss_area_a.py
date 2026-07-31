@@ -3,6 +3,8 @@ import torch
 from streamvggt.loss.depth_train_loss import DepthTrainLoss
 from streamvggt.loss.distill_loss import DistillLoss
 from streamvggt.loss.head_loss import CameraLoss, DepthOrPmapLoss
+from streamvggt.loss.l_loss import L21
+from streamvggt.loss.regr_3d_pose import Regr3DPose
 from streamvggt.loss.trimmed_loss import TrimmedMAELoss
 from streamvggt.loss.types import LossConfig
 from streamvggt.loss.utils import (
@@ -162,6 +164,40 @@ def test_perfect_point_map_has_zero_valid_normal_loss() -> None:
     assert loss.item() == 0.0
 
 
+def test_scale_loss_calls_point_normalizer_with_matching_signature() -> None:
+    class ProbeRegr3DPose(Regr3DPose):
+        def get_norm_factor_point_cloud(
+            self, pts_cross, valids, conf_cross, norm_self_only=False
+        ):
+            raise RuntimeError("normalizer reached")
+
+    identity = torch.eye(4).unsqueeze(0)
+    points = torch.ones(1, 1, 1, 3)
+    gts = [
+        {
+            "camera_pose": identity,
+            "pts3d": points,
+            "valid_mask": torch.ones(1, 1, 1, dtype=torch.bool),
+            "camera_only": torch.tensor([False]),
+            "is_metric": torch.tensor([False]),
+        }
+    ]
+    preds = [
+        {
+            "pts3d_in_self_view": points,
+            "pts3d_in_other_view": points,
+            "conf_self": torch.full((1, 1, 1), 2.0),
+            "conf": torch.full((1, 1, 1), 2.0),
+        }
+    ]
+    try:
+        ProbeRegr3DPose(L21).get_all_pts3d_with_scale_loss(gts, preds)
+    except RuntimeError as error:
+        assert str(error) == "normalizer reached"
+    else:
+        raise AssertionError("point normalizer was not called")
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
@@ -173,3 +209,4 @@ if __name__ == "__main__":
     test_robust_normalization_median_uses_valid_values_only()
     test_scale_shift_fit_is_per_sample_and_masked()
     test_perfect_point_map_has_zero_valid_normal_loss()
+    test_scale_loss_calls_point_normalizer_with_matching_signature()

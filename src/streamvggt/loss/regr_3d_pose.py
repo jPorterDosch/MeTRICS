@@ -306,10 +306,8 @@ class Regr3DPose(Criterion, MultiLoss):
         if self.norm_mode and not self.gt_scale:
             norm_factor_gt = self.get_norm_factor_point_cloud(
                 gt_pts_self[:1],
-                gt_pts_cross[:1],
                 valids[:1],
                 conf_self[:1],
-                conf_cross[:1],
                 norm_self_only=norm_self_only,
             )
         else:
@@ -320,10 +318,8 @@ class Regr3DPose(Criterion, MultiLoss):
         if self.norm_mode:
             norm_factor_pr = self.get_norm_factor_point_cloud(
                 pr_pts_self[:1],
-                pr_pts_cross[:1],
                 valids[:1],
                 conf_self[:1],
-                conf_cross[:1],
                 norm_self_only=norm_self_only,
             )
         else:
