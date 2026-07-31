@@ -66,9 +66,7 @@ class DistillLoss(MultiLoss):
                 )
             )
         Lpmap = (
-            torch.stack(pmap_terms).mean()
-            if pmap_terms
-            else torch.zeros_like(Lcamera)
+            torch.stack(pmap_terms).mean() if pmap_terms else torch.zeros_like(Lcamera)
         )
 
         # ---------- Ltrack ----------

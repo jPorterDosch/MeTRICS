@@ -282,7 +282,6 @@ class Regr3DPose(Criterion, MultiLoss):
         pr_pts_self = [pred["pts3d_in_self_view"] for pred in preds]
         pr_pts_cross = [pred["pts3d_in_other_view"] for pred in preds]
         conf_self = [torch.log(pred["conf_self"]).detach().clip(eps) for pred in preds]
-        conf_cross = [torch.log(pred["conf"]).detach().clip(eps) for pred in preds]
 
         if not self.norm_all:
             if self.max_metric_scale:
