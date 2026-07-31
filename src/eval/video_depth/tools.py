@@ -149,6 +149,15 @@ def depth_evaluation(
         dict: A dictionary containing the evaluation metrics.
         torch.Tensor: The depth error parity map.
     """
+    modes = (
+        align_with_lstsq,
+        align_with_lad,
+        align_with_lad2,
+        metric_scale,
+        align_with_scale,
+    )
+    if sum(modes) > 1:
+        raise ValueError("depth_evaluation accepts at most one alignment mode")
     if isinstance(predicted_depth_original, np.ndarray):
         predicted_depth_original = torch.from_numpy(predicted_depth_original)
     if isinstance(ground_truth_depth_original, np.ndarray):

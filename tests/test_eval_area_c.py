@@ -107,5 +107,33 @@ class ScaleOnlyValidationTest(unittest.TestCase):
                     module.depth_evaluation(pred, gt, max_depth=None, **alignment)
 
 
+class AlignmentModeValidationTest(unittest.TestCase):
+    def test_contradictory_modes_are_rejected(self):
+        pred = np.ones((1, 2), dtype=np.float32)
+        gt = pred * 2
+        cases = [
+            (
+                "temporal",
+                "src/eval/temporal_consistency/metrics.py",
+                {"metric_scale": True, "scale_and_shift": True},
+            ),
+            (
+                "monodepth",
+                "src/eval/monodepth/tools.py",
+                {"metric_scale": True, "align_with_lstsq": True},
+            ),
+            (
+                "video",
+                "src/eval/video_depth/tools.py",
+                {"metric_scale": True, "align_with_lstsq": True},
+            ),
+        ]
+        for name, path, alignment in cases:
+            with self.subTest(name=name):
+                module = load_module(f"area_c_modes_{name}", path)
+                with self.assertRaisesRegex(ValueError, "one alignment mode"):
+                    module.depth_evaluation(pred, gt, max_depth=None, **alignment)
+
+
 if __name__ == "__main__":
     unittest.main()

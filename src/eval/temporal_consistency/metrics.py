@@ -170,14 +170,8 @@ def depth_evaluation(
         dict: A dictionary containing the evaluation metrics.
         torch.Tensor: The depth error parity map.
     """
-    # validate the mode up front: without this, the no-flag default used to
-    # run median scaling, compute every metric, and only then die in the
-    # parity-map dispatch below
-    if not (metric_scale or scale_and_shift or scale_only):
-        raise ValueError(
-            "depth_evaluation requires an alignment mode: pass one of "
-            "metric_scale, scale_and_shift, or scale_only"
-        )
+    if sum((metric_scale, scale_and_shift, scale_only)) != 1:
+        raise ValueError("depth_evaluation requires exactly one alignment mode")
 
     if isinstance(predicted_depth_original, np.ndarray):
         predicted_depth_original = torch.from_numpy(predicted_depth_original)
