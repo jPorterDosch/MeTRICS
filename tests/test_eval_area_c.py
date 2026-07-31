@@ -155,6 +155,21 @@ class PointCloudFinitenessTest(unittest.TestCase):
         self.assertEqual(namespace["pts_gt_all_masked"].shape, (1, 3))
         self.assertEqual(namespace["images_all_masked"].shape, (1, 3))
 
+    def test_rank_log_loop_uses_world_size_and_skips_gaps(self):
+        tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
+        loops = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.For)
+            and isinstance(node.iter, ast.Call)
+            and getattr(node.iter.func, "id", None) == "range"
+            and node.iter.args
+            and ast.unparse(node.iter.args[0]) == "accelerator.num_processes"
+        ]
+        self.assertEqual(len(loops), 1)
+        missing_log_if = next(node for node in loops[0].body if isinstance(node, ast.If))
+        self.assertTrue(any(isinstance(node, ast.Continue) for node in missing_log_if.body))
+
 
 class PointNormalizationTest(unittest.TestCase):
     def test_average_distance_uses_each_samples_valid_count(self):
