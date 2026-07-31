@@ -84,8 +84,22 @@ def test_loss_config_rejects_unknown_reduction() -> None:
         raise AssertionError("unknown reduction was accepted")
 
 
+def test_confidence_disabled_depth_does_not_require_confidence_key() -> None:
+    gts = [
+        {
+            "depthmap": torch.zeros(1, 2, 2),
+            "valid_mask": torch.ones(1, 2, 2, dtype=torch.bool),
+        }
+        for _ in range(2)
+    ]
+    preds = [{"depth": torch.ones(1, 2, 2, 1)} for _ in range(2)]
+    loss, _ = DepthTrainLoss(metric=True, conf_weighting=False)(gts, preds)
+    assert torch.isfinite(loss)
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
     test_spatial_gradient_uses_valid_edges_without_cropping()
     test_loss_config_rejects_unknown_reduction()
+    test_confidence_disabled_depth_does_not_require_confidence_key()

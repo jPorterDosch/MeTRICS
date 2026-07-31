@@ -113,7 +113,7 @@ class DepthTrainLoss(MultiLoss):
         }
         for g, p in zip(gts, preds, strict=True):
             if "depth" in p:
-                sigma_p = p["depth_conf"]
+                sigma_p = p["depth_conf"] if self.conf_weighting else None
                 valid_mask = g["valid_mask"]
                 if not valid_mask.any():
                     continue
