@@ -9,10 +9,14 @@ import unittest
 from collections import defaultdict
 
 import torch
+from accelerate import PartialState
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import finetune_depth as fd  # noqa: E402
+import croco.utils.misc as misc  # noqa: E402
+
+PartialState()
 
 
 class ReturningReducer:
@@ -55,6 +59,30 @@ class TrainAreaDTests(unittest.TestCase):
         fd._accumulate_batch_loss(views(1), 9.0, {}, sums, counts)
         self.assertEqual(counts["hammer/loss"], 5)
         self.assertAlmostEqual(sums["hammer/loss"] / counts["hammer/loss"], 2.6)
+
+    def test_log_val_stats_gathers_global_median(self) -> None:
+        logger = misc.MetricLogger()
+        logger.update(loss=0.0)
+        logger.update(loss=0.0)
+
+        class Accel(ReturningReducer):
+            trackers = []
+
+            def log(self, values: dict, step: int) -> None:
+                self.logged = values
+
+            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+                return tensor
+
+        accel = Accel()
+        original = fd.gather_object
+        fd.gather_object = lambda value: [[0.0, 0.0], [100.0, 100.0, 100.0]]
+        try:
+            results = fd._log_val_stats(logger, {}, {}, accel, "val", 1)
+        finally:
+            fd.gather_object = original
+        self.assertEqual(results["loss_med"], 100.0)
+        self.assertIn("val/all/loss_med", accel.logged)
 
 
 if __name__ == "__main__":

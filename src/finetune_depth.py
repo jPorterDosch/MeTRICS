@@ -1128,8 +1128,8 @@ def _log_val_stats(
 ) -> dict:
     """Whole-epoch avg/med aggregation + wandb logging, ported from
     finetune.py::test_one_epoch. Loss meters get avg (globally reduced) and
-    med (rank-local -- SmoothedValue only syncs count/total); depth metrics and
-    per-dataset losses arrive pre-reduced as plain avgs.
+    med (gathered from every rank); depth metrics and per-dataset losses arrive
+    pre-reduced as plain avgs.
 
     Logged keys are "<prefix>/<dataset>/<metric>_avg" per dataset and
     "<prefix>/all/<metric>_avg" for the dataset-blended figure, so a mixed val
@@ -1147,7 +1147,14 @@ def _log_val_stats(
             continue
         results[f"{name}_avg"] = meter.global_avg
         if len(meter.deque):
-            results[f"{name}_med"] = meter.median
+            observations = list(meter.deque)
+            if accelerator.num_processes > 1:
+                observations = [
+                    value
+                    for part in gather_object([observations])
+                    for value in part
+                ]
+            results[f"{name}_med"] = torch.tensor(observations).median().item()
     results.update({f"{k}_avg": v for k, v in blended.items()})
 
     def loggable(val) -> bool:
