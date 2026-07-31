@@ -48,7 +48,12 @@ Minimal patch, **NOT APPLIED**: in `head_loss.py:97-100`, retain the validity ou
 
 ### R1-6 — teacher confidence arguments are ignored
 
-**Verdict: DEFERRED.** Raised by R1.
+**Verdict: STILL DEFERRED — run a one-GPU controlled DISTILL experiment on a
+fixed 100-batch synthetic sequence set, comparing student-only weighting,
+arithmetic-mean teacher/student confidence, and product weighting while scaling
+teacher confidences by 0.1x and 10x; validation AbsRel/TAE and the sign/magnitude
+of teacher-confidence-conditioned depth and track gradients must select the
+combination and establish whether confidence is precision or uncertainty.** Raised by R1.
 
 Failure scenario: changing teacher depth confidence from 1 to 100 left the depth loss at `1.0`; changing teacher track confidence from 0 to 100 left track loss at `2.10736083984375`. `sigma_g` and `w_g` are accepted but only the prediction-side values are used.
 
@@ -88,7 +93,12 @@ Minimal patch, **NOT APPLIED**: at the start of `CameraLoss.forward` in `head_lo
 
 ### R2-5 — `lambda_track` is a finetune no-op but changes identity
 
-**Verdict: DEFERRED.** Raised by R2.
+**Verdict: STILL DEFERRED — run one FINETUNE_TRAIN batch on a CUDA GPU with real
+track targets and predictions present, then compare `lambda_track=0` and `0.05`:
+if a defined track loss and nonzero track-head gradient are available, specify
+and implement that term; if the recipe has no track supervision contract,
+approve fail-fast validation of non-default `lambda_track` without changing the
+frozen field or identity classification.** Raised by R2.
 
 Failure scenario: `LossConfig` documents and passes `lambda_track` to `FinetuneLoss`, but `FinetuneLoss` neither stores it nor computes a track term. Different values therefore identify different FINETUNE experiments without changing criterion behavior.
 
@@ -112,7 +122,12 @@ Minimal patch, **NOT APPLIED**: in `regr_3d_pose.py:307-314`, pass only `gt_pts_
 
 ### R2-8 — `CameraLoss.delta` is ignored
 
-**Verdict: DEFERRED.** Raised by R2.
+**Verdict: STILL DEFERRED — on CPU, obtain the camera-loss contract from the
+originating recipe or checkpoint documentation and evaluate fixed pose residuals
+at 0.05, 0.1, 0.2, and 100 with `delta=0.1`: evidence that the expected curve
+changes at delta settles implementation of the specified robust loss; evidence
+that the recipe requires plain L1 settles deprecation/removal in a compatibility
+release, not this frozen-contract round.** Raised by R2.
 
 Failure scenario: `CameraLoss(delta=0)` and `CameraLoss(delta=999)` have identical state and outputs because the constructor drops `delta`, while finetune and distill explicitly pass `0.1`.
 
@@ -537,7 +552,12 @@ With no reprojection correspondences, TAE has no defined numerical value. Return
 
 ### R2-3 — failed video sequences may be omitted from a dataset score
 
-**Verdict: DEFERRED.** Raised by R2.
+**Verdict: STILL DEFERRED — run the video-depth launcher on one CUDA GPU against
+the real Sintel and KITTI layouts with a deterministic injected OOM before output
+for one named sequence and one successful sequence; then run aggregation and
+observe whether the headline score is emitted from only the survivor. Benchmark
+policy must choose either a nonzero/fail-fast incomplete result or an explicitly
+labelled partial score before code can change.** Raised by R2.
 
 Failure scenario: the launcher catches selected OOM/covariance/eigenvalue failures, logs them, and can leave no prediction directory; Sintel and KITTI evaluation enumerate produced prediction groups, so a surviving subset can be averaged. Static flow establishes the possibility, but the launcher deliberately supports best-effort long evaluation and retains side logs. Establishing whether completeness is a benchmark requirement, and whether these exceptions occur before usable outputs, needs the prohibited GPU launcher and real dataset files. A fail-fast change versus an explicit partial-result manifest is a workflow decision larger than a safe unsupervised patch.
 
@@ -551,7 +571,11 @@ Minimal patch, **NOT APPLIED**: in `temporal_consistency/metrics.py:227`, before
 
 ### R2-5 — prediction and GT files are paired only by sort position
 
-**Verdict: DEFERRED.** Raised by R2.
+**Verdict: STILL DEFERRED — inventory real GT and generated prediction paths for
+at least two frames from each of NYUv2, Sintel, Bonn, and KITTI on CPU, derive a
+dataset-specific canonical `(sequence, frame)` key, and test equal counts, a
+missing prediction, and a stale extra prediction; a key that bijectively matches
+all four real layouts and rejects both mutations would settle the minimal mapping.** Raised by R2.
 
 Failure scenario: equal-length lists containing one missing and one stale prediction can pair the wrong frames and still yield plausible metrics. The absence of any count/identity assertion is concerning, but the four datasets use different GT and generated prediction naming layouts. A correct minimal identity key cannot be derived safely without inspecting the prohibited real dataset/output trees; a basename-equality assertion would reject valid layouts. This needs dataset files or a larger explicit metadata mapping, so no speculative patch is proposed.
 
@@ -804,7 +828,11 @@ patch would add merge risk to a path the project does not run.
 
 ### R1-1 and R2-4 — resume can rewrite the owning run with a different identity
 
-**Verdict: DEFERRED.** Raised independently by R1 (wrong-numbers lens) and R2
+**Verdict: STILL DEFERRED — approve and CPU-test a synthetic owning-manifest
+matrix with `epochs=10,lr=1e-5` against current `(20,1e-5)`, `(10,1e-4)`, and
+`(5,1e-5)`, specifying which cases may continue and whether an accepted extension
+retains the owner's manifest/hash/id or records continuation metadata; the guard
+must reject every non-sanctioned case before manifest write.** Raised independently by R1 (wrong-numbers lens) and R2
 (contracts-and-runtime lens); these are the same defect.
 
 Failure scenario: changing `lr` from `1e-5` to `1e-4` changes the experiment ID
@@ -828,7 +856,7 @@ owner's stored experiment ID for a sanctioned continuation.
 
 ### R1-2 and R2-5 — mid-epoch resume replays the epoch from batch zero
 
-**Verdict: DEFERRED.** Raised independently by R1 and R2; these are the same
+**Verdict: FIXED in a88f5f8.** Raised independently by R1 and R2; these are the same
 defect.
 
 Failure scenario: a checkpoint saved after batch 600 stores `epoch-1` and
@@ -836,15 +864,10 @@ Failure scenario: a checkpoint saved after batch 600 stores `epoch-1` and
 the live and legacy loops enumerate their loaders from zero. The already-updated
 model therefore sees the beginning of that epoch again.
 
-Reason deferred: the control flow proves the replay, but simply skipping 600 batches
-does not restore sampler, worker, augmentation, or RNG state. Conversely, declaring
-the artifact an epoch-restart checkpoint makes the replay intentional but changes the
-checkpoint contract and effective sample schedule. A correct resume protocol is
-larger than a safe unsupervised patch. This joint finding is explicitly deferred
-because explaining why a partial skip is insufficient would require a comment block
-and state protocol, not a minimal correction. The eventual editable fix sites are the
-save/load callers and loop in `src/finetune_depth.py`, not vendored
-`src/croco/utils/misc.py`.
+Implemented patch: immediately after checkpoint load in `src/finetune_depth.py`,
+reject a restored nonzero `start_step` because sampler and RNG state are not present.
+Epoch-boundary checkpoints (`start_step=0`) retain their existing resume behavior;
+an unsafe mid-epoch artifact now fails before training rather than replaying data.
 
 ### R1-3 — `val/all/*_med` is rank-local
 
@@ -994,18 +1017,17 @@ keeps the previous target intact until atomic replacement and does not edit
 
 ### R2-8 — resume creates a new wandb run
 
-**Verdict: DEFERRED.** Raised by R2.
+**Verdict: FIXED in b2e7d71.** Raised by R2.
 
 Failure scenario: tracker initialization supplies a display name but no stable wandb
 `id` and resume policy, so a same-config checkpoint continuation can fork online
 history. The legacy pair additionally discovers automatic resume after tracker init,
 but those paths are unsupported.
 
-Reason deferred: confirmation needs an actual wandb service run, and the correct
-stable ID for the live trainer depends on the unresolved continuation/lineage policy
-in R1-1/R2-4. Using the current hash blindly can collide across unhashed experiment
-groups or attach an identity-drift continuation to the wrong history. No online run
-was created, so an unverified tracker-policy change is not justified.
+Implemented patch: tracker initialization derives a deterministic wandb ID from both
+the experiment group and run ID and uses `resume="allow"`. Same-group continuations
+reconnect, different unhashed groups cannot collide, and checkpoints predating stable
+IDs can establish the deterministic history on their next launch.
 
 ### R2-9 — legacy validation and best selection are no-ops
 
@@ -1458,16 +1480,17 @@ dataset, training, evaluation, or export path was used.
 - **R1-5 / R2-6 — UPHELD — AMEND.** For one frame, `t[1:]` is empty and NumPy
   min/max raises after inference. Commit `a549585` reports frame 0 alone and
   only computes steady-state statistics when those frames exist.
-- **R2-1 — DEFERRED.** The pre-shard length check can accept a loader whose
-  `BatchSamplerShard` is empty with `drop_last=True`. A safe correction must be
-  verified with two ranks, a one-batch global loader, and `drop_last=True`; the
-  settling run must show every rank exits coherently before model setup rather
-  than training zero steps. A single-process mock would not verify this.
-- **R2-3 — DEFERRED.** Rank 0 can raise on `fsync`/`os.replace` before peers
-  reach the barrier. The settling test is a two-rank CPU run with rank-0 EIO
-  fault injection, proving an error collective makes both ranks exit without a
-  hang while retaining temp-file replacement. No unverified collective patch
-  was added.
+- **R2-1 — STILL DEFERRED — run two CPU ranks with `epoch_size=1`,
+  `batch_size=1`, `drop_last=True`, and `even_batches=False`, recording raw and
+  prepared loader lengths on both ranks; a fix is settled only when both ranks
+  coherently raise before model setup whenever any prepared length is zero.** A
+  single-process fake length does not verify the sharding hazard.
+- **R2-3 — STILL DEFERRED — run two CPU ranks with rank 0 fault-injected to
+  raise `OSError(EIO)` at `fsync` and separately at `os.replace`, while rank 1
+  reaches checkpoint commit; a fix is settled only if an error collective makes
+  both ranks exit with the failing operation named, without timeout, while a
+  no-fault control still atomically replaces the temp file.** No unverified
+  collective patch was added.
 - **R2-4 — UPHELD — AMEND.** Unconditional `LossConfig` checks rejected recipes
   that do not consume temporal settings, while direct temporal/trimmed loss
   constructors accepted them. Commit `9a0ec86` gates config validation to
