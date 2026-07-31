@@ -1331,16 +1331,25 @@ def val_loop(
                 )
                 loss_value, loss_details = result["loss"]
                 metric_logger.update(loss=float(loss_value), **loss_details)
-                for clip_views, clip_loss, clip_details in _criterion_per_clip(
-                    criterion, result["views"], result["pred"]
-                ):
+                if criterion is None:
                     _accumulate_batch_loss(
-                        clip_views,
-                        clip_loss,
-                        clip_details,
+                        result["views"],
+                        loss_value,
+                        loss_details,
                         loss_sums,
                         loss_counts,
                     )
+                else:
+                    for clip_views, clip_loss, clip_details in _criterion_per_clip(
+                        criterion, result["views"], result["pred"]
+                    ):
+                        _accumulate_batch_loss(
+                            clip_views,
+                            clip_loss,
+                            clip_details,
+                            loss_sums,
+                            loss_counts,
+                        )
                 for k, vals in _val_depth_metrics(
                     result["views"], result["pred"]
                 ).items():
