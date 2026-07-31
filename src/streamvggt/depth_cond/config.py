@@ -102,8 +102,10 @@ class DepthCondCfg:
             raise ValueError(
                 "depth_cond.heads must be non-empty when enabled with head injection"
             )
-        if self.enabled and self.norm is NormType.FIXED and (
-            not math.isfinite(self.norm_constant_m) or self.norm_constant_m <= 0
+        if (
+            self.enabled
+            and self.norm is NormType.FIXED
+            and (not math.isfinite(self.norm_constant_m) or self.norm_constant_m <= 0)
         ):
             raise ValueError(
                 "depth_cond.norm_constant_m must be finite and positive when "
