@@ -73,7 +73,9 @@ class TrainAreaDTests(unittest.TestCase):
             def log(self, values: dict, step: int) -> None:
                 self.logged = values
 
-            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+            def reduce(
+                self, tensor: torch.Tensor, reduction: str = "sum"
+            ) -> torch.Tensor:
                 return tensor
 
         accel = Accel()
@@ -118,7 +120,9 @@ class TrainAreaDTests(unittest.TestCase):
 
     def test_remote_nonfinite_loss_fails_every_rank(self) -> None:
         class RemoteFailureReducer(ReturningReducer):
-            def reduce(self, tensor: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+            def reduce(
+                self, tensor: torch.Tensor, reduction: str = "sum"
+            ) -> torch.Tensor:
                 self.reduction = reduction
                 return torch.zeros_like(tensor)
 
@@ -158,9 +162,7 @@ class TrainAreaDTests(unittest.TestCase):
             calls = []
             fd.os.fsync = lambda descriptor: calls.append(descriptor)
             try:
-                fd._commit_checkpoint(
-                    directory, "last", ".last.tmp-1", accel
-                )
+                fd._commit_checkpoint(directory, "last", ".last.tmp-1", accel)
             finally:
                 fd.os.fsync = original_fsync
             with open(target, "rb") as handle:
