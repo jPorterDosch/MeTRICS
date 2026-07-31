@@ -6,10 +6,16 @@ base_clip0_depth_000.png .. _031.png -> base_clip0_depth.gif -- one GIF per
 (tag, series). With --pair, additionally writes side-by-side GIFs (left|right)
 for every series the two tags share: pair_depth.gif, pair_tcons.gif, ...
 
+Those pair names carry no clip index, so pairing a second clip into the same
+directory would overwrite the first clip's GIFs -- pass --pair-name when
+looping over the clips of a --num-clips N export.
+
 CPU only, PIL only. Examples:
     python heatmaps_to_gif.py --hm-dir ../viz/token_lora_seq/heatmaps
     python heatmaps_to_gif.py --hm-dir ../viz/token_lora_seq/heatmaps \\
         --pair base_clip0 finetuned_clip0 --fps 10
+    python heatmaps_to_gif.py --hm-dir ../viz/perscene/heatmaps \\
+        --pair base_clip3 finetuned_clip3 --pair-name pair_clip3
 """
 
 import argparse
@@ -64,6 +70,13 @@ def main() -> None:
         help="also write side-by-side GIFs for series both tags share, e.g. "
         "--pair base_clip0 finetuned_clip0",
     )
+    ap.add_argument(
+        "--pair-name",
+        default="pair",
+        help="filename stem for the --pair GIFs (default 'pair', giving "
+        "pair_conf.gif etc). One clip's pair GIFs overwrite another's without "
+        "this, since the tags are not part of the name.",
+    )
     args = ap.parse_args()
 
     hm_dir = Path(args.hm_dir)
@@ -105,7 +118,7 @@ def main() -> None:
                 canvas.paste(li, (0, 0))
                 canvas.paste(ri, (li.width + 4, 0))
                 frames.append(canvas)
-            write_gif(frames, hm_dir / f"pair_{kind}.gif", args.fps)
+            write_gif(frames, hm_dir / f"{args.pair_name}_{kind}.gif", args.fps)
 
 
 if __name__ == "__main__":
