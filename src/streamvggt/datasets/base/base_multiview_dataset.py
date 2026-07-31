@@ -279,9 +279,7 @@ class BaseMultiViewDataset(EasyDataset):
                 # is denser than asked. Warn once per (scene length, num_views,
                 # floor) so a misconfigured stride_range vs short scenes is
                 # visible without flooding every __getitem__.
-                self._warn_short_scene(
-                    len(ids_all), num_views, min_interval, lo
-                )
+                self._warn_short_scene(len(ids_all), num_views, min_interval, lo)
 
             # `intervals` holds the GAPS between consecutive picks; accumulate()
             # turns them into absolute positions below. Build only the one the

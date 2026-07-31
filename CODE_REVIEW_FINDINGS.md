@@ -279,7 +279,7 @@ Role: Defense, no-commit mode.
 
 ### R1-1 — translation is added to ray directions
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1 (wrong-numbers lens).
+**Verdict: UPHELD — FIXED in e417c1c.** Raised by R1 (wrong-numbers lens).
 
 Failure scenario: the CPU probe below gives a camera translated +1 on x an origin of `[1,0,0]` and a normalized direction of `[0.7071,0,0.7071]`. A direction must be rotation-only; the separately returned origin already carries translation.
 
@@ -287,7 +287,7 @@ Minimal patch, **NOT APPLIED**: in `base/base_multiview_dataset.py:70`, replace 
 
 ### R1-2 and R2-2 — irregular sampling violates its configured gap range
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised independently by R1 and R2; these are the same defect.
+**Verdict: UPHELD — FIXED in 4370adf.** Raised independently by R1 and R2; these are the same defect.
 
 Failure scenario: four views from six positions with fixed requested gap 3 return `[0,3,4,5]`. Filtering the overshoot and backfilling arbitrary unused positions creates gap-1 frames despite the declared fixed gap.
 
@@ -295,7 +295,7 @@ Minimal patch, **NOT APPLIED**: in `base/base_multiview_dataset.py:296-314`, rep
 
 ### R1-3 — metric loaders may falsely label metric values non-metric
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in 5ac844e.** Raised by R1.
 
 Failure scenario: HAMMER converts a raw value of 2000 to 2.0 metres, but `is_metric=False` changes only the label and downstream masking/loss branch. The numerical data do not become non-metric.
 
@@ -303,7 +303,7 @@ Minimal patch, **NOT APPLIED**: in `config.py:103-143`, reject `is_metric is not
 
 ### R1-4 — `nneg` is documented as a count but used as a fraction
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1. This concerns `nneg` semantics; R2-4 below is the distinct negative-domain validation defect on the same fields.
+**Verdict: UPHELD — FIXED in a068dcd.** Raised by R1. This concerns `nneg` semantics; R2-4 below is the distinct negative-domain validation defect on the same fields.
 
 Failure scenario: `target_n_corres=4,nneg=1` does not request one negative. The implementation initially computes zero positives as if `1` meant a 100% fraction, and its shortage fallback produced three negatives in the synthetic probe.
 
@@ -311,7 +311,7 @@ Minimal patch, **NOT APPLIED**: in `utils/corr.py:75-78`, compute the requested 
 
 ### R1-5 — invalid depth pixels can become valid correspondences
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in 57108be.** Raised by R1.
 
 Failure scenario: two 2x2 all-zero point maps with all-false validity masks yield `[0,0] -> [0,0]` marked valid. Reciprocity alone mistakes the zero-depth sentinel for supervision.
 
@@ -319,7 +319,7 @@ Minimal patch, **NOT APPLIED**: in `utils/corr.py:54-68`, intersect reciprocal c
 
 ### R1-6 — resize dimensions and intrinsics use different scale factors
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R1.
+**Verdict: UPHELD — FIXED in 0213aa9.** Raised by R1.
 
 Failure scenario: 640x480 to target 518x392 produces a 522x392 raster with actual scales `(0.815625,0.8166667)`, while both focal lengths use `0.8166667`; x geometry is inconsistent with the raster.
 
@@ -345,7 +345,7 @@ For a dataset smaller than one batch, zero complete batches is exactly the expli
 
 ### R2-3 — variable-length sampling rejects accepted small `num_views` only at iteration
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in 80a8455.** Raised by R2.
 
 Failure scenario: `num_views=3,fixed_length=False` constructs a sampler, then iteration calls NumPy with bounds `(4,4)` and raises `ValueError: low >= high`.
 
@@ -353,7 +353,7 @@ Minimal patch, **NOT APPLIED**: in `base/easy_dataset.py:47-59`, before construc
 
 ### R2-4 — negative correspondence settings pass validation
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2. This is distinct from R1-4: even after count semantics are corrected, negative field values must be rejected.
+**Verdict: UPHELD — FIXED in f79dd55.** Raised by R2. This is distinct from R1-4: even after count semantics are corrected, negative field values must be rejected.
 
 Failure scenario: `n_corres=-100,nneg=0` passes validation, but the `n_corres > 0` branch is false and silently disables a manifest-declared feature.
 
@@ -361,7 +361,7 @@ Minimal patch, **NOT APPLIED**: in `config.py:129-130`, raise `ValueError` unles
 
 ### R2-5 — `accelerator=None` is advertised but dereferenced
 
-**Verdict: UPHELD — NOT FIXED (commit impossible: read-only .git).** Raised by R2.
+**Verdict: UPHELD — FIXED in b76f4f3.** Raised by R2.
 
 Failure scenario: calling `get_data_loader` with its declared default raises `AttributeError: 'NoneType' object has no attribute 'num_processes'` during construction.
 
