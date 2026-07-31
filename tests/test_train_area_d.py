@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import finetune_depth as fd  # noqa: E402
 import croco.utils.misc as misc  # noqa: E402
+import train_utils  # noqa: E402
 
 PartialState()
 
@@ -166,6 +167,19 @@ class TrainAreaDTests(unittest.TestCase):
                 self.assertEqual(handle.read(), b"new")
             self.assertEqual(len(calls), 1)
             self.assertTrue(accel.waited)
+
+    def test_fresh_run_atomically_claims_output_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = fd.FinetuneDepthCfg(save_dir=directory, exp_group="group")
+            original = train_utils.is_rank_zero
+            train_utils.is_rank_zero = lambda: True
+            try:
+                output_dir = train_utils.resolve_output_dir(cfg, "run-id")
+                self.assertTrue(os.path.isdir(output_dir))
+                with self.assertRaisesRegex(RuntimeError, "already exists"):
+                    train_utils.resolve_output_dir(cfg, "run-id")
+            finally:
+                train_utils.is_rank_zero = original
 
 
 if __name__ == "__main__":

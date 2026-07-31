@@ -116,11 +116,13 @@ def resolve_output_dir(cfg: FinetuneDepthCfg, run_id: str) -> str:
     output_dir = os.path.join(cfg.save_dir, cfg.exp_group, run_id)
     if not is_rank_zero():
         return output_dir
-    if os.path.exists(output_dir):
+    try:
+        os.makedirs(output_dir, exist_ok=False)
+    except FileExistsError:
         raise RuntimeError(
             f"Output dir {output_dir} already exists: an experiment with this exact "
             "config hash has already been launched. Refusing to re-run. Either change "
             f"the config, pass --resume {os.path.join(output_dir, 'checkpoint-last.pth')} "
             "to continue an interrupted run, or remove the directory deliberately."
-        )
+        ) from None
     return output_dir
