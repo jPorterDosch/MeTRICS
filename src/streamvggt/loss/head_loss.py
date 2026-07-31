@@ -94,10 +94,11 @@ class DepthOrPmapLoss(torch.nn.Module):
     def normal_loss(
         self, pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
-        pred_norm, _ = point_map_to_normal(pred, mask)
-        gt_norm, _ = point_map_to_normal(gt, mask)
+        pred_norm, pred_valid = point_map_to_normal(pred, mask)
+        gt_norm, gt_valid = point_map_to_normal(gt, mask)
         cos_sim = F.cosine_similarity(pred_norm, gt_norm, dim=-1)
-        return 1 - cos_sim.mean()
+        valid = pred_valid & gt_valid
+        return (1 - cos_sim[valid].mean()) if valid.any() else pred.sum() * 0.0
 
     def image_gradient_loss(
         self, pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor | None = None

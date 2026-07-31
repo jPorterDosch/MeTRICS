@@ -154,6 +154,14 @@ def test_scale_shift_fit_is_per_sample_and_masked() -> None:
     assert torch.allclose(shift, torch.tensor([0.0, 0.0]))
 
 
+def test_perfect_point_map_has_zero_valid_normal_loss() -> None:
+    y, x = torch.meshgrid(torch.arange(3.0), torch.arange(3.0), indexing="ij")
+    point_map = torch.stack((x, y, torch.ones_like(x)), dim=-1).unsqueeze(0)
+    mask = torch.ones(1, 3, 3, dtype=torch.bool)
+    loss = DepthOrPmapLoss().normal_loss(point_map, point_map, mask)
+    assert loss.item() == 0.0
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
@@ -164,3 +172,4 @@ if __name__ == "__main__":
     test_camera_loss_rejects_non_finite_inputs()
     test_robust_normalization_median_uses_valid_values_only()
     test_scale_shift_fit_is_per_sample_and_masked()
+    test_perfect_point_map_has_zero_valid_normal_loss()
