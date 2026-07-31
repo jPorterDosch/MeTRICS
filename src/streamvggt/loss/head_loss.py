@@ -146,7 +146,11 @@ class DepthOrPmapLoss(torch.nn.Module):
                 gt_normalized, _ = normalize_pointcloud(gt, valid_mask)
             else:
                 pred_normalized, gt_normalized = pred, gt
-            scale, shift = closed_form_scale_and_shift(pred_normalized, gt_normalized)
+            scale, shift = closed_form_scale_and_shift(
+                pred_normalized, gt_normalized, valid_mask
+            )
+            scale = scale.view(-1, 1, 1, 1)
+            shift = shift.view(-1, 1, 1, pred.shape[-1])
             pred_aligned = pred_normalized * scale + shift
         if self.conf_weighting:
             sigma_p = sigma_p.clamp(min=1e-6)

@@ -5,7 +5,10 @@ from streamvggt.loss.distill_loss import DistillLoss
 from streamvggt.loss.head_loss import CameraLoss, DepthOrPmapLoss
 from streamvggt.loss.trimmed_loss import TrimmedMAELoss
 from streamvggt.loss.types import LossConfig
-from streamvggt.loss.utils import normalize_prediction_robust
+from streamvggt.loss.utils import (
+    closed_form_scale_and_shift,
+    normalize_prediction_robust,
+)
 
 
 def test_all_invalid_targets_contribute_no_depth_or_point_loss() -> None:
@@ -142,6 +145,15 @@ def test_robust_normalization_median_uses_valid_values_only() -> None:
     assert torch.equal(normalized[mask], torch.zeros(2))
 
 
+def test_scale_shift_fit_is_per_sample_and_masked() -> None:
+    prediction = torch.tensor([[[[0.0], [1.0], [100.0]]], [[[0.0], [1.0], [200.0]]]])
+    target = torch.tensor([[[[0.0], [2.0], [-999.0]]], [[[0.0], [4.0], [999.0]]]])
+    mask = torch.tensor([[[True, True, False]], [[True, True, False]]])
+    scale, shift = closed_form_scale_and_shift(prediction, target, mask)
+    assert torch.allclose(scale, torch.tensor([2.0, 4.0]))
+    assert torch.allclose(shift, torch.tensor([0.0, 0.0]))
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
@@ -151,3 +163,4 @@ if __name__ == "__main__":
     test_temporal_loss_handles_single_frame_and_rejects_bad_config()
     test_camera_loss_rejects_non_finite_inputs()
     test_robust_normalization_median_uses_valid_values_only()
+    test_scale_shift_fit_is_per_sample_and_masked()
