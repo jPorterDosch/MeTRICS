@@ -8,6 +8,16 @@ from unittest import mock
 import torch
 
 from streamvggt.depth_cond.cache import EncoderFeatureCache
+from streamvggt.depth_cond.config import DepthCondCfg, NormType
+
+
+def assert_value_error(message: str, callback) -> None:
+    try:
+        callback()
+    except ValueError as error:
+        assert message in str(error), error
+    else:
+        raise AssertionError(f"expected ValueError containing {message!r}")
 
 
 def test_concurrent_cache_writers_use_private_temp_files() -> None:
@@ -59,5 +69,20 @@ def test_concurrent_cache_writers_use_private_temp_files() -> None:
         assert os.path.isfile(cache._path("shared-key"))
 
 
+def test_fixed_normalization_requires_finite_positive_constant() -> None:
+    for constant in (0.0, -1.0, float("nan"), float("inf")):
+        assert_value_error(
+            "norm_constant_m",
+            lambda constant=constant: DepthCondCfg(
+                enabled=True,
+                norm=NormType.FIXED,
+                norm_constant_m=constant,
+            ).validate(),
+        )
+
+    DepthCondCfg(enabled=True, norm=NormType.RAW, norm_constant_m=0.0).validate()
+
+
 if __name__ == "__main__":
     test_concurrent_cache_writers_use_private_temp_files()
+    test_fixed_normalization_requires_finite_positive_constant()
