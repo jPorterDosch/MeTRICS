@@ -5,8 +5,9 @@ from streamvggt.loss.distill_loss import DistillLoss
 from streamvggt.loss.head_loss import CameraLoss, DepthOrPmapLoss
 from streamvggt.loss.l_loss import L21
 from streamvggt.loss.regr_3d_pose import Regr3DPose
+from streamvggt.loss.gradient_loss import TemporalGradientMatchingLoss
 from streamvggt.loss.trimmed_loss import TrimmedMAELoss
-from streamvggt.loss.types import LossConfig
+from streamvggt.loss.types import LossConfig, Recipe
 from streamvggt.loss.utils import (
     closed_form_scale_and_shift,
     normalize_prediction_robust,
@@ -124,6 +125,21 @@ def test_temporal_loss_handles_single_frame_and_rejects_bad_config() -> None:
             assert str(value) in str(error)
         else:
             raise AssertionError(f"invalid {field} was accepted")
+
+    for recipe in (Recipe.FINETUNE_TRAIN, Recipe.FINETUNE_TEST, Recipe.DISTILL):
+        LossConfig(recipe=recipe, temp_grad_scales=0, depth_trim=1.0, diff_depth_th=-0.1)
+
+    for constructor in (
+        lambda: TemporalGradientMatchingLoss(temp_grad_scales=0),
+        lambda: TemporalGradientMatchingLoss(diff_depth_th=-0.1),
+        lambda: TrimmedMAELoss(trim=1.0),
+    ):
+        try:
+            constructor()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid public loss constructor argument was accepted")
 
 
 def test_camera_loss_rejects_non_finite_inputs() -> None:

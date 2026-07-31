@@ -171,12 +171,13 @@ class LossConfig:
         self.pixel_loss = PixelLoss(self.pixel_loss)
         if self.reduction not in {"batch-based", "image-based"}:
             raise ValueError(f"invalid reduction {self.reduction!r}")
-        if self.temp_grad_scales < 1:
-            raise ValueError(f"invalid temp_grad_scales {self.temp_grad_scales!r}")
-        if not 0 <= self.depth_trim < 1:
-            raise ValueError(f"invalid depth_trim {self.depth_trim!r}")
-        if self.diff_depth_th < 0:
-            raise ValueError(f"invalid diff_depth_th {self.diff_depth_th!r}")
+        if self.recipe is Recipe.DEPTH_TRAIN:
+            if self.temp_grad_scales < 1:
+                raise ValueError(f"invalid temp_grad_scales {self.temp_grad_scales!r}")
+            if not 0 <= self.depth_trim < 1:
+                raise ValueError(f"invalid depth_trim {self.depth_trim!r}")
+            if self.diff_depth_th < 0:
+                raise ValueError(f"invalid diff_depth_th {self.diff_depth_th!r}")
 
     def _regr(
         self,

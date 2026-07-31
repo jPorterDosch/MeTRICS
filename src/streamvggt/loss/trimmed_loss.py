@@ -71,6 +71,9 @@ class TrimmedMAELoss(torch.nn.Module):
     def __init__(self, trim: float = 0.2, reduction: str = "batch-based") -> None:
         super().__init__()
 
+        if not 0 <= trim < 1:
+            raise ValueError(f"invalid trim {trim!r}")
+
         self.trim = trim
 
         self.reduction = reduction

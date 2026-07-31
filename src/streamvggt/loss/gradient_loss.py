@@ -58,6 +58,11 @@ class TemporalGradientMatchingLoss(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        if temp_grad_scales < 1:
+            raise ValueError(f"invalid temp_grad_scales {temp_grad_scales!r}")
+        if diff_depth_th < 0:
+            raise ValueError(f"invalid diff_depth_th {diff_depth_th!r}")
+
         self.data_loss = TrimmedMAELoss(trim=trim, reduction=reduction)
         self.temp_grad_scales = temp_grad_scales
         self.temp_grad_decay = temp_grad_decay
