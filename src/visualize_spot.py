@@ -318,6 +318,14 @@ def main() -> None:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--heatmaps", action="store_true")
     ap.add_argument(
+        "--timing",
+        action="store_true",
+        help="measure per-frame inference time (CUDA events) and add a frame_ms "
+        "column to the summary CSV. SPOT is the honest place to read this: real "
+        "sensor sparsity means the conditioning encoder sees real input rather "
+        "than a simulated mask.",
+    )
+    ap.add_argument(
         "--hm-scale",
         type=int,
         default=1,
@@ -430,6 +438,7 @@ def main() -> None:
                 v[k] = t.to(device)
 
     _prepare_batch(views, mcfg)  # rescales img; skips sparse sim (real sparse present)
+    frame_times_ms = [] if args.timing else None
     with torch.no_grad():
         result = loss_of_one_batch(
             views,
@@ -439,8 +448,17 @@ def main() -> None:
             inference=True,
             symmetrize_batch=False,
             use_amp=True,
+            frame_times_ms=frame_times_ms,
         )
     preds = result["pred"]
+    if frame_times_ms and not args.heatmaps:
+        # _export_heatmaps is what normally reports these; without it the
+        # measurement would be taken and silently dropped
+        t = np.asarray(frame_times_ms, dtype=float)
+        print(
+            f"per-frame inference: frame0 {t[0]:.1f} ms | rest median "
+            f"{np.median(t[1:]):.1f} ms (min {t[1:].min():.1f}, max {t[1:].max():.1f})"
+        )
     pred_depth = torch.stack([p["depth"].detach() for p in preds], dim=1)
     pred_depth = pred_depth.squeeze(-1).float().cpu()[0]  # [S,H,W]
     print(f"pred depth: range [{pred_depth.min():.2f}, {pred_depth.max():.2f}] m")
@@ -544,6 +562,7 @@ def main() -> None:
             conf=pred_conf,
             conf_vmin=args.conf_vmin,
             conf_vmax=args.conf_vmax,
+            frame_times_ms=frame_times_ms,
         )
         print(f"wrote {n} heatmap PNGs")
 

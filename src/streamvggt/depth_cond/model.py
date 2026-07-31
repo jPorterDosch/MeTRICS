@@ -7,6 +7,8 @@ the frozen-encoder feature cache. Nothing here branches on values outside the
 MetricCfg object.
 """
 
+import time
+
 import torch
 import torch.nn as nn
 
@@ -295,15 +297,37 @@ class MetricStreamVGGT(nn.Module):
         )
 
     def inference(
-        self, frames: list[dict], query_points: torch.Tensor | None = None
+        self,
+        frames: list[dict],
+        query_points: torch.Tensor | None = None,
+        frame_times_ms=None,
     ) -> StreamVGGTOutput:
         """Streaming inference: per-frame conditioning (S=1 is the degenerate
         case of the same [B,S,H,W] contract; token feats enter before the KV
-        cache each step)."""
+        cache each step).
+
+        frame_times_ms: see StreamVGGT.inference. Conditioning runs as its own
+        loop over frames here, so its per-frame cost is timed separately and
+        added onto the backbone's entry -- otherwise the reported latency would
+        omit a real part of the per-frame work, which matters once the encoder
+        stops being `identity`."""
         token_list, residual_list = None, None
+        timing = frame_times_ms is not None
+        cuda_timing = timing and torch.cuda.is_available()
+        cond_events, cond_host = [], []
         if self.conditioner is not None:
             token_list, residual_list = [], []
             for frame in frames:
+                if cuda_timing:
+                    cond_events.append(
+                        (
+                            torch.cuda.Event(enable_timing=True),
+                            torch.cuda.Event(enable_timing=True),
+                        )
+                    )
+                    cond_events[-1][0].record()
+                elif timing:
+                    t0 = time.perf_counter()
                 img = frame["img"]
                 if img.dim() == 3:
                     img = img.unsqueeze(0)
@@ -311,9 +335,22 @@ class MetricStreamVGGT(nn.Module):
                 conditioning = self._route_conditioning([frame], images)
                 token_list.append(conditioning["depth_token_feats"])
                 residual_list.append(conditioning["depth_head_residuals"])
-        return self.model.inference(
+                if cuda_timing:
+                    cond_events[-1][1].record()
+                elif timing:
+                    cond_host.append((time.perf_counter() - t0) * 1e3)
+        out = self.model.inference(
             frames,
             query_points,
             depth_token_feats_list=token_list,
             depth_head_residuals_list=residual_list,
+            frame_times_ms=frame_times_ms,
         )
+        # the backbone's own sync has already resolved these events. It appended
+        # one entry per frame, so fold conditioning onto the matching rows rather
+        # than reporting two half-measurements of the same frame.
+        cond_ms = [s.elapsed_time(e) for s, e in cond_events] if cuda_timing else cond_host
+        base = len(frame_times_ms) - len(cond_ms) if timing else 0
+        for i, ms in enumerate(cond_ms):
+            frame_times_ms[base + i] += ms
+        return out

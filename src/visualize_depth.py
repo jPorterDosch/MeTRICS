@@ -386,6 +386,7 @@ def _export_heatmaps(
     conf: torch.Tensor | None = None,
     conf_vmin: float = _CONF_VMIN,
     conf_vmax: float = _CONF_VMAX,
+    frame_times_ms: list[float] | None = None,
 ) -> int:
     """2D heatmap companions to the GLB export, from the SAME predictions.
 
@@ -413,6 +414,11 @@ def _export_heatmaps(
       {tag}_summary.csv       the SAME per-frame numbers as text, plus the
                               fraction of valid pixels clipped at rel_vmax and
                               the confidence/error rank correlation.
+
+    frame_times_ms: optional per-frame inference milliseconds (see
+    StreamVGGT.inference). Adds a frame_ms CSV column and a console line
+    separating frame 0 (empty kv-cache) from the steady-state frames and their
+    growth slope; omitted entirely when None.
                               The PNG is a picture of these curves and cannot
                               be compared across runs by eye; the CSV is what
                               you diff between base and finetuned.
@@ -561,6 +567,8 @@ def _export_heatmaps(
         if conf_np is not None:
             meta += [["# conf_vmin", conf_vmin], ["# conf_vmax", conf_vmax]]
             header += ["conf_mean", "conf_saturated_frac", "conf_err_corr"]
+        if frame_times_ms is not None:
+            header += ["frame_ms"]
         w.writerows(meta)
         w.writerow(header)
         for i in range(S):
@@ -577,6 +585,12 @@ def _export_heatmaps(
                     f"{conf_means[i]:.6f}",
                     f"{conf_sat[i]:.6f}",
                     f"{conf_corr[i]:.6f}",
+                ]
+            if frame_times_ms is not None:
+                # a clip shorter than the timing list means the caller sliced
+                # frames after inference; pad rather than mis-align the rows
+                row += [
+                    f"{frame_times_ms[i]:.3f}" if i < len(frame_times_ms) else ""
                 ]
             w.writerow(row)
     written += 1
@@ -611,6 +625,21 @@ def _export_heatmaps(
         print(
             f"  [{tag}] conf: mean {np.nanmean(conf_means):.3f}, "
             f"Spearman(conf, |pred-gt|/gt) = {mean_conf_corr:+.3f} ({verdict})"
+        )
+    if frame_times_ms:
+        # Frame 0 is reported apart from the rest on purpose: it runs against an
+        # EMPTY kv-cache and also absorbs lazy CUDA init, so averaging it in
+        # hides the very growth this measures. The slope is the answer to "does
+        # per-frame cost grow with sequence length" -- fit on frames 1.. only.
+        t = np.asarray(frame_times_ms, dtype=float)
+        rest = t[1:]
+        slope = (
+            float(np.polyfit(np.arange(len(rest)), rest, 1)[0]) if len(rest) >= 2 else float("nan")
+        )
+        print(
+            f"  [{tag}] time: frame0 {t[0]:.1f} ms | frames 1-{len(t) - 1} "
+            f"median {np.median(rest):.1f} ms (min {rest.min():.1f}, max {rest.max():.1f}) "
+            f"| growth {slope:+.3f} ms/frame"
         )
 
     fig, ax = plt.subplots(figsize=(7, 3.2), constrained_layout=True)
@@ -767,6 +796,13 @@ def main() -> None:
         "them useless. Set --rel-vmax 0.5 --tcons-vmax 0.03 for a scannet run.",
     )
     ap.add_argument(
+        "--timing",
+        action="store_true",
+        help="measure per-frame inference time (CUDA events, so the timed loop "
+        "is the loop that normally runs) and add a frame_ms column to the "
+        "summary CSV. Off by default; the model path is untouched when off.",
+    )
+    ap.add_argument(
         "--conf-vmin",
         type=float,
         default=_CONF_VMIN,
@@ -888,6 +924,9 @@ def main() -> None:
             _prepare_batch(batch, mcfg)
             # inference=True -> the causal per-frame KV-cache path (deployment
             # path), no criterion. result carries views + per-view preds.
+            # Fresh list per clip: timings are per-clip, and reusing one would
+            # concatenate clips into a single fake ramp.
+            frame_times_ms = [] if args.timing else None
             result = loss_of_one_batch(
                 batch,
                 model,
@@ -896,6 +935,7 @@ def main() -> None:
                 inference=True,
                 symmetrize_batch=False,
                 use_amp=True,
+                frame_times_ms=frame_times_ms,
             )
             views, preds = result["views"], result["pred"]
             confs = _clip_confidences(preds)
@@ -931,6 +971,7 @@ def main() -> None:
                         conf=conf_maps[b],
                         conf_vmin=args.conf_vmin,
                         conf_vmax=args.conf_vmax,
+                        frame_times_ms=frame_times_ms,
                     )
                     print(f"  [{mode}] clip {exported}: {n_png} heatmap PNGs")
                 mean_c, min_c, max_c = confs[b]
