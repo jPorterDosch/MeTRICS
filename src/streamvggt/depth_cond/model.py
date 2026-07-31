@@ -247,14 +247,17 @@ class MetricStreamVGGT(nn.Module):
             return None
         B, S, _, H, W = images.shape
         keys = []  # [S][B]
-        for view in views:
+        for view_index, view in enumerate(views):
             if "cache_key" not in view:
                 return None
             k = view["cache_key"]
             if isinstance(k, str):
                 k = [k]
             if len(k) != B:
-                return None
+                raise ValueError(
+                    f"view {view_index} cache_key count mismatch: expected {B} "
+                    f"cache keys, received {len(k)}"
+                )
             keys.append(list(k))
 
         param = next(self.model.aggregator.patch_embed.parameters())

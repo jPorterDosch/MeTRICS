@@ -10,6 +10,7 @@ import torch
 from streamvggt.depth_cond import cache as cache_module
 from streamvggt.depth_cond.cache import EncoderFeatureCache
 from streamvggt.depth_cond.config import DepthCondCfg, InjectionType, LoRACfg, NormType
+from streamvggt.depth_cond.model import MetricStreamVGGT
 
 
 def assert_value_error(message: str, callback) -> None:
@@ -91,6 +92,19 @@ def test_cache_namespace_separates_encoder_checkpoints() -> None:
         assert checkpoint_a._path("frame") != checkpoint_b._path("frame")
 
 
+def test_supplied_cache_keys_must_match_batch_cardinality() -> None:
+    model = MetricStreamVGGT.__new__(MetricStreamVGGT)
+    torch.nn.Module.__init__(model)
+    model.cache = mock.Mock()
+    model._encoder_cache_dir = "enabled"
+    images = torch.zeros(2, 1, 3, 1, 1)
+
+    assert_value_error(
+        "expected 2 cache keys, received 1",
+        lambda: model._cached_patch_tokens([{"cache_key": "only-one"}], images),
+    )
+
+
 def test_fixed_normalization_requires_finite_positive_constant() -> None:
     for constant in (0.0, -1.0, float("nan"), float("inf")):
         assert_value_error(
@@ -140,6 +154,7 @@ if __name__ == "__main__":
     test_concurrent_cache_writers_use_private_temp_files()
     test_cache_contract_discloses_fp32_autocast_difference()
     test_cache_namespace_separates_encoder_checkpoints()
+    test_supplied_cache_keys_must_match_batch_cardinality()
     test_fixed_normalization_requires_finite_positive_constant()
     test_enabled_lora_requires_finite_positive_alpha()
     test_enabled_head_injection_requires_a_head()
