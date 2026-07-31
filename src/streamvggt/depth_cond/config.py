@@ -132,6 +132,11 @@ class LoRACfg:
 
     def validate(self) -> None:
         self.targets = [LoRATarget(t) for t in self.targets]
+        if self.enabled and (not math.isfinite(self.alpha) or self.alpha <= 0):
+            raise ValueError(
+                "lora.alpha must be finite and positive when LoRA is enabled, "
+                f"got {self.alpha}"
+            )
         # unconditional: a nonsensical rank must never survive into a run,
         # even one that currently has LoRA disabled
         if self.rank <= 0:

@@ -8,7 +8,7 @@ from unittest import mock
 import torch
 
 from streamvggt.depth_cond.cache import EncoderFeatureCache
-from streamvggt.depth_cond.config import DepthCondCfg, NormType
+from streamvggt.depth_cond.config import DepthCondCfg, LoRACfg, NormType
 
 
 def assert_value_error(message: str, callback) -> None:
@@ -83,6 +83,17 @@ def test_fixed_normalization_requires_finite_positive_constant() -> None:
     DepthCondCfg(enabled=True, norm=NormType.RAW, norm_constant_m=0.0).validate()
 
 
+def test_enabled_lora_requires_finite_positive_alpha() -> None:
+    for alpha in (0.0, -1.0, float("nan"), float("inf")):
+        assert_value_error(
+            "lora.alpha",
+            lambda alpha=alpha: LoRACfg(enabled=True, alpha=alpha).validate(),
+        )
+
+    LoRACfg(enabled=False, alpha=0.0).validate()
+
+
 if __name__ == "__main__":
     test_concurrent_cache_writers_use_private_temp_files()
     test_fixed_normalization_requires_finite_positive_constant()
+    test_enabled_lora_requires_finite_positive_alpha()
