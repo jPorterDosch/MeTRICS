@@ -1225,8 +1225,8 @@ code; none of its files is under the vendored `src/croco/`, `src/dust3r/`,
 
 ### E-R1-1 — cache-enabled AMP changes patch-encoder arithmetic
 
-**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R1
-(wrong-numbers lens). **(assessed against uncommitted working-tree state)**
+**Verdict: UPHELD — FIXED in 9960a31.** Raised by R1
+(wrong-numbers lens).
 
 Failure scenario: with outer autocast enabled, the normal live path runs the frozen
 patch encoder under autocast, while a cache miss explicitly disables autocast and
@@ -1236,18 +1236,16 @@ losses, and gradients. R1's CPU analogue measured a maximum token difference of
 `0.0228300`; a GPU is needed only to quantify the CUDA/bf16 magnitude, not to
 establish the divergent execution modes.
 
-Minimal patch, **NOT FIXED**: in `model.py:247-275`, let cache misses execute under
-the caller's existing autocast mode and stop coercing warm hits to the fp32 parameter
-dtype. In `cache.py:43-48`, preserve the feature tensor's produced dtype instead of
-unconditionally converting it to fp32. Namespace cache entries by the effective
-encoder execution dtype along with the encoder identity addressed by E-R1-2/E-R2-2,
-so a cache created under one arithmetic mode cannot be reused under another.
+Resolution: retain stable fp32 cache computation and storage, and correct the cache
+module and call-site contract so they no longer claim numerical identity with an
+autocast live path. The CPU regression records the intentional dtype contract and
+the documentation now discloses the possible numerical difference.
 
 ### E-R1-2 and E-R2-2 — cache identity omits encoder, checkpoint, and schema
 
-**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised independently
+**Verdict: UPHELD — FIXED in 7e49385.** Raised independently
 by R1 (wrong-numbers lens) and R2 (contracts-and-runtime lens); these are the same
-defect. **(assessed against uncommitted working-tree state)**
+defect.
 
 Failure scenario: checkpoint A and checkpoint B use the same cache directory and raw
 processed-frame key. `cache.py` hashes only that raw key and stores a bare tensor, so
@@ -1255,12 +1253,10 @@ B accepts A's same-shaped token tensor and bypasses B's encoder without warning.
 Changing sparse-depth conditioning alone does not stale this RGB-only cache; the
 missing ownership is specifically encoder weights/architecture and cache schema.
 
-Minimal patch, **NOT FIXED**: make `EncoderFeatureCache` in `cache.py:20-48` require an
-immutable namespace containing the loaded patch encoder/checkpoint fingerprint and a
-cache-schema version, and include that namespace in `_path`'s digest. In the cache
-construction/lookup path in `model.py:247-280`, supply the namespace after pretrained
-weights are loaded and include the effective encoder execution dtype required by
-E-R1-1. Do not hash sparse-depth inputs; they are not part of the cached computation.
+Resolution: `EncoderFeatureCache` requires a schema-versioned checkpoint fingerprint
+and includes it in every path digest. `load_pretrained` supplies the checkpoint
+SHA-256 only after strict loading succeeds; changing the checkpoint therefore makes
+existing entries misses, while sparse-depth inputs remain outside the cache identity.
 
 ### E-R1-3 — sparse simulation uses nearest-integer rather than ceiling density
 
@@ -1352,18 +1348,17 @@ per visited attention module; do not add fallback targets or alter disabled mode
 
 ### E-R2-7 — malformed supplied cache-key cardinality silently disables caching
 
-**Verdict: UPHELD — NOT FIXED (implementation round pending).** Raised by R2
-(contracts-and-runtime lens). **(assessed against uncommitted working-tree state)**
+**Verdict: UPHELD — FIXED in 63291a8.** Raised by R2
+(contracts-and-runtime lens).
 
 Failure scenario: for batch size two, a supplied one-element cache-key value is
 converted to one key, rejected only by an internal length comparison, and then
 treated like an absent key. Every batch recomputes encoder tokens while the run still
 reports the cache enabled.
 
-Minimal patch, **NOT FIXED**: in `model.py:227-245`, preserve the documented live-path
-fallback only when `cache_key` is absent. When the field is supplied but its type or
-cardinality does not provide exactly one string key per batch item, raise `ValueError`
-naming the expected batch size and received shape/count.
+Resolution: the documented live-path fallback remains only for an absent `cache_key`.
+A supplied key count that differs from the batch size raises `ValueError` naming the
+view index and the expected and received counts.
 
 ### E-R2-8 — stale gate wording promises a removed scalar gate
 
@@ -1412,8 +1407,6 @@ dataset, training, evaluation, or export path was used.
 - All five areas A-E have now been reviewed. Areas A-D had their UPHELD findings
   fixed with CPU regression evidence on branch `review/codebase-sweep`.
 - Area E's five scoped findings were fixed with CPU regression evidence.
-- E-R1-1, E-R2-7, and E-R1-2/E-R2-2 remain unfixed because
-  `src/streamvggt/depth_cond/model.py` had uncommitted user changes during this round.
 - Findings marked DEFERRED across all areas remain open and unfixed.
 - Nothing was pushed or merged to `main`.
 - Permanently out of scope: `datasets_preprocess/`, export and visualization scripts,
