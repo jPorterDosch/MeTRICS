@@ -181,6 +181,10 @@ class TrainAreaDTests(unittest.TestCase):
             finally:
                 train_utils.is_rank_zero = original
 
+    def test_empty_loader_is_rejected_before_progress_reporting(self) -> None:
+        with self.assertRaisesRegex(ValueError, "validation loader 0"):
+            fd._validate_loader_lengths([object()], [[]], [[object()]])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

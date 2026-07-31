@@ -382,6 +382,25 @@ def _commit_checkpoint(
     accelerator.wait_for_everyone()
 
 
+def _validate_loader_lengths(
+    train_loader: DataLoader,
+    val_loaders: list[DataLoader],
+    stream_loaders: list[DataLoader],
+) -> None:
+    loaders = [("training loader", train_loader)]
+    loaders.extend(
+        (f"validation loader {index}", loader)
+        for index, loader in enumerate(val_loaders)
+    )
+    loaders.extend(
+        (f"streaming loader {index}", loader)
+        for index, loader in enumerate(stream_loaders)
+    )
+    for name, loader in loaders:
+        if len(loader) == 0:
+            raise ValueError(f"{name} is empty")
+
+
 def run(
     args: FinetuneDepthCfg, mcfg: MetricCfg, manifest: dict, run_hash: str, run_id: str
 ) -> None:
@@ -448,6 +467,9 @@ def run(
             if args.batch_size == 1
             else build_val_loaders(args, accelerator, batch_size=1)
         )
+    _validate_loader_lengths(
+        data_loader_train, data_loaders_val, data_loaders_stream
+    )
 
     printer.info("Loading depth-conditioned model")
     model, _ = build_model(args, mcfg, device)
