@@ -66,6 +66,23 @@ _CKPT_NAMES = {
 _AUTO_ORDER = ("final", "best", "last")
 
 
+def _format_frame_timing(frame_times_ms) -> str:
+    t = np.asarray(frame_times_ms, dtype=float)
+    if len(t) == 1:
+        return f"frame0 {t[0]:.1f} ms"
+    rest = t[1:]
+    slope = (
+        float(np.polyfit(np.arange(len(rest)), rest, 1)[0])
+        if len(rest) >= 2
+        else float("nan")
+    )
+    return (
+        f"frame0 {t[0]:.1f} ms | frames 1-{len(t) - 1} "
+        f"median {np.median(rest):.1f} ms (min {rest.min():.1f}, "
+        f"max {rest.max():.1f}) | growth {slope:+.3f} ms/frame"
+    )
+
+
 def resolve_checkpoint(weights: str, which: str) -> Path:
     """Resolve --weights (+ --checkpoint) to a concrete .pth. `weights` may be
     the checkpoint file itself or the run directory that contains it."""
@@ -631,16 +648,7 @@ def _export_heatmaps(
         # EMPTY kv-cache and also absorbs lazy CUDA init, so averaging it in
         # hides the very growth this measures. The slope is the answer to "does
         # per-frame cost grow with sequence length" -- fit on frames 1.. only.
-        t = np.asarray(frame_times_ms, dtype=float)
-        rest = t[1:]
-        slope = (
-            float(np.polyfit(np.arange(len(rest)), rest, 1)[0]) if len(rest) >= 2 else float("nan")
-        )
-        print(
-            f"  [{tag}] time: frame0 {t[0]:.1f} ms | frames 1-{len(t) - 1} "
-            f"median {np.median(rest):.1f} ms (min {rest.min():.1f}, max {rest.max():.1f}) "
-            f"| growth {slope:+.3f} ms/frame"
-        )
+        print(f"  [{tag}] time: {_format_frame_timing(frame_times_ms)}")
 
     fig, ax = plt.subplots(figsize=(7, 3.2), constrained_layout=True)
     ax.plot(gterr_means, label="|pred-gt|/gt (per frame)", marker="o", ms=3)

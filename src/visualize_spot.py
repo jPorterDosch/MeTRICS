@@ -61,6 +61,7 @@ from visualize_depth import (
     _CONF_VMIN,
     _REL_VMAX,
     _export_heatmaps,
+    _format_frame_timing,
     _per_frame_scene,
     _stack_depth_conf,
     load_saved_args,
@@ -454,11 +455,7 @@ def main() -> None:
     if frame_times_ms and not args.heatmaps:
         # _export_heatmaps is what normally reports these; without it the
         # measurement would be taken and silently dropped
-        t = np.asarray(frame_times_ms, dtype=float)
-        print(
-            f"per-frame inference: frame0 {t[0]:.1f} ms | rest median "
-            f"{np.median(t[1:]):.1f} ms (min {t[1:].min():.1f}, max {t[1:].max():.1f})"
-        )
+        print(f"per-frame inference: {_format_frame_timing(frame_times_ms)}")
     pred_depth = torch.stack([p["depth"].detach() for p in preds], dim=1)
     pred_depth = pred_depth.squeeze(-1).float().cpu()[0]  # [S,H,W]
     print(f"pred depth: range [{pred_depth.min():.2f}, {pred_depth.max():.2f}] m")
