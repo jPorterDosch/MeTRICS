@@ -4,6 +4,7 @@ from streamvggt.loss.depth_train_loss import DepthTrainLoss
 from streamvggt.loss.distill_loss import DistillLoss
 from streamvggt.loss.head_loss import DepthOrPmapLoss
 from streamvggt.loss.trimmed_loss import TrimmedMAELoss
+from streamvggt.loss.types import LossConfig
 
 
 def test_all_invalid_targets_contribute_no_depth_or_point_loss() -> None:
@@ -73,7 +74,18 @@ def test_spatial_gradient_uses_valid_edges_without_cropping() -> None:
         assert loss.item() == 0.5
 
 
+def test_loss_config_rejects_unknown_reduction() -> None:
+    try:
+        LossConfig(reduction="typo")
+    except ValueError as error:
+        assert "reduction" in str(error)
+        assert "typo" in str(error)
+    else:
+        raise AssertionError("unknown reduction was accepted")
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
     test_spatial_gradient_uses_valid_edges_without_cropping()
+    test_loss_config_rejects_unknown_reduction()

@@ -169,6 +169,8 @@ class LossConfig:
         # tyro already supplies enum members, in which case these are no-ops.
         self.recipe = Recipe(self.recipe)
         self.pixel_loss = PixelLoss(self.pixel_loss)
+        if self.reduction not in {"batch-based", "image-based"}:
+            raise ValueError(f"invalid reduction {self.reduction!r}")
 
     def _regr(
         self,
