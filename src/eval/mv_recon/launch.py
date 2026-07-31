@@ -301,11 +301,12 @@ def main(args):
                     pts_gt_all_masked = pts_gt_all[masks_all > 0]
                     images_all_masked = images_all[masks_all > 0]
 
-                    mask = np.isfinite(pts_all_masked)  
+                    mask = np.isfinite(pts_all_masked).all(axis=-1) & np.isfinite(
+                        pts_gt_all_masked
+                    ).all(axis=-1)
                     pts_all_masked = pts_all_masked[mask]
-
-                    mask_gt = np.isfinite(pts_gt_all_masked)
                     pts_gt_all_masked = pts_gt_all_masked[mask]
+                    images_all_masked = images_all_masked[mask]
 
                     if args.use_proj:
                         def umeyama_alignment(src: np.ndarray, dst: np.ndarray, with_scale: bool = True):

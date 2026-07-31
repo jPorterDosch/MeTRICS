@@ -1,6 +1,7 @@
 import ast
 import importlib.util
 import pathlib
+import textwrap
 import unittest
 
 import numpy as np
@@ -133,6 +134,25 @@ class AlignmentModeValidationTest(unittest.TestCase):
                 module = load_module(f"area_c_modes_{name}", path)
                 with self.assertRaisesRegex(ValueError, "one alignment mode"):
                     module.depth_evaluation(pred, gt, max_depth=None, **alignment)
+
+
+class PointCloudFinitenessTest(unittest.TestCase):
+    def test_joint_point_mask_preserves_tuples_and_colors(self):
+        source = (ROOT / "src/eval/mv_recon/launch.py").read_text()
+        block = source.split("                    mask = np.isfinite(pts_all_masked)", 1)[1]
+        block = "                    mask = np.isfinite(pts_all_masked)" + block.split(
+            "                    if args.use_proj:", 1
+        )[0]
+        namespace = {
+            "np": np,
+            "pts_all_masked": np.array([[0.0, 0.0, 1.0], [1.0, np.nan, 2.0]]),
+            "pts_gt_all_masked": np.array([[0.0, 0.0, 1.0], [1.0, 1.0, 2.0]]),
+            "images_all_masked": np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        }
+        exec(textwrap.dedent(block), namespace)
+        self.assertEqual(namespace["pts_all_masked"].shape, (1, 3))
+        self.assertEqual(namespace["pts_gt_all_masked"].shape, (1, 3))
+        self.assertEqual(namespace["images_all_masked"].shape, (1, 3))
 
 
 if __name__ == "__main__":
