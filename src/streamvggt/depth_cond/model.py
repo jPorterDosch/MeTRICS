@@ -313,7 +313,9 @@ class MetricStreamVGGT(nn.Module):
         stops being `identity`."""
         token_list, residual_list = None, None
         timing = frame_times_ms is not None
-        cuda_timing = timing and torch.cuda.is_available()
+        timing_device = frames[0]["img"].device
+        cuda_timing = timing and timing_device.type == "cuda"
+        timing_stream = torch.cuda.current_stream(timing_device) if cuda_timing else None
         cond_events, cond_host = [], []
         if self.conditioner is not None:
             token_list, residual_list = [], []
@@ -325,7 +327,7 @@ class MetricStreamVGGT(nn.Module):
                             torch.cuda.Event(enable_timing=True),
                         )
                     )
-                    cond_events[-1][0].record()
+                    cond_events[-1][0].record(timing_stream)
                 elif timing:
                     t0 = time.perf_counter()
                 img = frame["img"]
@@ -336,7 +338,7 @@ class MetricStreamVGGT(nn.Module):
                 token_list.append(conditioning["depth_token_feats"])
                 residual_list.append(conditioning["depth_head_residuals"])
                 if cuda_timing:
-                    cond_events[-1][1].record()
+                    cond_events[-1][1].record(timing_stream)
                 elif timing:
                     cond_host.append((time.perf_counter() - t0) * 1e3)
         out = self.model.inference(

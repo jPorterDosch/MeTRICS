@@ -164,7 +164,9 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
         # resolves them all. On CPU there is nothing to overlap, so perf_counter
         # is already exact.
         timing = frame_times_ms is not None
-        cuda_timing = timing and torch.cuda.is_available()
+        timing_device = frames[0]["img"].device
+        cuda_timing = timing and timing_device.type == "cuda"
+        timing_stream = torch.cuda.current_stream(timing_device) if cuda_timing else None
         events, host_times = [], []
 
         for i, frame in enumerate(frames):
@@ -172,7 +174,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 events.append(
                     (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
                 )
-                events[-1][0].record()
+                events[-1][0].record(timing_stream)
             elif timing:
                 t0 = time.perf_counter()
             images = frame["img"].unsqueeze(0)
@@ -240,14 +242,14 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
             })
             processed_frames.append(frame)
             if cuda_timing:
-                events[-1][1].record()
+                events[-1][1].record(timing_stream)
             elif timing:
                 host_times.append((time.perf_counter() - t0) * 1e3)
         
         if cuda_timing:
             # the one sync of the whole clip; the caller is about to read these
             # outputs, which would sync anyway
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(timing_device)
             frame_times_ms.extend(s.elapsed_time(e) for s, e in events)
         elif timing:
             frame_times_ms.extend(host_times)
