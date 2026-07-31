@@ -1438,3 +1438,81 @@ dataset, training, evaluation, or export path was used.
   so it is pre-existing, not introduced by this review. No fix was made because
   there is no live distortion path and choosing a distortion model would require
   guessing intent.
+
+## Self-audit — review of the review's own diff
+
+### Verdicts
+
+- **R1-1 — UPHELD — AMEND.** A criterion-wide masked mean is pixel-weighted;
+  multiplying it by batch size cannot reconstruct equal clip weights. With clip
+  errors/support `(0, 1)` and `(4, 3)`, the real `DepthOrPmapLoss` returns `3`
+  for the batch, while the intended value after a later zero-loss clip is `4/3`,
+  not `2`. Commit `af60361` slices the already-produced views/predictions and
+  evaluates the criterion per clip. Commits `2a0d3d6` and `f026fba` preserve two
+  existing test-helper contracts exposed by the full gate.
+- **R1-2 / R2-2 — UPHELD — AMEND.** The active SPOT geometry array lost
+  `--landscape-crop --crop-anchor top`, changing inputs and cache identity even
+  with timing disabled. Commit `3419f1f` restores the established protocol.
+- **R1-3 — UPHELD — AMEND.** An empty masked selection satisfied the all-zero
+  predicate and raised before the established `valid_pixels=0` result path.
+  Commit `091aeb5` applies the finite/nonzero check only to nonempty selections
+  in all three evaluators.
+- **R1-4 — UPHELD — AMEND.** Global CUDA availability is not the inference
+  device and can select an empty or wrong-device stream. Commit `5eab304`
+  selects the frame tensor's device and records/synchronizes that device's
+  current stream. CPU selection is covered; executing CUDA events remains a
+  GPU-only path.
+- **R1-5 / R2-6 — UPHELD — AMEND.** For one frame, `t[1:]` is empty and NumPy
+  min/max raises after inference. Commit `a549585` reports frame 0 alone and
+  only computes steady-state statistics when those frames exist.
+- **R2-1 — DEFERRED.** The pre-shard length check can accept a loader whose
+  `BatchSamplerShard` is empty with `drop_last=True`. A safe correction must be
+  verified with two ranks, a one-batch global loader, and `drop_last=True`; the
+  settling run must show every rank exits coherently before model setup rather
+  than training zero steps. A single-process mock would not verify this.
+- **R2-3 — DEFERRED.** Rank 0 can raise on `fsync`/`os.replace` before peers
+  reach the barrier. The settling test is a two-rank CPU run with rank-0 EIO
+  fault injection, proving an error collective makes both ranks exit without a
+  hang while retaining temp-file replacement. No unverified collective patch
+  was added.
+- **R2-4 — UPHELD — AMEND.** Unconditional `LossConfig` checks rejected recipes
+  that do not consume temporal settings, while direct temporal/trimmed loss
+  constructors accepted them. Commit `9a0ec86` gates config validation to
+  `DEPTH_TRAIN` and validates at the consuming constructors.
+- **R2-5 — UPHELD — AMEND.** Direct `TrimmedMAELoss` and `GradientLoss`
+  construction still mapped a misspelled reduction to image-based behavior.
+  Commit `441a2fb` validates both public branching constructors.
+
+### Vendored timing dependency
+
+The user's `src/dust3r/inference.py` edit adds optional `frame_times_ms` only to
+the inference branch of `loss_of_one_batch`: `None` preserves the old model call;
+a supplied list is forwarded to `model.inference` and returned in the result.
+Training, teacher, and loss branches are unchanged, and existing callers omit the
+argument. Timed `visualize_depth.py` and `visualize_spot.py` calls therefore form
+a coupled local API fork with both `MetricStreamVGGT.inference` and
+`StreamVGGT.inference`: removing either the vendor wrapper change or the model
+changes while retaining the other side produces an unexpected-keyword failure.
+The vendored file was carried verbatim in `196d8e2` and was not extended here.
+
+### CPU evidence and test-quality audit
+
+Failing-before probes used the required interpreter and `PYTHONDONTWRITEBYTECODE=1`:
+the real loss probe observed `batch_loss 3.0`; all three empty-support calls
+raised `ValueError`; irrelevant recipes rejected `temp_grad_scales=0`; direct
+temporal/reduction constructors were accepted; the SPOT source regression,
+one-frame formatter import, and input-device source regression each failed.
+After their respective commits, `tests/test_train_area_d.py`,
+`tests/test_eval_area_c.py`, `tests/test_loss_area_a.py`, and
+`tests/test_review_diff_audit.py` pass. The final required eight-suite gate also
+passes, as does the additional self-audit suite.
+
+The audit confirms Reviewer 2's characterization: dataset tests exercise real
+pure helpers; evaluation tests mix behavioral coverage with AST/source seams;
+training tests rely on fake reducers and cannot establish post-shard or
+rank-asymmetric behavior; the former scalar-only clip-loss test hid the real
+criterion denominator and is now strengthened with `DepthOrPmapLoss`. The
+scale-loss arity probe remains a seam test. Ruff reports five pre-existing unused
+imports, all in the user-owned vendored `src/dust3r/inference.py`; they were not
+modified. Format check reports 12 pre-existing/unrelated files and was not
+auto-fixed, preserving the user's carried work and avoiding incidental churn.
