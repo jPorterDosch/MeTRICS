@@ -18,9 +18,14 @@ from dataclasses import dataclass, field
 from collections.abc import Callable
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")  # headless: compute nodes have no display
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
+import wandb
 from torch.utils.data import DataLoader
 
 from streamvggt.loss import LossConfig
@@ -34,6 +39,7 @@ import tyro
 from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs, InitProcessGroupKwargs
 from accelerate.logging import get_logger
+from accelerate.utils import gather_object
 from datetime import timedelta
 import torch.multiprocessing
 
@@ -240,13 +246,6 @@ _NON_IDENTITY_FIELDS = (
 
 def build_manifest(cfg: FinetuneDepthCfg) -> dict:
     return experiment_manifest(cfg, exclude=_NON_IDENTITY_FIELDS)
-
-
-def _dataset_tag(config: MultiDatasetConfig) -> str:
-    """Short wandb section tag for a dataset mixture: "hammer",
-    "hammer+scannet", ... Robust to the enum members not being coerced yet
-    (plain strings before validate())."""
-    return "+".join(getattr(d, "value", str(d)) for d in config.dataset)
 
 
 def build_train_loader(
@@ -495,7 +494,7 @@ def run(
                 step=(epoch + 1) * len(data_loader_train),
                 args=args,
                 mcfg=mcfg,
-                prefix=f"val/{_dataset_tag(args.val_dataset)}",
+                prefix="val",
                 export_glb=args.export_glb and is_last_epoch,
             )
             # Select "best" on metric AbsRel, NOT the criterion loss. The
@@ -534,7 +533,7 @@ def run(
             step=0,
             args=args,
             mcfg=mcfg,
-            prefix=f"val/{_dataset_tag(args.val_dataset)}",
+            prefix="val",
             export_glb=args.export_glb,
         )
 
@@ -547,7 +546,7 @@ def run(
             step=args.epochs * len(data_loader_train),
             args=args,
             mcfg=mcfg,
-            prefix=f"final_stream/{_dataset_tag(args.val_dataset)}",
+            prefix="final_stream",
         )
 
     # No separate checkpoint-final.pth: the `epoch == args.epochs` branch above
@@ -828,13 +827,6 @@ def _img2lidar(K: torch.Tensor, pose: torch.Tensor) -> np.ndarray:
     return pose.numpy() @ np.linalg.inv(k4)
 
 
-def _clip_dataset(views: list[dict], b: int) -> str:
-    """Dataset label of clip b -- see val_images.clip_dataset_label. Shared with
-    the sample-image sampler so the metric sections and the logged panels are
-    keyed by the same names."""
-    return clip_dataset_label(views, b)
-
-
 def _log_val_images(
     sampler: ValImageSampler | None,
     accelerator: Accelerator,
@@ -854,9 +846,6 @@ def _log_val_images(
     figs = sampler.render(epoch)
     if not figs:
         return 0
-    import wandb
-    import matplotlib.pyplot as plt
-
     accelerator.log(
         {f"{prefix}/samples": [wandb.Image(fig, caption=cap) for cap, fig in figs]},
         step=step,
@@ -884,7 +873,7 @@ def _val_depth_metrics(views: list[dict], preds: list[dict]) -> dict[str, list[f
         mask = valid[b] & (gt[b] > 0)  # [S,H,W]
         if not mask.any():
             continue
-        ds = _clip_dataset(views, b)
+        ds = clip_dataset_label(views, b)
         # the 3rd return is the aligned full-size prediction, reused for TAE
         res_affine, _, aligned, _ = depth_evaluation(
             pred[b], gt[b], custom_mask=mask, scale_and_shift=True
@@ -941,7 +930,7 @@ def _streaming_depth_metrics(
     out: dict[str, list[float]] = {}
     B, S, H, W = gt.shape
     for b in range(B):
-        ds = _clip_dataset(views, b)
+        ds = clip_dataset_label(views, b)
         frame_stats: dict[str, list[float]] = {}
         errs: list[float] = []
         sq_errs: list[float] = []
@@ -989,9 +978,9 @@ def _streaming_depth_metrics(
     return out
 
 
-# the depth metrics, in one canonical order. The per-dataset accumulator keys
-# are "<dataset>/<metric>"; the blended (dataset-agnostic) logged keys are just
-# "<metric>".
+# the depth metrics, in one canonical order. The accumulator keys are
+# "<dataset>/<metric>"; logged as "<prefix>/<dataset>/<metric>_avg" per dataset
+# and "<prefix>/all/<metric>_avg" for the blend.
 _DEPTH_METRIC_KEYS = (
     "absrel_affine",
     "delta1_affine",
@@ -1004,11 +993,11 @@ _DEPTH_METRIC_KEYS = (
 )
 
 
-def _reduce_depth_metrics(
+def _reduce_metrics(
     sums: dict[str, float], counts: dict[str, int], accelerator: Accelerator
-) -> dict[str, float]:
-    """Cross-rank mean of the per-dataset depth-metric accumulators, plus a
-    dataset-blended value per metric. Input keys are "<dataset>/<metric>".
+) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    """Cross-rank mean of a per-dataset accumulator (depth metrics or losses).
+    Input keys are "<dataset>/<metric>".
 
     The reduced key set is UNIONED across ranks first: the accumulators are
     data-dependent (a rank's shard may miss a whole dataset, or a metric that
@@ -1016,16 +1005,17 @@ def _reduce_depth_metrics(
     mismatched collective shapes and hang NCCL. Unioning yields one fixed order
     every rank agrees on. Keys with zero global count are dropped.
 
-    Returns log-ready keys: "<dataset>_<metric>" (per dataset) and "<metric>"
-    (blended over datasets, count-weighted -- what checkpoint selection reads)."""
+    Returns (per_dataset, blended): {dataset: {metric: value}} keeping the two
+    levels apart (a metric name can itself contain "/", e.g. the per-view loss
+    terms, so a flattened "<dataset>/<metric>" string could not be split back
+    reliably), and {metric: value} blended over datasets, count-weighted --
+    what checkpoint selection reads."""
     keys = sorted(set(sums) | set(counts))
     if accelerator.num_processes > 1:
-        from accelerate.utils import gather_object
-
         # [keys] per rank -> list of each rank's key list -> flatten to the union
         keys = sorted({k for part in gather_object([keys]) for k in part})
     if not keys:
-        return {}
+        return {}, {}
 
     t = torch.tensor(
         [[sums.get(k, 0.0), counts.get(k, 0)] for k in keys],
@@ -1036,7 +1026,7 @@ def _reduce_depth_metrics(
         accelerator.wait_for_everyone()
         accelerator.reduce(t, reduction="sum")
 
-    out: dict[str, float] = {}
+    per_dataset: dict[str, dict[str, float]] = defaultdict(dict)
     blended_sum: dict[str, float] = defaultdict(float)
     blended_cnt: dict[str, float] = defaultdict(float)
     for i, key in enumerate(keys):
@@ -1045,24 +1035,72 @@ def _reduce_depth_metrics(
         blended_sum[metric] += s
         blended_cnt[metric] += c
         if c > 0:
-            out[f"{dataset}_{metric}"] = s / c
-    for metric, c in blended_cnt.items():
-        if c > 0:
-            out[metric] = blended_sum[metric] / c
-    return out
+            per_dataset[dataset][metric] = s / c
+    blended = {m: blended_sum[m] / c for m, c in blended_cnt.items() if c > 0}
+    return dict(per_dataset), blended
+
+
+def _accumulate_batch_loss(
+    views: list[dict],
+    loss_value: torch.Tensor | float,
+    loss_details: dict,
+    sums: dict[str, float],
+    counts: dict[str, int],
+) -> bool:
+    """Attribute one batch's criterion loss (and every scalar term in
+    loss_details) to its dataset, into the same "<dataset>/<metric>" accumulator
+    shape _reduce_metrics consumes. Returns False and accumulates NOTHING when
+    the batch spans more than one dataset.
+
+    The criterion reduces over the whole batch, so a mixed batch has no per-clip
+    decomposition to split -- attributing it to any one dataset would be a lie,
+    and splitting it evenly would smear one dataset's loss into another's series.
+    With the default batch_size=1 every batch is one clip, hence one dataset, so
+    nothing is dropped."""
+    labels = {clip_dataset_label(views, b) for b in range(views[0]["img"].shape[0])}
+    if len(labels) != 1:
+        return False
+    dataset = labels.pop()
+
+    def scalar(v) -> float | None:
+        """Same coercion misc.MetricLogger.update applies, so the per-dataset
+        series carry exactly the terms the blended meters do."""
+        if isinstance(v, torch.Tensor):
+            return None if v.ndim > 0 else float(v.item())
+        return (
+            float(v)
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+            else None
+        )
+
+    for name, val in (("loss", loss_value), *loss_details.items()):
+        v = scalar(val)
+        if v is not None:
+            sums[f"{dataset}/{name}"] += v
+            counts[f"{dataset}/{name}"] += 1
+    return True
 
 
 def _log_val_stats(
     metric_logger: misc.MetricLogger,
-    depth_avgs: dict[str, float],
+    per_dataset: dict[str, dict[str, float]],
+    blended: dict[str, float],
     accelerator: Accelerator,
     prefix: str,
     step: int,
 ) -> dict:
     """Whole-epoch avg/med aggregation + wandb logging, ported from
     finetune.py::test_one_epoch. Loss meters get avg (globally reduced) and
-    med (rank-local -- SmoothedValue only syncs count/total); depth metrics
-    arrive pre-reduced as plain avgs."""
+    med (rank-local -- SmoothedValue only syncs count/total); depth metrics and
+    per-dataset losses arrive pre-reduced as plain avgs.
+
+    Logged keys are "<prefix>/<dataset>/<metric>_avg" per dataset and
+    "<prefix>/all/<metric>_avg" for the dataset-blended figure, so a mixed val
+    set reads as one wandb group per dataset instead of one flat group per
+    MIXTURE (the old "val/hammer+scannet/hammer_absrel_..." layout, which put
+    every mixture in its own section and could not be compared across runs).
+    The RETURNED dict is the blended view only, with the historical flat names
+    ("absrel_metric_avg", "loss_avg") that checkpoint selection reads."""
     metric_logger.synchronize_between_processes(accelerator)
     printer.info("Averaged stats: %s", metric_logger)
 
@@ -1073,15 +1111,20 @@ def _log_val_stats(
         results[f"{name}_avg"] = meter.global_avg
         if len(meter.deque):
             results[f"{name}_med"] = meter.median
-    results.update({f"{k}_avg": v for k, v in depth_avgs.items()})
+    results.update({f"{k}_avg": v for k, v in blended.items()})
 
-    log_dict = {}
-    for name, val in results.items():
+    def loggable(val) -> bool:
         if isinstance(val, torch.Tensor) and val.ndim > 0:
-            continue
-        if isinstance(val, dict):
-            continue
-        log_dict[prefix + "/" + name] = val
+            return False
+        return not isinstance(val, dict)
+
+    log_dict = {
+        f"{prefix}/all/{name}": val for name, val in results.items() if loggable(val)
+    }
+    for dataset, metrics in per_dataset.items():
+        for name, val in metrics.items():
+            if loggable(val):
+                log_dict[f"{prefix}/{dataset}/{name}_avg"] = val
     accelerator.log(misc.aggregate_per_view_metrics(log_dict), step=step)
     return results
 
@@ -1119,6 +1162,9 @@ def val_loop(
     _set_data_epoch(data_loader, 0)
     depth_sums: dict[str, float] = defaultdict(float)
     depth_counts: dict[str, int] = defaultdict(int)
+    loss_sums: dict[str, float] = defaultdict(float)
+    loss_counts: dict[str, int] = defaultdict(int)
+    mixed_batches = 0
     glb_exported = 0
     # main process only: the val loader shards the same clip set across ranks,
     # so every rank would bank near-identical panels and only rank 0's survive
@@ -1152,6 +1198,9 @@ def val_loop(
             )
             loss_value, loss_details = result["loss"]
             metric_logger.update(loss=float(loss_value), **loss_details)
+            mixed_batches += not _accumulate_batch_loss(
+                result["views"], loss_value, loss_details, loss_sums, loss_counts
+            )
             for k, vals in _val_depth_metrics(result["views"], result["pred"]).items():
                 depth_sums[k] += float(np.sum(vals))
                 depth_counts[k] += len(vals)
@@ -1173,8 +1222,28 @@ def val_loop(
                 )
             del result, batch
 
-    depth_avgs = _reduce_depth_metrics(depth_sums, depth_counts, accelerator)
-    results = _log_val_stats(metric_logger, depth_avgs, accelerator, prefix, step)
+    if mixed_batches:
+        # only reachable with batch_size > 1 over a mixed val set; the blended
+        # loss (metric_logger) still counts these batches, the per-dataset one
+        # cannot -- say so rather than showing a silently short series
+        printer.info(
+            "%d val batches spanned >1 dataset: excluded from the per-dataset "
+            "losses (blended loss still includes them)",
+            mixed_batches,
+        )
+    depth_per_dataset, depth_blended = _reduce_metrics(
+        depth_sums, depth_counts, accelerator
+    )
+    # blended losses come from metric_logger (it counts the mixed batches too),
+    # so only the per-dataset half of this reduction is used
+    loss_per_dataset, _ = _reduce_metrics(loss_sums, loss_counts, accelerator)
+    per_dataset = {
+        ds: {**depth_per_dataset.get(ds, {}), **loss_per_dataset.get(ds, {})}
+        for ds in set(depth_per_dataset) | set(loss_per_dataset)
+    }
+    results = _log_val_stats(
+        metric_logger, per_dataset, depth_blended, accelerator, prefix, step
+    )
     _log_val_images(sampler, accelerator, prefix, epoch, step)
     model.train(True)
     return results
@@ -1250,8 +1319,12 @@ def streaming_eval(
                 )
             del result, batch
 
-    depth_avgs = _reduce_depth_metrics(depth_sums, depth_counts, accelerator)
-    return _log_val_stats(metric_logger, depth_avgs, accelerator, prefix, step)
+    # no criterion on this path, so the metric_logger holds no loss meters and
+    # the per-dataset groups carry depth metrics only
+    per_dataset, blended = _reduce_metrics(depth_sums, depth_counts, accelerator)
+    return _log_val_stats(
+        metric_logger, per_dataset, blended, accelerator, prefix, step
+    )
 
 
 def main(cfg: FinetuneDepthCfg) -> None:
