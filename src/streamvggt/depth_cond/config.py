@@ -98,6 +98,10 @@ class DepthCondCfg:
         self.norm = NormType(self.norm)
         self.heads = [HeadType(h) for h in self.heads]
         self.sim_mode = SparseSimMode(self.sim_mode)
+        if self.enabled and self.injection is InjectionType.HEAD and not self.heads:
+            raise ValueError(
+                "depth_cond.heads must be non-empty when enabled with head injection"
+            )
         if self.enabled and self.norm is NormType.FIXED and (
             not math.isfinite(self.norm_constant_m) or self.norm_constant_m <= 0
         ):
