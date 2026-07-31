@@ -2,6 +2,7 @@ import torch
 
 from streamvggt.loss.depth_train_loss import DepthTrainLoss
 from streamvggt.loss.distill_loss import DistillLoss
+from streamvggt.loss.trimmed_loss import TrimmedMAELoss
 
 
 def test_all_invalid_targets_contribute_no_depth_or_point_loss() -> None:
@@ -12,7 +13,10 @@ def test_all_invalid_targets_contribute_no_depth_or_point_loss() -> None:
         }
         for _ in range(2)
     ]
-    preds = [{"depth": torch.ones(1, 2, 2, 1), "depth_conf": torch.ones(1, 2, 2)} for _ in range(2)]
+    preds = [
+        {"depth": torch.ones(1, 2, 2, 1), "depth_conf": torch.ones(1, 2, 2)}
+        for _ in range(2)
+    ]
     _, details = DepthTrainLoss(metric=True)(gts, preds)
     assert details["Ldepth"].item() == 0.0
 
@@ -40,5 +44,22 @@ def test_all_invalid_targets_contribute_no_depth_or_point_loss() -> None:
     assert details["Lpmap"] == 0.0
 
 
+def test_trimmed_mae_uses_retained_counts_per_reduction() -> None:
+    prediction = torch.stack((torch.ones(2, 5), torch.full((2, 5), 2.0)), dim=0)
+    target = torch.zeros_like(prediction)
+    mask = torch.ones_like(prediction, dtype=torch.bool)
+
+    batch_loss = TrimmedMAELoss(trim=0.2, reduction="batch-based")(
+        prediction[:1], target[:1], mask[:1]
+    )
+    image_loss = TrimmedMAELoss(trim=0.2, reduction="image-based")(
+        prediction, target, mask
+    )
+
+    assert batch_loss.item() == 1.0
+    assert image_loss.item() == 1.5
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
+    test_trimmed_mae_uses_retained_counts_per_reduction()
