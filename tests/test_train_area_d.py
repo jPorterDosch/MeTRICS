@@ -84,6 +84,36 @@ class TrainAreaDTests(unittest.TestCase):
         self.assertEqual(results["loss_med"], 100.0)
         self.assertIn("val/all/loss_med", accel.logged)
 
+    def test_streaming_tae_does_not_bridge_invalid_frame(self) -> None:
+        original_eval, original_tae = fd.depth_evaluation, fd.tae
+        fd.depth_evaluation = lambda *args, **kwargs: (
+            {"Abs Rel": 0.0, "delta < 1.25": 1.0, "RMSE": 0.0},
+            None,
+            None,
+            None,
+        )
+        fd.tae = lambda *args: (2.0, 4.0)
+        intrinsics = torch.eye(3).reshape(1, 3, 3)
+        pose = torch.eye(4).reshape(1, 4, 4)
+        views, preds = [], []
+        for index, valid in enumerate((True, False, True), start=1):
+            views.append(
+                {
+                    "depthmap": torch.ones(1, 1, 1),
+                    "valid_mask": torch.tensor([[[valid]]]),
+                    "camera_intrinsics": intrinsics,
+                    "camera_pose": pose,
+                    "dataset": ["hammer"],
+                }
+            )
+            preds.append({"depth": torch.tensor([[[[float(index)]]]])})
+        try:
+            metrics = fd._streaming_depth_metrics(views, preds)
+        finally:
+            fd.depth_evaluation, fd.tae = original_eval, original_tae
+        self.assertNotIn("hammer/tae", metrics)
+        self.assertNotIn("hammer/tae_sq", metrics)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

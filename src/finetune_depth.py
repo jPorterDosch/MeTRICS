@@ -983,6 +983,7 @@ def _streaming_depth_metrics(
         for i in range(S):
             mask = valid[b, i] & (gt[b, i] > 0)  # [H,W]
             if not mask.any():
+                prev = None
                 continue
             res_affine, _, _, _ = depth_evaluation(
                 pred[b, i], gt[b, i], custom_mask=mask, scale_and_shift=True
