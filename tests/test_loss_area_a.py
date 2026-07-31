@@ -5,6 +5,7 @@ from streamvggt.loss.distill_loss import DistillLoss
 from streamvggt.loss.head_loss import CameraLoss, DepthOrPmapLoss
 from streamvggt.loss.trimmed_loss import TrimmedMAELoss
 from streamvggt.loss.types import LossConfig
+from streamvggt.loss.utils import normalize_prediction_robust
 
 
 def test_all_invalid_targets_contribute_no_depth_or_point_loss() -> None:
@@ -133,6 +134,14 @@ def test_camera_loss_rejects_non_finite_inputs() -> None:
             raise AssertionError(f"non-finite {name} was accepted")
 
 
+def test_robust_normalization_median_uses_valid_values_only() -> None:
+    target = torch.tensor([[[10.0, 10.0, 0.0], [0.0, 0.0, 0.0]]])
+    mask = torch.tensor([[[True, True, False], [False, False, False]]])
+    normalized, (median, _) = normalize_prediction_robust(target, mask)
+    assert median.item() == 10.0
+    assert torch.equal(normalized[mask], torch.zeros(2))
+
+
 if __name__ == "__main__":
     test_all_invalid_targets_contribute_no_depth_or_point_loss()
     test_trimmed_mae_uses_retained_counts_per_reduction()
@@ -141,3 +150,4 @@ if __name__ == "__main__":
     test_confidence_disabled_depth_does_not_require_confidence_key()
     test_temporal_loss_handles_single_frame_and_rejects_bad_config()
     test_camera_loss_rejects_non_finite_inputs()
+    test_robust_normalization_median_uses_valid_values_only()

@@ -88,12 +88,10 @@ def normalize_prediction_robust(
     valid = ssum > 0
 
     if ms is None:
-        m = torch.zeros_like(ssum)
-        s = torch.ones_like(ssum)
-
-        m[valid] = torch.median(
-            (mask[valid] * target[valid]).view(valid.sum(), -1), dim=1
-        ).values
+        m = torch.zeros_like(ssum, dtype=target.dtype)
+        s = torch.ones_like(ssum, dtype=target.dtype)
+        for index in valid.nonzero(as_tuple=True)[0]:
+            m[index] = torch.median(target[index][mask[index].bool()])
     else:
         m, s = ms
 
