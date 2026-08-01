@@ -1,7 +1,12 @@
 import ast
+from collections import defaultdict
 import importlib.util
+import os
 import pathlib
+import re
 import textwrap
+import tempfile
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -233,24 +238,73 @@ class PointCloudFinitenessTest(unittest.TestCase):
             np.array([[2, 3, 4], [6, 7, 8], [10, 11, 12]]),
         )
 
-    def test_rank_log_loop_preserves_main_cap_and_gap_stop(self):
+    def _rank_log_acc_mean(self, rank_values, num_processes):
         tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
-        loops = [
+        setup = [
             node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.For)
-            and isinstance(node.iter, ast.Call)
-            and getattr(node.iter.func, "id", None) == "range"
-            and node.iter.args
-            and ast.unparse(node.iter.args[0]) == "8"
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id in {"pattern", "regex"}
+                for target in node.targets
+            )
         ]
-        self.assertEqual(len(loops), 1)
-        missing_log_if = next(
-            node for node in loops[0].body if isinstance(node, ast.If)
+        main = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
         )
-        self.assertTrue(
-            any(isinstance(node, ast.Break) for node in missing_log_if.body)
+        aggregation = next(
+            node
+            for node in ast.walk(main)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "accelerator.is_main_process"
+            and node.body
+            and isinstance(node.body[0], ast.Assign)
+            and ast.unparse(node.body[0].targets[0]) == "to_write"
         )
+        with tempfile.TemporaryDirectory() as save_path:
+            for rank, value in rank_values.items():
+                line = (
+                    f"Idx: scene-{rank}, Acc: {value}, Comp: {value}, "
+                    f"NC1: {value}, NC2: {value} - Acc_med: {value}, "
+                    f"Compc_med: {value}, NC1c_med: {value}, NC2c_med: {value}\n"
+                )
+                pathlib.Path(save_path, f"logs_{rank}.txt").write_text(line)
+            namespace = {
+                "accelerator": SimpleNamespace(
+                    is_main_process=True, num_processes=num_processes
+                ),
+                "defaultdict": defaultdict,
+                "np": np,
+                "os": os,
+                "osp": os.path,
+                "re": re,
+                "save_path": save_path,
+            }
+            code = ast.Module(body=[*setup, *aggregation.body], type_ignores=[])
+            exec(
+                compile(
+                    ast.fix_missing_locations(code), "<rank-log-aggregation>", "exec"
+                ),
+                namespace,
+            )
+            return namespace["mean_metrics"]["acc"]
+
+    def test_rank_log_aggregation_preserves_main_cap_and_gap_stop(self):
+        cases = {
+            "more than eight ranks": (
+                {**dict.fromkeys(range(8), 1.0), 8: 100.0, 9: 100.0},
+                10,
+                1.0,
+            ),
+            "gap before a later rank": ({0: 1.0, 1: 3.0, 3: 100.0}, 4, 2.0),
+        }
+        for name, (rank_values, num_processes, expected) in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    self._rank_log_acc_mean(rank_values, num_processes), expected
+                )
 
     def test_unsupported_confidence_threshold_is_not_advertised(self):
         tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
