@@ -155,6 +155,7 @@ def depth_evaluation(
     scale_only: bool = False,
     use_gpu: bool = False,
     disp_input: bool = False,
+    reject_contradictory_modes: bool = False,
 ) -> tuple[dict[str, float], torch.Tensor]:
     """
     Evaluate the depth map using various metrics and return a depth error parity map, with an option for least squares alignment.
@@ -169,8 +170,11 @@ def depth_evaluation(
         dict: A dictionary containing the evaluation metrics.
         torch.Tensor: The depth error parity map.
     """
-    if sum((metric_scale, scale_and_shift, scale_only)) != 1:
-        raise ValueError("depth_evaluation requires exactly one alignment mode")
+    modes = (metric_scale, scale_and_shift, scale_only)
+    if not any(modes):
+        raise ValueError("depth_evaluation requires an alignment mode")
+    if reject_contradictory_modes and sum(modes) > 1:
+        raise ValueError("depth_evaluation accepts at most one alignment mode")
 
     if isinstance(predicted_depth_original, np.ndarray):
         predicted_depth_original = torch.from_numpy(predicted_depth_original)

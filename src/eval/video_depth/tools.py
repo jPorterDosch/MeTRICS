@@ -135,6 +135,7 @@ def depth_evaluation(
     use_gpu=False,
     align_with_scale=False,
     disp_input=False,
+    reject_contradictory_modes=False,
 ):
     """
     Evaluate the depth map using various metrics and return a depth error parity map, with an option for least squares alignment.
@@ -156,7 +157,7 @@ def depth_evaluation(
         metric_scale,
         align_with_scale,
     )
-    if sum(modes) > 1:
+    if reject_contradictory_modes and sum(modes) > 1:
         raise ValueError("depth_evaluation accepts at most one alignment mode")
     if isinstance(predicted_depth_original, np.ndarray):
         predicted_depth_original = torch.from_numpy(predicted_depth_original)
