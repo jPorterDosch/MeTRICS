@@ -247,6 +247,41 @@ def build_manifest(cfg: FinetuneDepthCfg) -> dict:
     return experiment_manifest(cfg, exclude=_NON_IDENTITY_FIELDS)
 
 
+def _validate_resume_identity(cfg: FinetuneDepthCfg, manifest: dict) -> None:
+    if not cfg.resume:
+        return
+    manifest_path = Path(cfg.resume).resolve().parent / "manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError(f"missing owning manifest for resume: {manifest_path}")
+    try:
+        with manifest_path.open() as handle:
+            owner = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"cannot parse owning manifest for resume: {manifest_path}: {error}"
+        ) from error
+    if not isinstance(owner, dict):
+        raise RuntimeError(
+            f"owning manifest for resume must be a JSON object: {manifest_path}"
+        )
+
+    owner = {
+        key: value
+        for key, value in owner.items()
+        if key not in ("experiment_hash", "experiment_id")
+    }
+    missing = object()
+    drift = []
+    for key in sorted(set(owner) | set(manifest)):
+        old, new = owner.get(key, missing), manifest.get(key, missing)
+        if old != new:
+            old_value = "<missing>" if old is missing else repr(old)
+            new_value = "<missing>" if new is missing else repr(new)
+            drift.append(f"{key}: owner={old_value}, current={new_value}")
+    if drift:
+        raise ValueError("resume config identity drift: " + "; ".join(drift))
+
+
 def build_train_loader(
     args: FinetuneDepthCfg,
     split: Split,
@@ -1497,6 +1532,7 @@ def main(cfg: FinetuneDepthCfg) -> None:
     ).validate()
 
     manifest = build_manifest(cfg)
+    _validate_resume_identity(cfg, manifest)
     run_hash = experiment_hash(manifest)  # full, canonical identity (record + wandb)
     run_id = experiment_id(manifest)  # short display id, single source of truth
     cfg.output_dir = resolve_output_dir(cfg, run_id)

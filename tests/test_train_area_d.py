@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -35,6 +36,59 @@ class ReturningReducer:
 
 
 class TrainAreaDTests(unittest.TestCase):
+    def _write_manifest(self, directory: str, cfg: fd.FinetuneDepthCfg) -> bytes:
+        contents = json.dumps(fd.build_manifest(cfg), sort_keys=True).encode()
+        with open(os.path.join(directory, "manifest.json"), "wb") as handle:
+            handle.write(contents)
+        return contents
+
+    def test_resume_identity_drift_raises_before_manifest_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            owner = fd.FinetuneDepthCfg(lr=1e-5)
+            original = self._write_manifest(directory, owner)
+            current = fd.FinetuneDepthCfg(
+                lr=1e-4, resume=os.path.join(directory, "checkpoint-last.pth")
+            )
+            with self.assertRaisesRegex(ValueError, r"lr.*1e-05.*0\.0001"):
+                fd.main(current)
+            with open(os.path.join(directory, "manifest.json"), "rb") as handle:
+                self.assertEqual(handle.read(), original)
+
+    def test_resume_decoration_drift_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            owner = fd.FinetuneDepthCfg(exp_group="owner")
+            self._write_manifest(directory, owner)
+            current = fd.FinetuneDepthCfg(
+                exp_group="renamed",
+                resume=os.path.join(directory, "checkpoint-last.pth"),
+            )
+            fd._validate_resume_identity(current, fd.build_manifest(current))
+
+    def test_resume_identical_identity_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            owner = fd.FinetuneDepthCfg()
+            self._write_manifest(directory, owner)
+            current = fd.FinetuneDepthCfg(
+                resume=os.path.join(directory, "checkpoint-last.pth")
+            )
+            fd._validate_resume_identity(current, fd.build_manifest(current))
+
+    def test_resume_requires_parseable_complete_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            current = fd.FinetuneDepthCfg(
+                resume=os.path.join(directory, "checkpoint-last.pth")
+            )
+            with self.assertRaisesRegex(RuntimeError, "missing owning manifest"):
+                fd._validate_resume_identity(current, fd.build_manifest(current))
+            with open(os.path.join(directory, "manifest.json"), "w") as handle:
+                handle.write("{")
+            with self.assertRaisesRegex(RuntimeError, "cannot parse owning manifest"):
+                fd._validate_resume_identity(current, fd.build_manifest(current))
+            with open(os.path.join(directory, "manifest.json"), "w") as handle:
+                json.dump({"lr": current.lr}, handle)
+            with self.assertRaisesRegex(ValueError, "batch_size"):
+                fd._validate_resume_identity(current, fd.build_manifest(current))
+
     def test_reduce_metrics_uses_returned_tensor(self) -> None:
         original = fd.gather_object
         fd.gather_object = lambda parts: [parts[0], parts[0]]
