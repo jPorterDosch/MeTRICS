@@ -828,12 +828,9 @@ patch would add merge risk to a path the project does not run.
 
 ### R1-1 and R2-4 — resume can rewrite the owning run with a different identity
 
-**Verdict: STILL DEFERRED — approve and CPU-test a synthetic owning-manifest
-matrix with `epochs=10,lr=1e-5` against current `(20,1e-5)`, `(10,1e-4)`, and
-`(5,1e-5)`, specifying which cases may continue and whether an accepted extension
-retains the owner's manifest/hash/id or records continuation metadata; the guard
-must reject every non-sanctioned case before manifest write.** Raised independently by R1 (wrong-numbers lens) and R2
-(contracts-and-runtime lens); these are the same defect.
+**Verdict: UPHELD — FIXED in 9d898ae.** Raised independently by R1
+(wrong-numbers lens) and R2 (contracts-and-runtime lens); these are the same
+defect.
 
 Failure scenario: changing `lr` from `1e-5` to `1e-4` changes the experiment ID
 from `2e492d2cafc125e9` to `a193e68d312f1943`, but both resume configurations
@@ -842,17 +839,13 @@ before loading the checkpoint, so a structurally compatible but result-affecting
 configuration can replace the owner's recorded identity and continue updating its
 checkpoints.
 
-Reason deferred: the mechanism is real, but `resolve_output_dir` explicitly promises
-that increasing `epochs` extends the owning run, while `epochs` is frozen as an
-identity field. Rejecting every manifest difference would silently revoke that
-documented continuation behavior; allowing selected differences requires an explicit
-lineage policy that this review does not define. No `FinetuneDepthCfg` field or
-`_NON_IDENTITY_FIELDS` entry may change. This joint finding is explicitly deferred
-because a safe patch would need an explanatory policy essay rather than a
-self-evident minimal correction. With a decided policy, the fix site is editable
-`src/finetune_depth.py`, before the manifest write: read the owning `manifest.json`,
-compare the permitted identity fields, fail fast on prohibited drift, and use the
-owner's stored experiment ID for a sanctioned continuation.
+Implemented policy: only fields in the existing `_NON_IDENTITY_FIELDS` contract
+may differ on resume. The owning manifest is read and every identity-relevant field
+is compared before any manifest write or checkpoint load; drift names both values
+and fails fast. Missing, malformed, or partial owning manifests also fail closed.
+Because `epochs` is hashed and determines the cosine LR schedule length, extending
+a run by changing its epoch count is intentionally rejected, consistent with the
+epoch-boundary resume restriction in `a88f5f8`.
 
 ### R1-2 and R2-5 — mid-epoch resume replays the epoch from batch zero
 
