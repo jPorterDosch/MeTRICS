@@ -246,10 +246,13 @@ class TrainAreaDTests(unittest.TestCase):
         self.assertEqual(kwargs["name"], "resume-test_stable-id")
 
     def test_checkpoint_commit_fsyncs_then_replaces(self) -> None:
+        events = []
+
         class Accel:
             is_main_process = True
 
             def wait_for_everyone(self) -> None:
+                events.append("wait")
                 self.waited = True
 
         accel = Accel()
@@ -261,15 +264,22 @@ class TrainAreaDTests(unittest.TestCase):
             with open(temporary, "wb") as handle:
                 handle.write(b"new")
             original_fsync = fd.os.fsync
-            calls = []
-            fd.os.fsync = lambda descriptor: calls.append(descriptor)
+            original_replace = fd.os.replace
+            fd.os.fsync = lambda descriptor: events.append("fsync")
+
+            def recording_replace(source: str, destination: str) -> None:
+                events.append("replace")
+                original_replace(source, destination)
+
+            fd.os.replace = recording_replace
             try:
                 fd._commit_checkpoint(directory, "last", ".last.tmp-1", accel)
             finally:
                 fd.os.fsync = original_fsync
+                fd.os.replace = original_replace
             with open(target, "rb") as handle:
                 self.assertEqual(handle.read(), b"new")
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(events, ["fsync", "replace", "wait"])
             self.assertTrue(accel.waited)
 
     def test_fresh_run_atomically_claims_output_directory(self) -> None:
