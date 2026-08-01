@@ -21,7 +21,7 @@ Numerical parity outranks independent correctness here: a correction that change
 | 8 | `6fd172d`: rank-log collection | **REVERT — APPLIED** | More than eight ranks or a missing log followed by a present log changes the collected metric population. Baseline configurations cannot be proven to exclude both cases. Restored `main`'s eight-rank cap and stop-at-gap behavior; dynamic collection may re-land separately behind a default-off CLI/config option. |
 | 9 | `294039c`: contradictory alignment modes rejected | **GATE** | Preserve `main` precedence by default and expose strict rejection through one default-off keyword on each existing evaluator function. Decided, not yet applied in this round. |
 | 10 | `08e3951`: per-sample point-cloud normalization | **KEEP** | The shipped launcher constructs `Regr3D_t_ScaleShiftInv(..., norm_mode=False, gt_scale=True)`, so it never calls the changed normalization function in any shipped baseline configuration. External callers that enable normalization can observe different results. |
-| 11 | `cf9a799`: `delta < 1.` boundary | **REVERT** | Bit-exact pixels change the nonstandard `delta < 1.` field. Restore strict comparison from `main`. The inclusive boundary may re-land separately behind a default-off metric option; not re-landed in this round. |
+| 11 | `cf9a799`: `delta < 1.` boundary | **REVERT — APPLIED** | Bit-exact pixels change the nonstandard `delta < 1.` field. Restored strict comparison from `main`. The inclusive boundary may re-land separately behind a default-off metric option; not re-landed in this round. |
 
 Decisions marked REVERT or GATE but not represented by a later commit in this branch remain decided but not yet applied.
 

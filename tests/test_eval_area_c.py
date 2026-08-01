@@ -83,7 +83,7 @@ class VideoAffineRouteTest(unittest.TestCase):
 
 
 class ExactDeltaThresholdTest(unittest.TestCase):
-    def test_perfect_depth_satisfies_delta_one(self):
+    def test_perfect_depth_preserves_main_strict_delta_one(self):
         depth = np.ones((1, 2), dtype=np.float32)
         cases = [
             (
@@ -100,7 +100,7 @@ class ExactDeltaThresholdTest(unittest.TestCase):
                 metrics, *_ = module.depth_evaluation(
                     depth, depth, max_depth=None, **alignment
                 )
-                self.assertEqual(metrics["delta < 1."], 1.0)
+                self.assertEqual(metrics["delta < 1."], 0.0)
 
 
 class ReprojectionOcclusionTest(unittest.TestCase):
