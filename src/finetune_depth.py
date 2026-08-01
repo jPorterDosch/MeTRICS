@@ -389,6 +389,8 @@ def build_model(
     if load_pretrained and args.pretrained and not args.resume:
         print(f"Loading pretrained StreamVGGT: {args.pretrained}")
         print(model.load_pretrained(args.pretrained))
+    elif load_pretrained and args.resume:
+        model.initialize_encoder_cache(args.resume)
     n = model.apply_lora_adapters()
     stats = model.freeze_for_finetune()
     model.to(device)

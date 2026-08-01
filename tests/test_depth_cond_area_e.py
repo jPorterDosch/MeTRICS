@@ -7,9 +7,17 @@ from unittest import mock
 
 import torch
 
+import finetune_depth as fd
 from streamvggt.depth_cond import cache as cache_module
 from streamvggt.depth_cond.cache import EncoderFeatureCache
-from streamvggt.depth_cond.config import DepthCondCfg, InjectionType, LoRACfg, NormType
+from streamvggt.depth_cond.config import (
+    DepthCondCfg,
+    EncoderCacheCfg,
+    InjectionType,
+    LoRACfg,
+    MetricCfg,
+    NormType,
+)
 from streamvggt.depth_cond.model import MetricStreamVGGT
 
 
@@ -92,6 +100,40 @@ def test_cache_namespace_separates_encoder_checkpoints() -> None:
         assert checkpoint_a._path("frame") != checkpoint_b._path("frame")
 
 
+def test_build_model_resume_constructs_usable_encoder_cache() -> None:
+    with tempfile.TemporaryDirectory() as cache_dir:
+        mcfg = MetricCfg(encoder_cache=EncoderCacheCfg(enabled=True, dir=cache_dir))
+        args = fd.FinetuneDepthCfg(resume="synthetic-resume.pth")
+
+        def initialize_without_backbone(model, cfg) -> None:
+            torch.nn.Module.__init__(model)
+            model.cfg = cfg
+            model._encoder_cache_dir = cfg.encoder_cache.dir
+            model.cache = None
+
+        stats = {
+            "total_params": 0,
+            "trainable_params": 0,
+            "trainable_pct": 0.0,
+            "base_attention_frozen": True,
+        }
+        with (
+            mock.patch.object(
+                MetricStreamVGGT, "__init__", initialize_without_backbone
+            ),
+            mock.patch.object(MetricStreamVGGT, "apply_lora_adapters", return_value=0),
+            mock.patch.object(
+                MetricStreamVGGT, "freeze_for_finetune", return_value=stats
+            ),
+            mock.patch("builtins.open", mock.mock_open(read_data=b"resume-state")),
+        ):
+            model, _ = fd.build_model(args, mcfg, torch.device("cpu"))
+
+        assert isinstance(model.cache, EncoderFeatureCache)
+        model.cache.save("frame", torch.tensor([2.0]))
+        assert torch.equal(model.cache.load("frame"), torch.tensor([2.0]))
+
+
 def test_supplied_cache_keys_must_match_batch_cardinality() -> None:
     model = MetricStreamVGGT.__new__(MetricStreamVGGT)
     torch.nn.Module.__init__(model)
@@ -154,6 +196,7 @@ if __name__ == "__main__":
     test_concurrent_cache_writers_use_private_temp_files()
     test_cache_contract_discloses_fp32_autocast_difference()
     test_cache_namespace_separates_encoder_checkpoints()
+    test_build_model_resume_constructs_usable_encoder_cache()
     test_supplied_cache_keys_must_match_batch_cardinality()
     test_fixed_normalization_requires_finite_positive_constant()
     test_enabled_lora_requires_finite_positive_alpha()

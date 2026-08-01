@@ -92,6 +92,17 @@ class MetricStreamVGGT(nn.Module):
     # ------------------------------------------------------------------
     # setup
     # ------------------------------------------------------------------
+    def initialize_encoder_cache(self, checkpoint_path: str) -> None:
+        if self._encoder_cache_dir is None:
+            return
+        checkpoint_hash = hashlib.sha256()
+        with open(checkpoint_path, "rb") as checkpoint:
+            for chunk in iter(lambda: checkpoint.read(1024 * 1024), b""):
+                checkpoint_hash.update(chunk)
+        self.cache = EncoderFeatureCache(
+            self._encoder_cache_dir, checkpoint_hash.hexdigest()
+        )
+
     def load_pretrained(self, path: str, map_location: str | torch.device = "cpu"):
         """Load the pretrained StreamVGGT checkpoint (raw state_dict) into the
         base model. Must run BEFORE apply_lora_adapters (wrapping renames keys)."""
@@ -107,14 +118,7 @@ class MetricStreamVGGT(nn.Module):
         ):
             sd = sd["model"]
         result = self.model.load_state_dict(sd, strict=True)
-        if self._encoder_cache_dir is not None:
-            checkpoint_hash = hashlib.sha256()
-            with open(path, "rb") as checkpoint:
-                for chunk in iter(lambda: checkpoint.read(1024 * 1024), b""):
-                    checkpoint_hash.update(chunk)
-            self.cache = EncoderFeatureCache(
-                self._encoder_cache_dir, checkpoint_hash.hexdigest()
-            )
+        self.initialize_encoder_cache(path)
         return result
 
     def apply_lora_adapters(self) -> int:
