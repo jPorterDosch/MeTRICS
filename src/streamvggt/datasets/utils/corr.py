@@ -97,7 +97,12 @@ def extract_correspondences_from_pts3d(
         # should be really rare => when there are not enough negatives
         # in that case, break nneg and add a few more positives ?
         n_positives = target_n_corres - n_negatives
-        assert n_positives <= len(pos1)
+        assert n_positives <= len(pos1), (
+            f"Not enough negatives: requested {nneg} negatives but only "
+            f"{n_negatives} are available; reaching target_n_corres="
+            f"{target_n_corres} would require {n_positives} positives but only "
+            f"{len(pos1)} exist."
+        )
 
     assert n_positives <= len(pos1)
     assert n_positives <= len(pos2)

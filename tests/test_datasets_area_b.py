@@ -140,6 +140,26 @@ def test_positive_shortage_fails_before_changing_ratio() -> None:
         )
 
 
+def test_negative_shortage_assertion_explains_positive_overflow() -> None:
+    points = np.array([[[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [2.0, 0.0, 1.0]]])
+    view = {
+        "pts3d": points,
+        "camera_intrinsics": np.eye(3),
+        "camera_pose": np.eye(4),
+        "valid_mask": np.array([[True, True, False]]),
+    }
+    try:
+        extract_correspondences_from_pts3d(
+            view, view, 4, np.random.default_rng(0), nneg=2
+        )
+    except AssertionError as error:
+        message = str(error)
+        assert "requested 2 negatives but only 1" in message
+        assert "require 3 positives but only 2 exist" in message
+    else:
+        raise AssertionError("negative shortage was accepted")
+
+
 def test_invalid_depth_pixels_are_not_positive_correspondences() -> None:
     view = {
         "pts3d": np.zeros((2, 2, 3)),
@@ -232,6 +252,7 @@ if __name__ == "__main__":
     test_metric_loaders_reject_nonmetric_label()
     test_nneg_is_an_absolute_count()
     test_positive_shortage_fails_before_changing_ratio()
+    test_negative_shortage_assertion_explains_positive_overflow()
     test_invalid_depth_pixels_are_not_positive_correspondences()
     test_resize_intrinsics_use_floored_raster_scales()
     test_variable_length_sampler_rejects_fewer_than_four_views()
