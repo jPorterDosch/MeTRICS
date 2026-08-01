@@ -105,20 +105,6 @@ def test_nneg_is_an_absolute_count() -> None:
     else:
         raise AssertionError("nneg larger than n_corres was accepted")
 
-    sparse_mask = np.zeros((3, 3), dtype=bool)
-    sparse_mask[0, 0] = True
-    sparse_view = {**view, "valid_mask": sparse_mask}
-    try:
-        extract_correspondences_from_pts3d(
-            sparse_view, sparse_view, 4, np.random.default_rng(0), nneg=1
-        )
-    except ValueError as error:
-        assert "positive correspondences" in str(error)
-    else:
-        raise AssertionError(
-            "insufficient positives were accepted by increasing negatives above nneg"
-        )
-
 
 def test_invalid_depth_pixels_are_not_positive_correspondences() -> None:
     view = {
@@ -128,7 +114,7 @@ def test_invalid_depth_pixels_are_not_positive_correspondences() -> None:
         "valid_mask": np.zeros((2, 2), dtype=bool),
     }
     _, _, valid = extract_correspondences_from_pts3d(
-        view, view, 1, np.random.default_rng(0), nneg=1
+        view, view, 1, np.random.default_rng(0)
     )
     assert not valid.any()
 

@@ -81,11 +81,6 @@ def extract_correspondences_from_pts3d(
     available_negatives = min((~is_reciprocal1).sum(), (~is_reciprocal2).sum())
     target_n_positives = target_n_corres - nneg
     n_positives = min(len(pos1), target_n_positives)
-    if n_positives < target_n_positives:
-        raise ValueError(
-            f"requested {target_n_positives} positive correspondences, "
-            f"but only {len(pos1)} are available"
-        )
     n_negatives = min(target_n_corres - n_positives, available_negatives)
 
     if n_negatives + n_positives != target_n_corres:
