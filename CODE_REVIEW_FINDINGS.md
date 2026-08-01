@@ -1545,6 +1545,7 @@ dataset, training, evaluation, export, or real wandb run was used.
 
 #### MR-1 — cache-enabled checkpoint resume cannot reach its first batch
 
+- **Status:** FIXED in `423360f`
 - **Commit:** `7e49385`
 - **Location:** `src/streamvggt/depth_cond/model.py:72-75,95-117,242-245`;
   `src/finetune_depth.py:388-391,532-535`;
@@ -1625,21 +1626,21 @@ Yes, in their final state:
 
 #### 2. Is resume coherent end to end?
 
-Not for cache-enabled runs, due to MR-1. For cache-disabled runs, the identity
-guard composes correctly with epoch-boundary resume: `main` reads and compares
-the owning manifest before output resolution, manifest write, wandb init, or
-checkpoint load; all identity fields, including `epochs`, must match. The
-generic loader then restores `start_epoch` and `start_step`, and the nonzero-step
-guard prevents replay before optimizer steps begin. Stable wandb IDs reconnect
-same-group resumes and avoid cross-group collisions.
+Yes, including cache-enabled runs after `423360f`. `build_model` now constructs
+the fingerprinted cache namespace from the resume checkpoint before the generic
+loader restores its tensors. For cache-disabled runs, the identity guard
+continues to compose correctly with epoch-boundary resume: `main` reads and
+compares the owning manifest before output resolution, manifest write, wandb
+init, or checkpoint load; all identity fields, including `epochs`, must match.
+The generic loader then restores `start_epoch` and `start_step`, and the
+nonzero-step guard prevents replay before optimizer steps begin. Stable wandb
+IDs reconnect same-group resumes and avoid cross-group collisions.
 
-There are two ordering qualifications. First, an identity-valid mid-epoch
-checkpoint passes the early guard and fails only after the side effects listed
-in MR-2. Second, a cache-enabled epoch-boundary checkpoint passes both identity
-and step guards but fails later on its first forward because generic checkpoint
-loading never initializes the new cache namespace. Identity checking itself is
-before manifest write as claimed; checkpoint-derived step and cache state are
-necessarily discovered later in the current design.
+There is one ordering qualification: an identity-valid mid-epoch checkpoint
+passes the early guard and fails only after the side effects listed in MR-2.
+Identity checking itself is before manifest write as claimed;
+checkpoint-derived step state is necessarily discovered later in the current
+design.
 
 #### 3. Is the Area E cache coherent after the three tail commits?
 
@@ -1650,9 +1651,10 @@ expected/received counts; absent keys retain the documented live fallback; and
 the documentation now truthfully says cached fp32 features may differ from an
 autocast live path. The deliberate all-entry invalidation is implemented.
 
-The end-to-end cache contract is nevertheless not coherent because the same
-namespace setup is absent on resume (MR-1). The tests cover the three local
-properties but not their composition with checkpoint restoration.
+The end-to-end cache contract is coherent after `423360f`: one helper owns the
+fingerprint construction for both fresh pretrained loading and resume, and the
+Area E CPU regression exercises `build_model` with `args.resume` set and proves
+the resulting cache can save and load an entry.
 
 #### 4. Frozen contracts
 
@@ -1671,7 +1673,7 @@ post-`159144c` diff changes those expressions.
 
 There are six tracked regression modules in the final tree, not seven
 (`git ls-files 'tests/test*.py'` lists Areas A-E plus the self-audit module). I
-ran all six directly with the required interpreter/environment, covering 56
+ran all six directly with the required interpreter/environment, covering 57
 test functions, and used bytecode-free `compileall` as the seventh CPU gate; all
 exited zero. The Area C unittest module reported 13 passing tests and Area D 15.
 
@@ -1693,6 +1695,8 @@ The seam-heavy coverage did not materially improve elsewhere:
 - `test_depth_cond_area_e.py` uses a fake tensor and patched save/replace for the
   concurrency case, constructs `MetricStreamVGGT` via `__new__` with a mock cache
   for cardinality, and asserts cache-contract wording from the module docstring.
+  Its MR-1 regression additionally calls the real `build_model` resume branch
+  and real cache constructor while replacing only heavyweight backbone setup.
 - `test_train_area_d.py` uses fake reducers and monkeypatched metric functions;
   these are useful local contract probes but do not establish live multi-rank
   behavior. Its mid-step and wandb tests invoke helpers rather than the ordered
@@ -1700,10 +1704,10 @@ The seam-heavy coverage did not materially improve elsewhere:
 - The Area A scale-loss arity regression remains a call-seam probe rather than
   an end-to-end composed criterion run.
 
-Those tests would silently pass semantic regressions that preserve the inspected
-AST/string shape or helper outputs while breaking caller composition. MR-1 is the
-concrete example: every current suite passes while the live resume/cache
-composition is broken.
+Those tests can still silently pass semantic regressions that preserve the
+inspected AST/string shape or helper outputs while breaking caller composition.
+MR-1 was the concrete example before `423360f`; its new regression now covers
+that live resume/cache composition.
 
 #### 6. User-carried edits are separable
 
@@ -1717,11 +1721,9 @@ or any other carried file.
 
 #### 7. What must a human decide before merging?
 
-**Defect, must fix and re-review:** establish the encoder-cache namespace on the
-generic checkpoint-resume path, with a fingerprint whose ownership and
-invalidation behavior are explicit, and add a behavioral resume-plus-cache
-regression. The final-round constraint correctly forbids making that code change
-in this report commit.
+**Resolved defect:** `423360f` establishes the encoder-cache namespace on the
+generic checkpoint-resume path through the same fingerprint helper used by
+fresh loading and adds a behavioral resume-plus-cache regression.
 
 **Open decisions; merge safety is not otherwise blocked by them:** decide whether
 an allowed `exp_group` rename should fork or reconnect wandb history, and whether
@@ -1736,12 +1738,13 @@ diff inspection, caller tracing with numbered source, blob/hash comparisons,
 `git diff --check`, all six tracked CPU regression scripts under
 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`, and bytecode-free compilation with
 `/users/jdosch/miniconda3/envs/StreamVGGT/bin/python`. No bytecode was created.
-The worktree's pre-existing untracked user files were not touched. No code fix was
-made, no GPU test ran, no real wandb run was created, and nothing was pushed.
+The worktree's pre-existing untracked user files were not touched. MR-1 was
+fixed in `423360f`; no GPU test ran, no real wandb run was created, and nothing
+was pushed.
 
 ### Merge verdict
 
-**DO NOT MERGE** — `7e49385` makes every cache-enabled checkpoint resume fail on
-its first forward because the new fingerprinted cache namespace is initialized
-only by the fresh-pretrained path. This supported end-to-end path needs a code fix
-and review before the branch is merge-ready.
+**MERGE-READY** — MR-1 is resolved in `423360f`; cache-enabled resumes now
+construct and use their fingerprinted namespace. The seven evidence-blocked
+deferred findings, two dead branches, and vendored timing API fork remain known
+but are not merge-blocking.
