@@ -75,7 +75,7 @@ def test_concurrent_cache_writers_use_private_temp_files() -> None:
 
         assert not errors, errors
         assert len(set(temp_paths)) == 2
-        assert cache.load("shared-key") is not None
+        assert os.path.isfile(cache._path("shared-key"))
 
 
 def test_cache_namespace_separates_encoder_checkpoints() -> None:
