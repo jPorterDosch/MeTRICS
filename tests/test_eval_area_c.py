@@ -19,9 +19,9 @@ def load_module(name, relative_path):
 
 
 class CustomMaskAlignmentTest(unittest.TestCase):
-    def test_custom_mask_excludes_affine_fit_outlier(self):
+    def test_custom_mask_preserves_main_affine_fit_population(self):
         pred = np.array([[1.0, 2.0, 100.0]], dtype=np.float32)
-        gt = np.array([[2.0, 4.0, 1.0]], dtype=np.float32)
+        gt = np.array([[2.0, 4.0, 6.0]], dtype=np.float32)
         custom_mask = np.array([[True, True, False]])
         cases = [
             (
@@ -35,13 +35,10 @@ class CustomMaskAlignmentTest(unittest.TestCase):
         for name, path, alignment in cases:
             with self.subTest(name=name):
                 module = load_module(f"area_c_{name}", path)
-                metrics, _, aligned, _ = module.depth_evaluation(
+                metrics, *_ = module.depth_evaluation(
                     pred, gt, max_depth=None, custom_mask=custom_mask, **alignment
                 )
-                self.assertAlmostEqual(metrics["Abs Rel"], 0.0, places=6)
-                np.testing.assert_allclose(
-                    aligned.cpu().numpy()[custom_mask], np.array([2.0, 4.0]), atol=1e-5
-                )
+                self.assertAlmostEqual(metrics["Abs Rel"], 0.368635982, places=6)
 
 
 class VideoAffineRouteTest(unittest.TestCase):

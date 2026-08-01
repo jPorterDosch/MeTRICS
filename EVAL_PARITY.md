@@ -10,7 +10,7 @@ Numerical parity outranks independent correctness here: a correction that change
 
 | Rank | Commit and hunk | Verdict | Parity reason and disposition |
 | --- | --- | --- | --- |
-| 1 | `db38142`: custom-mask pixels excluded from affine fitting in the three depth evaluators | **REVERT** | Nontrivial custom masks change affine metrics. Restore `main` arithmetic. The defect may re-land separately as an explicit default-off keyword selecting mask-aware fitting; not re-landed in this round. |
+| 1 | `db38142`: custom-mask pixels excluded from affine fitting in the three depth evaluators | **REVERT — APPLIED** | Nontrivial custom masks change affine metrics. Restored `main` fitting and scoring arithmetic. The defect may re-land separately as an explicit default-off keyword selecting mask-aware fitting; not re-landed in this round. |
 | 2 | `9b39ce6`: video `scale&shift` routes changed from Adam L1 to exact least squares | **REVERT** | This changes both the fitted objective and reported depth metrics. Restore the `main` Adam-L1 route. Exact L2 may re-land separately as an explicit alignment choice that defaults to Adam L1; not re-landed in this round. |
 | 3 | `ebe25d7`: multi-rank global reduction and blended-loss reporting | **REVERT** | Unequal multi-rank shards change every validation metric. Restore `main`. A corrected reducer may re-land separately behind a default-off config flag; not re-landed in this round. |
 | 4 | `6005530`: z-buffered temporal reprojection | **REVERT** | Colliding reprojections change TAE, a DepthAnyVideo-attributed metric. Restore last-write behavior from `main`. Z-buffering may re-land separately behind a default-off keyword; not re-landed in this round. |

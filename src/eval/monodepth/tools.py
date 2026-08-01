@@ -185,12 +185,6 @@ def depth_evaluation(
         )
     else:
         mask = ground_truth_depth_original > 0
-    if custom_mask is not None:
-        if custom_mask.shape != ground_truth_depth_original.shape:
-            raise ValueError(
-                f"{custom_mask.shape=}, expected: {ground_truth_depth_original.shape}"
-            )
-        mask = mask & custom_mask.to(mask.device)
     predicted_depth = predicted_depth_original[mask]
     ground_truth_depth = ground_truth_depth_original[mask]
 
@@ -300,6 +294,12 @@ def depth_evaluation(
     if post_clip_max is not None:
         predicted_depth = torch.clamp(predicted_depth, max=post_clip_max)
 
+    if custom_mask is not None:
+        assert custom_mask.shape == ground_truth_depth_original.shape
+        mask_within_mask = custom_mask.cpu()[mask]
+        predicted_depth = predicted_depth[mask_within_mask]
+        ground_truth_depth = ground_truth_depth[mask_within_mask]
+
     # Calculate the metrics
     abs_rel = torch.mean(
         torch.abs(predicted_depth - ground_truth_depth) / ground_truth_depth
@@ -372,7 +372,7 @@ def depth_evaluation(
         mask, ground_truth_depth_original, gt_depth_map_full
     )
 
-    num_valid_pixels = torch.sum(mask).item()
+    num_valid_pixels = predicted_depth.numel()
     if num_valid_pixels == 0:
         (
             abs_rel,
