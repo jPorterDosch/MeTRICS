@@ -76,7 +76,7 @@ NUM_VIEWS="${NUM_VIEWS:-32}"  # frames per visualized clip
 # but the numbers are only meaningful on an otherwise idle GPU, which a shared
 # node is not. Off by default.
 TIMING_ARGS=()
-[ -n "${TIMING:-}" ] && TIMING_ARGS=(--timing)
+[ "${TIMING:-}" = 1 ] && TIMING_ARGS=(--timing)
 
 # SPOT windows: start 0 is the most STATIC segment of seq 0 and start 998 the
 # most dynamic (measured by frame-to-frame RGB change over all 1279 frames).
