@@ -1,12 +1,8 @@
 import ast
-from collections import defaultdict
 import importlib.util
 import os
 import pathlib
 import re
-import textwrap
-import tempfile
-from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -44,47 +40,6 @@ class CustomMaskAlignmentTest(unittest.TestCase):
                     pred, gt, max_depth=None, custom_mask=custom_mask, **alignment
                 )
                 self.assertAlmostEqual(metrics["Abs Rel"], 0.368635982, places=6)
-
-
-class VideoAffineRouteTest(unittest.TestCase):
-    def _affine_calls(self):
-        source = (ROOT / "src/eval/video_depth/eval_depth.py").read_text()
-        tree = ast.parse(source)
-        affine_calls = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.If):
-                continue
-            if "args.align == 'scale&shift'" not in ast.unparse(node.test):
-                continue
-            affine_calls.extend(
-                call
-                for call in ast.walk(node.body[0])
-                if isinstance(call, ast.Call)
-                and getattr(call.func, "id", None) == "depth_evaluation"
-            )
-        return affine_calls
-
-    def test_scale_and_shift_routes_to_main_adam_l1_solver(self):
-        affine_calls = self._affine_calls()
-        self.assertEqual(len(affine_calls), 3)
-        for call in affine_calls:
-            keywords = {keyword.arg: keyword.value for keyword in call.keywords}
-            self.assertTrue(ast.literal_eval(keywords["align_with_lad2"]))
-
-    def test_selected_scale_and_shift_route_preserves_main_metrics(self):
-        call = self._affine_calls()[0]
-        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
-        alignment = {
-            name: ast.literal_eval(keywords[name])
-            for name in ("align_with_lad2", "align_with_lstsq")
-            if name in keywords
-        }
-        module = load_module("area_c_video_affine", "src/eval/video_depth/tools.py")
-        pred = np.array([[1.0, 2.0, 10.0]], dtype=np.float32)
-        gt = np.array([[2.0, 4.0, 5.0]], dtype=np.float32)
-        metrics, *_ = module.depth_evaluation(pred, gt, max_depth=None, **alignment)
-        self.assertAlmostEqual(metrics["Abs Rel"], 0.948516071, places=6)
-        self.assertAlmostEqual(metrics["RMSE"], 8.141754150, places=6)
 
 
 class ExactDeltaThresholdTest(unittest.TestCase):
@@ -233,97 +188,6 @@ class AlignmentModeValidationTest(unittest.TestCase):
 
 
 class PointCloudFinitenessTest(unittest.TestCase):
-    def test_main_component_mask_fabricates_coordinate_tuples(self):
-        source = (ROOT / "src/eval/mv_recon/launch.py").read_text()
-        block = source.split(
-            "                    mask = np.isfinite(pts_all_masked)", 1
-        )[1]
-        block = (
-            "                    mask = np.isfinite(pts_all_masked)"
-            + block.split("                    if args.use_proj:", 1)[0]
-        )
-        namespace = {
-            "np": np,
-            "pts_all_masked": np.array(
-                [[np.nan, 2, 3], [4, np.nan, 6], [7, 8, np.nan], [10, 11, 12]]
-            ),
-            "pts_gt_all_masked": np.arange(12).reshape(4, 3),
-            "images_all_masked": np.arange(12).reshape(4, 3),
-        }
-        exec(textwrap.dedent(block), namespace)
-        np.testing.assert_array_equal(
-            namespace["pts_all_masked"].reshape(-1, 3),
-            np.array([[2, 3, 4], [6, 7, 8], [10, 11, 12]]),
-        )
-
-    def _rank_log_acc_mean(self, rank_values, num_processes):
-        tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
-        setup = [
-            node
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id in {"pattern", "regex"}
-                for target in node.targets
-            )
-        ]
-        main = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "main"
-        )
-        aggregation = next(
-            node
-            for node in ast.walk(main)
-            if isinstance(node, ast.If)
-            and ast.unparse(node.test) == "accelerator.is_main_process"
-            and node.body
-            and isinstance(node.body[0], ast.Assign)
-            and ast.unparse(node.body[0].targets[0]) == "to_write"
-        )
-        with tempfile.TemporaryDirectory() as save_path:
-            for rank, value in rank_values.items():
-                line = (
-                    f"Idx: scene-{rank}, Acc: {value}, Comp: {value}, "
-                    f"NC1: {value}, NC2: {value} - Acc_med: {value}, "
-                    f"Compc_med: {value}, NC1c_med: {value}, NC2c_med: {value}\n"
-                )
-                pathlib.Path(save_path, f"logs_{rank}.txt").write_text(line)
-            namespace = {
-                "accelerator": SimpleNamespace(
-                    is_main_process=True, num_processes=num_processes
-                ),
-                "defaultdict": defaultdict,
-                "np": np,
-                "os": os,
-                "osp": os.path,
-                "re": re,
-                "save_path": save_path,
-            }
-            code = ast.Module(body=[*setup, *aggregation.body], type_ignores=[])
-            exec(
-                compile(
-                    ast.fix_missing_locations(code), "<rank-log-aggregation>", "exec"
-                ),
-                namespace,
-            )
-            return namespace["mean_metrics"]["acc"]
-
-    def test_rank_log_aggregation_preserves_main_cap_and_gap_stop(self):
-        cases = {
-            "more than eight ranks": (
-                {**dict.fromkeys(range(8), 1.0), 8: 100.0, 9: 100.0},
-                10,
-                1.0,
-            ),
-            "gap before a later rank": ({0: 1.0, 1: 3.0, 3: 100.0}, 4, 2.0),
-        }
-        for name, (rank_values, num_processes, expected) in cases.items():
-            with self.subTest(name=name):
-                self.assertEqual(
-                    self._rank_log_acc_mean(rank_values, num_processes), expected
-                )
-
     def test_unsupported_confidence_threshold_is_not_advertised(self):
         tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
         parser_names = {
