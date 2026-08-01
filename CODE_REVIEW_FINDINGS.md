@@ -1525,3 +1525,223 @@ scale-loss arity probe remains a seam test. Ruff reports five pre-existing unuse
 imports, all in the user-owned vendored `src/dust3r/inference.py`; they were not
 modified. After formatting this round's non-user changes, format check reports
 four pre-existing user-owned files; they were not auto-fixed.
+
+## Merge-readiness review
+
+### Scope and method
+
+This final pass reviewed the complete tracked diff from
+`489d28fe8eb02e49bf2124beb56b5bf1903fd724` through `0391285`, with a second,
+deeper pass over the ten post-self-audit commits and the final state of every
+Area D resume and Area E cache call site. I inspected all 44 changed tracked
+files outside the explicitly excluded `viz/` and `logs/` trees, read every
+tracked regression module, traced the relevant callers, and ran the permitted
+CPU gates. I did not re-litigate the seven evidence-blocked deferred findings,
+the two settled dead branches, the implementation-notes TODOs, baseline lint
+debt, or the declined epoch-extension feature. No GPU, real checkpoint, real
+dataset, training, evaluation, export, or real wandb run was used.
+
+### Ranked findings
+
+#### MR-1 — cache-enabled checkpoint resume cannot reach its first batch
+
+- **Commit:** `7e49385`
+- **Location:** `src/streamvggt/depth_cond/model.py:72-75,95-117,242-245`;
+  `src/finetune_depth.py:388-391,532-535`;
+  `src/croco/utils/misc.py:470-475`
+- **Severity:** critical
+- **Merge-blocking:** yes
+- **Failure scenario:** enable `encoder_cache`, train and save an ordinary
+  epoch-boundary checkpoint, then resume it with an identity-identical config.
+  `build_model` deliberately does not call `MetricStreamVGGT.load_pretrained`
+  when `args.resume` is set. The generic resume loader restores model tensors
+  through `load_state_dict`, which does not create the cache namespace. The
+  wrapper is therefore left with `_encoder_cache_dir` set and `cache is None`.
+  Its first forward calls `_cached_patch_tokens` and raises `RuntimeError:
+  encoder cache requires load_pretrained before its first use`. This is an
+  ordinary supported combination of two advertised features, not a malformed
+  checkpoint or an evidence-blocked distributed edge case.
+
+The checkpoint fingerprint itself distinguishes fresh-run cache entries as
+claimed, but the fingerprint is not persisted or reconstructed by the resume
+path. `tests/test_depth_cond_area_e.py` tests two cache objects with supplied
+fingerprints and a partially constructed wrapper; it never builds and restores
+the live resume state, so all current suites silently pass this regression.
+
+#### MR-2 — rejected mid-epoch resume has already mutated external run state
+
+- **Commit:** `a88f5f8`
+- **Location:** `src/finetune_depth.py:477-497,506-535`
+- **Severity:** low
+- **Merge-blocking:** no (independently of MR-1)
+- **Failure scenario:** resume an otherwise identity-valid checkpoint whose
+  stored `step` is nonzero. Before that value is loaded and rejected, the live
+  path rewrites `manifest.json`, initializes/resumes the wandb tracker, snapshots
+  code, and constructs loaders and the model. It then loads the checkpoint and
+  raises. No training or numerical replay occurs, so `a88f5f8` fixes its stated
+  wrong-numbers defect, but the “fail fast” wording is only true relative to the
+  training loop, not relative to local/remote side effects. The test calls
+  `_validate_resume_step` directly and cannot detect the ordering.
+
+### Questions requiring policy, not unreviewed fixes
+
+- `b2e7d71` intentionally derives the wandb ID from both `exp_group` and the
+  run ID, while `_NON_IDENTITY_FIELDS` excludes `exp_group` and
+  `test_resume_decoration_drift_is_allowed` explicitly permits changing it on
+  resume. Consequently an allowed group rename forks wandb history instead of
+  reconnecting it. The code is deterministic and collision-safe; a human must
+  decide whether decoration drift should deliberately fork tracker lineage or
+  whether “preserve history across resume” should dominate. This is an open
+  reporting-policy decision, not a demonstrated numerical defect.
+
+### Answers to the required review questions
+
+#### 1. Did the seven self-audit amendments fix their claims?
+
+Yes, in their final state:
+
+1. `af60361` re-evaluates the already-produced predictions one clip at a time
+   before accumulating loss, so unequal valid-pixel support no longer turns the
+   intended equal-clip mean into a pixel-weighted mean. The strengthened test
+   uses the real `DepthOrPmapLoss` and distinguishes batch loss `3.0` from the
+   required three-clip result `4/3`.
+2. `3419f1f` restores the active SPOT `geom` array to `--rotate cw
+   --landscape-crop --crop-anchor top`; timing remains independently optional.
+3. `091aeb5` guards finite/nonzero scale-only predictions only when masked
+   support is nonempty in all three evaluator copies. Empty support therefore
+   reaches the established `valid_pixels == 0` record.
+4. `5eab304` selects CUDA timing from `frames[0]["img"].device`, records on that
+   device's current stream, and synchronizes that device in both model paths.
+   The implementation fixes the device-selection claim; its regression is only
+   a source-string seam and does not execute CUDA events.
+5. `a549585` centralizes timing formatting and handles length one before taking
+   any empty steady-state median/min/max. Both visualizers call the helper.
+6. `9a0ec86` limits `LossConfig` temporal-domain validation to the consuming
+   `DEPTH_TRAIN` recipe and validates `temp_grad_scales`, `diff_depth_th`, trim,
+   and reduction at the direct consuming constructors.
+7. `441a2fb` makes both public reduction branches, `GradientLoss` and
+   `TrimmedMAELoss`, reject values outside `batch-based`/`image-based` rather
+   than falling through to image-based behavior.
+
+#### 2. Is resume coherent end to end?
+
+Not for cache-enabled runs, due to MR-1. For cache-disabled runs, the identity
+guard composes correctly with epoch-boundary resume: `main` reads and compares
+the owning manifest before output resolution, manifest write, wandb init, or
+checkpoint load; all identity fields, including `epochs`, must match. The
+generic loader then restores `start_epoch` and `start_step`, and the nonzero-step
+guard prevents replay before optimizer steps begin. Stable wandb IDs reconnect
+same-group resumes and avoid cross-group collisions.
+
+There are two ordering qualifications. First, an identity-valid mid-epoch
+checkpoint passes the early guard and fails only after the side effects listed
+in MR-2. Second, a cache-enabled epoch-boundary checkpoint passes both identity
+and step guards but fails later on its first forward because generic checkpoint
+loading never initializes the new cache namespace. Identity checking itself is
+before manifest write as claimed; checkpoint-derived step and cache state are
+necessarily discovered later in the current design.
+
+#### 3. Is the Area E cache coherent after the three tail commits?
+
+Fresh runs are coherent: strict pretrained loading completes before the
+schema-versioned SHA-256 namespace is created; changing checkpoint bytes makes
+all old entries miss; supplied key cardinality mismatches raise with view and
+expected/received counts; absent keys retain the documented live fallback; and
+the documentation now truthfully says cached fp32 features may differ from an
+autocast live path. The deliberate all-entry invalidation is implemented.
+
+The end-to-end cache contract is nevertheless not coherent because the same
+namespace setup is absent on resume (MR-1). The tests cover the three local
+properties but not their composition with checkpoint restoration.
+
+#### 4. Frozen contracts
+
+They are unchanged from the pre-tail audited state `159144c`. I extracted the
+entire `FinetuneDepthCfg` block through `_NON_IDENTITY_FIELDS` from both revisions
+and SHA-256 hashed it; both hashes were
+`b2c7392863890666c6b6f0836c8cd18afd33fd68455fa50e141ce5a4572a0679`.
+The blacklist remains exactly the same 13 fields. I also diffed the live logging
+sites: `_log_val_stats` still emits
+`<prefix>/<dataset>/<metric>_avg` and `<prefix>/all/<metric>_avg`, returns the
+flat blended `{metric}_avg` names used as `absrel_metric_avg` and `loss_avg`, and
+`_log_val_images` still emits `<prefix>/samples` (therefore `val/samples`). No
+post-`159144c` diff changes those expressions.
+
+#### 5. Test-suite quality
+
+There are six tracked regression modules in the final tree, not seven
+(`git ls-files 'tests/test*.py'` lists Areas A-E plus the self-audit module). I
+ran all six directly with the required interpreter/environment, covering 56
+test functions, and used bytecode-free `compileall` as the seventh CPU gate; all
+exited zero. The Area C unittest module reported 13 passing tests and Area D 15.
+
+Reverting the behavioral numerical fixes would be caught by Area A's synthetic
+tensor tests, Area B's real pure-helper tests, the behavioral evaluator tests,
+Area D's returned-reducer/global-median/real per-clip-criterion probes, and the
+Area E config/cache file-operation probes. In particular, the formerly weak
+scalar-only clip-loss test did get better: it now exercises the real masked loss
+denominator. Reverting `091aeb5`, `a549585`, `9a0ec86`, or `441a2fb` is directly
+observable behavior and fails its test.
+
+The seam-heavy coverage did not materially improve elsewhere:
+
+- `test_eval_area_c.py` AST-parses the video alignment call, log-rank loop,
+  parser definitions, and CO3D guard; it also `exec`s a source substring for
+  point filtering.
+- `test_review_diff_audit.py` reads shell/model source strings for SPOT geometry
+  and input-device timing. Only the one-frame formatter assertion is behavioral.
+- `test_depth_cond_area_e.py` uses a fake tensor and patched save/replace for the
+  concurrency case, constructs `MetricStreamVGGT` via `__new__` with a mock cache
+  for cardinality, and asserts cache-contract wording from the module docstring.
+- `test_train_area_d.py` uses fake reducers and monkeypatched metric functions;
+  these are useful local contract probes but do not establish live multi-rank
+  behavior. Its mid-step and wandb tests invoke helpers rather than the ordered
+  resume path.
+- The Area A scale-loss arity regression remains a call-seam probe rather than
+  an end-to-end composed criterion run.
+
+Those tests would silently pass semantic regressions that preserve the inspected
+AST/string shape or helper outputs while breaking caller composition. MR-1 is the
+concrete example: every current suite passes while the live resume/cache
+composition is broken.
+
+#### 6. User-carried edits are separable
+
+Yes. `196d8e2` carries exactly six modified files. For each correction I hashed
+the correction commit's parent version and the corresponding `196d8e2` blob:
+`3419f1f^:experiments/eval_all.sh`, both `a549585^` visualizer blobs, and both
+`5eab304^` model blobs match their `196d8e2` counterparts byte-for-byte. Thus
+dropping any one of `3419f1f`, `a549585`, or `5eab304` restores the user's carried
+version of only that correction area; it does not drop the user's timing feature
+or any other carried file.
+
+#### 7. What must a human decide before merging?
+
+**Defect, must fix and re-review:** establish the encoder-cache namespace on the
+generic checkpoint-resume path, with a fingerprint whose ownership and
+invalidation behavior are explicit, and add a behavioral resume-plus-cache
+regression. The final-round constraint correctly forbids making that code change
+in this report commit.
+
+**Open decisions; merge safety is not otherwise blocked by them:** decide whether
+an allowed `exp_group` rename should fork or reconnect wandb history, and whether
+unsupported mid-epoch artifacts must be rejected before manifest/tracker/code
+snapshot side effects. These choices affect lineage and failure hygiene, not
+computed model values.
+
+### Evidence and residual risk
+
+Commands included the complete commit/diff inventory, per-commit and final-state
+diff inspection, caller tracing with numbered source, blob/hash comparisons,
+`git diff --check`, all six tracked CPU regression scripts under
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`, and bytecode-free compilation with
+`/users/jdosch/miniconda3/envs/StreamVGGT/bin/python`. No bytecode was created.
+The worktree's pre-existing untracked user files were not touched. No code fix was
+made, no GPU test ran, no real wandb run was created, and nothing was pushed.
+
+### Merge verdict
+
+**DO NOT MERGE** — `7e49385` makes every cache-enabled checkpoint resume fail on
+its first forward because the new fingerprinted cache namespace is initialized
+only by the fresh-pretrained path. This supported end-to-end path needs a code fix
+and review before the branch is merge-ready.
