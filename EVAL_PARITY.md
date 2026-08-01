@@ -1,8 +1,10 @@
 # Evaluator parity review
 
-This is the Cycle 1, Phase 2 parity review for PR #26 (`review/codebase-sweep`). The protected and reachable parity baseline is the evaluator as it stood on `main` at `489d28f`, because that is the code with which numbers in this repository could actually have been produced.
+This is the Cycle 1, Phase 2 parity review for PR #26 (`review/codebase-sweep`). The operative parity baseline is the repository's import state, recovered offline from the object database: repository root `bff5684` (`Initial commit`, 2025-07-14); the imported evaluator files described below; and earliest `experiments/eval_all.sh` at `27d7a33` (the file was added twice).
 
-This review did **not** compare the vendored files with upstream bytes. The sandbox has no network, all attempted StreamVGGT, CUT3R, MonST3R, DUSt3R, and DepthAnyVideo clones failed with `Could not resolve host: github.com`, and no upstream checkout is available. Whether the six `main` blobs match true upstream is still open. The settling operation is to byte-compare those six blobs from `main` with the matching StreamVGGT revision and its CUT3R/DUSt3R ancestors once those sources are reachable.
+`src/eval/monodepth/tools.py`, `src/eval/video_depth/tools.py`, `src/eval/video_depth/eval_depth.py`, `src/eval/mv_recon/criterion.py`, `src/eval/mv_recon/launch.py`, and `src/eval/pose_evaluation/test_co3d.py` were added by `49656da` (`Add files via upload`). `src/eval/temporal_consistency/metrics.py` was added by `de3ae67` (`Added validation loop and evaluation metric suite`). A repetition hazard: `git log --diff-filter=A --follow` misattributes the latter file to `49656da:src/eval/video_depth/tools.py` through `C057` copy detection; `49656da:src/eval/temporal_consistency/metrics.py` does not exist.
+
+This review still cannot establish that those import blobs are verbatim upstream bytes: that requires network access unavailable in the sandbox. The import state is therefore the operative baseline, not proven upstream. `src/eval/mv_recon/criterion.py` is byte-identical to its import blob (0 insertions/0 deletions), as are most other `src/eval/` files, which bounds rather than eliminates this provenance risk.
 
 Numerical parity outranks independent correctness here: a correction that changes a baseline-comparable number must either be reverted or explicitly opt-in with behavior from `main` as the default.
 
@@ -25,9 +27,23 @@ Numerical parity outranks independent correctness here: a correction that change
 
 Decisions marked REVERT or GATE but not represented by a later commit in this branch remain decided but not yet applied.
 
+## Cycle 1 actions checked against import state
+
+All seven Cycle 1 revert or gate actions restore import behavior; none restores only `main`. `main` had not drifted in any reverted or gated region.
+
+| Action | Evidence at import |
+| --- | --- |
+| `9e8b27a` revert `db38142` custom-mask affine fit | Both imported `tools.py` blobs (`49656da`, lines 178-291) and imported temporal metrics (`de3ae67`, lines 231-323) fit on the ordinary valid-pixel population and apply `custom_mask` only after alignment, for scoring. |
+| `79ae439` revert `9b39ce6` affine route | Imported `eval_depth.py` selects `align_with_lad2=True` at all three `scale&shift` call sites (`49656da`, lines 124-130, 232-238, 332-338). |
+| `15e8c4d` revert `6005530` z-buffering | Imported `point2depth` uses zero initialization plus advanced-index last-write assignment (`de3ae67`, lines 55-57). |
+| `e6b93ef` revert `5ba721c` tuple finiteness | Imported `mv_recon/launch.py:327-331` filters component-wise, computes but does not use `mask_gt`, and indexes GT with the predicted component mask. |
+| `a2c1e5a` revert `6fd172d` rank-log collection | Imported `mv_recon/launch.py:454-458` loops over `range(8)` and breaks at the first missing log. |
+| `9a4798d` revert `cf9a799` delta-one boundary | All three imported evaluators compute strict `max_ratio < 1.0`. |
+| `366e005` gate `294039c` | Imported evaluators resolve multiple true modes by ordered `if`/`elif` precedence and never reject; the default `reject_contradictory_modes=False` preserves exactly that. |
+
 ## Known defects restored for parity
 
-The six applied reverts intentionally put these defects from `main` back into the evaluator. They remain live unless a future default-off correction is selected explicitly:
+The six applied reverts intentionally put these defects from the import state back into the evaluator. They remain live unless a future default-off correction is selected explicitly:
 
 - Custom masks are applied only after affine fitting, so excluded pixels can still influence the fitted alignment.
 - Video `scale&shift` uses the historical Adam L1 route rather than the exact affine solver.
@@ -38,12 +54,16 @@ The six applied reverts intentionally put these defects from `main` back into th
 
 ## Retained or gated divergences
 
-The behavior columns below compare `main` with the PR; “upstream behavior” means the reachable parity baseline on `main`, not a claim about true upstream source bytes.
+The behavior columns below compare import state with the PR; “upstream behavior” means the operative import baseline, not a claim about true upstream source bytes.
 
-| File and current line | Upstream behavior (`main` parity baseline) | Our behavior | Metrics affected | Datasets/configs affected | Is any existing reported number stale? |
+| File and current line | Upstream behavior (import parity baseline) | Our behavior | Metrics affected | Datasets/configs affected | Is any existing reported number stale? |
 | --- | --- | --- | --- | --- | --- |
 | `src/eval/monodepth/tools.py:160`; `src/eval/video_depth/tools.py:160`; `src/eval/temporal_consistency/metrics.py:176` | Contradictory alignment modes are resolved by existing precedence and produce a score. | **GATED:** default preserves precedence; `reject_contradictory_modes=True` raises. | All depth metrics returned by the selected alignment path. | Only calls enabling more than one alignment mode; no shipped dataset is proven to exclude this misconfiguration. | Only results made with the opt-in strict mode would be unavailable rather than numerically stale; default results remain comparable. |
 | `src/eval/mv_recon/criterion.py:178` | Normalization aggregates the batch when normalization is enabled. | Per-sample valid counts produce per-sample normalization factors. | Point-cloud reconstruction metrics for normalized calls. | External callers with normalization enabled. The shipped launcher fixes `norm_mode=False`, so shipped baseline configurations cannot reach it. | No shipped-launcher reported number is stale; external normalized results must record evaluator version. |
+| `src/eval/temporal_consistency/metrics.py` (affine solver), introduced by pre-PR `6a1f5ee` | `absolute_value_scaling2`: a 1000-step Adam L1 fit. | `closed_form_scale_and_shift`: closed-form L2 normal equations. This PR did not introduce or remediate the divergence. | Affine AbsRel and RMSE; these are different estimators, not a bug fix. Probe (`scale&shift`, pred `[1,2,10]`, gt `[2,4,5]`): import AbsRel `0.9485160708`, RMSE `8.1417541504`; current AbsRel `0.2208903879`, RMSE `0.7167277336`. | Every validation-loop affine metric. | Any temporal-consistency affine number produced by the validation loop is not import-parity-comparable. |
+| `src/eval/temporal_consistency/metrics.py` (pixel grid), introduced by pre-PR `6a1f5ee` | Half-pixel centers: `linspace(0.5, h-0.5, h)`. | Integer `arange` via `_pixel_grid`. This PR did not introduce or remediate the divergence. | Reprojection and therefore TAE. | Every non-identity temporal reprojection. A non-degenerate probe with realistic non-identity `K`, yaw plus translation at 8x10, 31x47, and 64x96 found lower TAE for the integer grid at every transformed resolution (64x96: integer `0.000299339` versus half-pixel `0.000554264`); both were exactly `0` under identity. The change is defensible and the code comment's rationale holds: this is a parity divergence, not a defect. | Any temporal-consistency TAE number produced by the validation loop is not import-parity-comparable. |
+
+These two metric-arithmetic divergences are live, predate this PR, lie outside every Cycle 1 region, and were hidden by comparison only to `main`. They do not alter any Cycle 1 verdict.
 
 ## Undecidable divergence
 
