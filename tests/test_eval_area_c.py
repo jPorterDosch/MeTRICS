@@ -201,17 +201,35 @@ class AlignmentModeValidationTest(unittest.TestCase):
                 self.assertEqual(abs_rel, 0.5)
 
     def test_contradictory_modes_can_be_rejected_explicitly(self):
-        module = load_module("area_c_modes_strict", "src/eval/monodepth/tools.py")
         pred = np.ones((1, 2), dtype=np.float32)
-        with self.assertRaisesRegex(ValueError, "one alignment mode"):
-            module.depth_evaluation(
-                pred,
-                pred * 2,
-                max_depth=None,
-                metric_scale=True,
-                align_with_lstsq=True,
-                reject_contradictory_modes=True,
-            )
+        cases = [
+            (
+                "temporal",
+                "src/eval/temporal_consistency/metrics.py",
+                {"metric_scale": True, "scale_and_shift": True},
+            ),
+            (
+                "monodepth",
+                "src/eval/monodepth/tools.py",
+                {"metric_scale": True, "align_with_lstsq": True},
+            ),
+            (
+                "video",
+                "src/eval/video_depth/tools.py",
+                {"metric_scale": True, "align_with_lstsq": True},
+            ),
+        ]
+        for name, path, alignment in cases:
+            with self.subTest(name=name):
+                module = load_module(f"area_c_modes_strict_{name}", path)
+                with self.assertRaisesRegex(ValueError, "one alignment mode"):
+                    module.depth_evaluation(
+                        pred,
+                        pred * 2,
+                        max_depth=None,
+                        reject_contradictory_modes=True,
+                        **alignment,
+                    )
 
 
 class PointCloudFinitenessTest(unittest.TestCase):
