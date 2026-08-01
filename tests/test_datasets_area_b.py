@@ -106,6 +106,40 @@ def test_nneg_is_an_absolute_count() -> None:
         raise AssertionError("nneg larger than n_corres was accepted")
 
 
+def test_positive_shortage_fails_before_changing_ratio() -> None:
+    y, x = np.mgrid[:3, :3]
+    points = np.stack((x, y, np.ones_like(x)), axis=-1).astype(float)
+    points.reshape(-1, 3)[5:] = [0.0, 0.0, 1.0]
+    view = {
+        "pts3d": points,
+        "camera_intrinsics": np.eye(3),
+        "camera_pose": np.eye(4),
+        "valid_mask": np.ones((3, 3), dtype=bool),
+    }
+    _, _, adequate_valid = extract_correspondences_from_pts3d(
+        view, view, 4, np.random.default_rng(0), nneg=1
+    )
+    assert len(adequate_valid) == 4
+    assert adequate_valid.sum() == 3
+
+    sparse_mask = np.zeros((3, 3), dtype=bool)
+    sparse_mask[0, 0] = True
+    sparse_view = {**view, "valid_mask": sparse_mask}
+    try:
+        extract_correspondences_from_pts3d(
+            sparse_view, sparse_view, 4, np.random.default_rng(0), nneg=1
+        )
+    except ValueError as error:
+        message = str(error)
+        assert "requested 3 positive correspondences" in message
+        assert "only 1" in message
+        assert "Lower n_corres, raise nneg, or drop the pair" in message
+    else:
+        raise AssertionError(
+            "positive shortage silently changed the configured negative ratio"
+        )
+
+
 def test_invalid_depth_pixels_are_not_positive_correspondences() -> None:
     view = {
         "pts3d": np.zeros((2, 2, 3)),
@@ -113,10 +147,13 @@ def test_invalid_depth_pixels_are_not_positive_correspondences() -> None:
         "camera_pose": np.eye(4),
         "valid_mask": np.zeros((2, 2), dtype=bool),
     }
-    _, _, valid = extract_correspondences_from_pts3d(
-        view, view, 1, np.random.default_rng(0)
-    )
-    assert not valid.any()
+    try:
+        extract_correspondences_from_pts3d(view, view, 1, np.random.default_rng(0))
+    except ValueError as error:
+        assert "requested 1 positive correspondences" in str(error)
+        assert "only 0" in str(error)
+    else:
+        raise AssertionError("all-invalid pixels were returned as correspondences")
 
 
 def test_resize_intrinsics_use_floored_raster_scales() -> None:
@@ -194,6 +231,7 @@ if __name__ == "__main__":
     test_irregular_stride_respects_effective_gap_range()
     test_metric_loaders_reject_nonmetric_label()
     test_nneg_is_an_absolute_count()
+    test_positive_shortage_fails_before_changing_ratio()
     test_invalid_depth_pixels_are_not_positive_correspondences()
     test_resize_intrinsics_use_floored_raster_scales()
     test_variable_length_sampler_rejects_fewer_than_four_views()
