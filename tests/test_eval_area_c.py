@@ -191,7 +191,7 @@ class AlignmentModeValidationTest(unittest.TestCase):
 
 
 class PointCloudFinitenessTest(unittest.TestCase):
-    def test_joint_point_mask_preserves_tuples_and_colors(self):
+    def test_main_component_mask_fabricates_coordinate_tuples(self):
         source = (ROOT / "src/eval/mv_recon/launch.py").read_text()
         block = source.split(
             "                    mask = np.isfinite(pts_all_masked)", 1
@@ -202,14 +202,17 @@ class PointCloudFinitenessTest(unittest.TestCase):
         )
         namespace = {
             "np": np,
-            "pts_all_masked": np.array([[0.0, 0.0, 1.0], [1.0, np.nan, 2.0]]),
-            "pts_gt_all_masked": np.array([[0.0, 0.0, 1.0], [1.0, 1.0, 2.0]]),
-            "images_all_masked": np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+            "pts_all_masked": np.array(
+                [[np.nan, 2, 3], [4, np.nan, 6], [7, 8, np.nan], [10, 11, 12]]
+            ),
+            "pts_gt_all_masked": np.arange(12).reshape(4, 3),
+            "images_all_masked": np.arange(12).reshape(4, 3),
         }
         exec(textwrap.dedent(block), namespace)
-        self.assertEqual(namespace["pts_all_masked"].shape, (1, 3))
-        self.assertEqual(namespace["pts_gt_all_masked"].shape, (1, 3))
-        self.assertEqual(namespace["images_all_masked"].shape, (1, 3))
+        np.testing.assert_array_equal(
+            namespace["pts_all_masked"].reshape(-1, 3),
+            np.array([[2, 3, 4], [6, 7, 8], [10, 11, 12]]),
+        )
 
     def test_rank_log_loop_uses_world_size_and_skips_gaps(self):
         tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
