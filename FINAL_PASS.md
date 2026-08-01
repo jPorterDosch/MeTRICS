@@ -2,7 +2,11 @@
 
 **Verdict: NOT MERGE-READY.**
 
-The prior MERGE-READY verdict is overturned because two of the PR's three promised report deliverables are absent from the tracked branch, a tracked test still references one of those absent reports, and the required ruff check/format gate is red. This round made no source or test changes.
+The prior MERGE-READY verdict is overturned because two of the PR's three promised report deliverables are absent from the tracked branch, a tracked test still references one of those absent reports, and the PR introduces two failures in the required ruff format gate: `src/streamvggt/depth_cond/model.py` and `src/visualize_depth.py`. All 25 ruff rule violations and the other five format failures are pre-existing on `main` and are not part of the verdict's basis. This round made no source or test changes.
+
+**Corrected verdict: NOT MERGE-READY.**
+
+Lint provenance was classified in a later round than the rest of this gate; this correction records that later evidence without re-running or changing the other checks.
 
 ## Manager questions
 
@@ -111,14 +115,15 @@ I therefore ran the required direct equivalents with `PYTHONPATH=src` and `/user
 | `tests/test_depth_cond_area_e.py` | completed | 0 |
 | `tests/test_review_diff_audit.py` | completed | 0 |
 
-Ruff was run over all 42 Python files named by `git diff --name-only main...HEAD -- '*.py'`:
+Ruff was run over all 42 Python files named by `git diff --name-only main...HEAD -- '*.py'`. For provenance, the same commands were run against the 36 paths that exist at `main`, materialized with `git archive main` under repository-local `.round9_main_lint/`; the other six paths are new tests and had no HEAD finding. The scratch-path prefix is the only path difference in the main commands.
 
 ```text
-.../python -m ruff check <42 touched Python files>
+mapfile -t round9_py_files < <(git diff --name-only main...HEAD -- '*.py')
+/users/jdosch/miniconda3/envs/StreamVGGT/bin/python -m ruff check "${round9_py_files[@]}"
 Found 25 errors.
-exit 1
+HEAD ruff check exit 1
 
-.../python -m ruff format --check <42 touched Python files>
+/users/jdosch/miniconda3/envs/StreamVGGT/bin/python -m ruff format --check "${round9_py_files[@]}"
 Would reformat: src/dust3r/inference.py
 Would reformat: src/eval/mv_recon/criterion.py
 Would reformat: src/eval/mv_recon/launch.py
@@ -127,10 +132,65 @@ Would reformat: src/streamvggt/depth_cond/model.py
 Would reformat: src/streamvggt/models/streamvggt.py
 Would reformat: src/visualize_depth.py
 7 files would be reformatted, 35 files already formatted
-exit 1
+HEAD ruff format --check exit 1
+
+/users/jdosch/miniconda3/envs/StreamVGGT/bin/python -m ruff check "${round9_main_args[@]}"
+Found 25 errors.
+main ruff check exit 1
+
+/users/jdosch/miniconda3/envs/StreamVGGT/bin/python -m ruff format --check "${round9_main_args[@]}"
+Would reformat: .round9_main_lint/src/dust3r/inference.py
+Would reformat: .round9_main_lint/src/eval/mv_recon/criterion.py
+Would reformat: .round9_main_lint/src/eval/mv_recon/launch.py
+Would reformat: .round9_main_lint/src/eval/pose_evaluation/test_co3d.py
+Would reformat: .round9_main_lint/src/streamvggt/models/streamvggt.py
+5 files would be reformatted, 31 files already formatted
+main ruff format --check exit 1
 ```
 
-Exactly 14 of the 25 check violations are the manager-identified pre-existing violations in `src/eval/mv_recon/launch.py`; they were deliberately left untouched and are not presented as new. The other 11 reported violations are in `src/dust3r/inference.py`, `src/eval/mv_recon/criterion.py`, and `src/eval/pose_evaluation/test_co3d.py`; this round enumerated them but did not complete per-violation provenance classification. No lint or formatting fix was authorized in this round.
+All 25 check violations reproduce on `main`; the PR introduces no new ruff rule violation. Their per-finding provenance is:
+
+| Rule | HEAD file:line | Provenance |
+| --- | --- | --- |
+| F401 | `src/dust3r/inference.py:1` | pre-existing |
+| F401 | `src/dust3r/inference.py:3` (`to_cpu`) | pre-existing |
+| F401 | `src/dust3r/inference.py:3` (`collate_with_cat`) | pre-existing |
+| F401 | `src/dust3r/inference.py:6` | pre-existing |
+| F401 | `src/dust3r/inference.py:9` | pre-existing |
+| F401 | `src/eval/mv_recon/criterion.py:5` | pre-existing |
+| F401 | `src/eval/mv_recon/criterion.py:6` | pre-existing |
+| F821 | `src/eval/mv_recon/criterion.py:132` | pre-existing |
+| F841 | `src/eval/mv_recon/criterion.py:136` | pre-existing |
+| F401 | `src/eval/mv_recon/launch.py:5` | pre-existing |
+| F401 | `src/eval/mv_recon/launch.py:11` | pre-existing |
+| F401 | `src/eval/mv_recon/launch.py:15` | pre-existing |
+| F401 | `src/eval/mv_recon/launch.py:17` | pre-existing |
+| F401 | `src/eval/mv_recon/launch.py:18` | pre-existing |
+| F401 | `src/eval/mv_recon/launch.py:97` | pre-existing |
+| F841 | `src/eval/mv_recon/launch.py:127` | pre-existing |
+| F841 | `src/eval/mv_recon/launch.py:128` | pre-existing |
+| E741 | `src/eval/mv_recon/launch.py:254` | pre-existing |
+| F841 | `src/eval/mv_recon/launch.py:302` | pre-existing |
+| F541 | `src/eval/mv_recon/launch.py:432` | pre-existing |
+| E402 | `src/eval/mv_recon/launch.py:464` | pre-existing |
+| F811 | `src/eval/mv_recon/launch.py:464` | pre-existing |
+| E402 | `src/eval/mv_recon/launch.py:465` | pre-existing |
+| F401 | `src/eval/pose_evaluation/test_co3d.py:10` | pre-existing |
+| F401 | `src/eval/pose_evaluation/test_co3d.py:15` | pre-existing |
+
+Format provenance is:
+
+| Rule | File | Provenance |
+| --- | --- | --- |
+| format | `src/dust3r/inference.py` | pre-existing |
+| format | `src/eval/mv_recon/criterion.py` | pre-existing |
+| format | `src/eval/mv_recon/launch.py` | pre-existing |
+| format | `src/eval/pose_evaluation/test_co3d.py` | pre-existing |
+| format | `src/streamvggt/depth_cond/model.py` | introduced-by-this-PR |
+| format | `src/streamvggt/models/streamvggt.py` | pre-existing |
+| format | `src/visualize_depth.py` | introduced-by-this-PR |
+
+No lint or formatting violation was fixed. The 25 rule violations and five pre-existing format failures are debt for the user to waive or address separately; the two introduced format failures remain part of this PR's NOT MERGE-READY basis.
 
 ## Uncovered
 
@@ -139,7 +199,7 @@ Exactly 14 of the 25 check violations are the manager-identified pre-existing vi
 - No training, evaluation, export, `experiments/eval_all.sh`, `srun`, `sbatch`, `tests/val_images_wandb_check.py`, or actual CUDA timing/cache arithmetic was run.
 - The import blobs were not verified as verbatim upstream; that requires network access.
 - Real evaluator numerical parity, DDP loader sharding, checkpoint failure injection, stale-result re-scoring, and every deferred experiment below remain unperformed.
-- The 11 non-`mv_recon/launch.py` ruff errors and seven format failures were not fully classified as pre-existing versus introduced.
+- Ruff provenance classification was performed after the rest of this gate: all 25 rule violations and five format failures are pre-existing, while the format failures in `src/streamvggt/depth_cond/model.py` and `src/visualize_depth.py` were introduced by this PR.
 
 ## User decisions owed
 
@@ -158,6 +218,6 @@ These are merger/product decisions, not omitted agent work:
 11. **VS-1 (`src/visualize_spot.py:431`):** decide behavior when `dvals` is empty; current min/max/median crashes. This is a live pre-existing defect left unfixed, not a disproved defect.
 12. Decide whether to track `CODE_REVIEW_FINDINGS.md` and `IMPLEMENTATION_NOTES.md`. Until tracked, they are not PR deliverables and disappear on merge.
 13. Decide whether to remove or replace the tracked `tests/stage6_temporal.py:5` reference to absent `IMPLEMENTATION_NOTES.md`.
-14. Decide whether the non-launch ruff failures and seven format failures must be cleared or explicitly waived after provenance classification.
+14. Decide whether to waive or separately address the 25 pre-existing ruff rule violations and five pre-existing format failures; they are not debt introduced by this PR.
 
 No GPU test ran, no source/test fix was made, and nothing was pushed.
