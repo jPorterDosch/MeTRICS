@@ -129,13 +129,14 @@ def main(args):
                     ],
                     axis=0,
                 )
+                # align_with_lad2 selects the historical scale-and-shift route.
                 if args.align == "scale&shift":
                     depth_results, error_map, depth_predict, depth_gt = (
                         depth_evaluation(
                             pr_depth,
                             gt_depth,
                             max_depth=70,
-                            align_with_lstsq=True,
+                            align_with_lad2=True,
                             use_gpu=True,
                             post_clip_max=70,
                         )
@@ -241,13 +242,14 @@ def main(args):
                     ],
                     axis=0,
                 )
+                # align_with_lad2 selects the historical scale-and-shift route.
                 if args.align == "scale&shift":
                     depth_results, error_map, depth_predict, depth_gt = (
                         depth_evaluation(
                             pr_depth,
                             gt_depth,
                             max_depth=70,
-                            align_with_lstsq=True,
+                            align_with_lad2=True,
                             use_gpu=True,
                         )
                     )
@@ -342,13 +344,14 @@ def main(args):
                     axis=0,
                 )
 
+                # align_with_lad2 selects the historical scale-and-shift route.
                 if args.align == "scale&shift":
                     depth_results, error_map, depth_predict, depth_gt = (
                         depth_evaluation(
                             pr_depth,
                             gt_depth,
                             max_depth=None,
-                            align_with_lstsq=True,
+                            align_with_lad2=True,
                             use_gpu=True,
                         )
                     )

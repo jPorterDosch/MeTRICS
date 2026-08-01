@@ -42,7 +42,7 @@ class CustomMaskAlignmentTest(unittest.TestCase):
 
 
 class VideoAffineRouteTest(unittest.TestCase):
-    def test_scale_and_shift_routes_to_exact_affine_solver(self):
+    def _affine_calls(self):
         source = (ROOT / "src/eval/video_depth/eval_depth.py").read_text()
         tree = ast.parse(source)
         affine_calls = []
@@ -57,10 +57,29 @@ class VideoAffineRouteTest(unittest.TestCase):
                 if isinstance(call, ast.Call)
                 and getattr(call.func, "id", None) == "depth_evaluation"
             )
+        return affine_calls
+
+    def test_scale_and_shift_routes_to_main_adam_l1_solver(self):
+        affine_calls = self._affine_calls()
         self.assertEqual(len(affine_calls), 3)
         for call in affine_calls:
             keywords = {keyword.arg: keyword.value for keyword in call.keywords}
-            self.assertTrue(ast.literal_eval(keywords["align_with_lstsq"]))
+            self.assertTrue(ast.literal_eval(keywords["align_with_lad2"]))
+
+    def test_selected_scale_and_shift_route_preserves_main_metrics(self):
+        call = self._affine_calls()[0]
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        alignment = {
+            name: ast.literal_eval(keywords[name])
+            for name in ("align_with_lad2", "align_with_lstsq")
+            if name in keywords
+        }
+        module = load_module("area_c_video_affine", "src/eval/video_depth/tools.py")
+        pred = np.array([[1.0, 2.0, 10.0]], dtype=np.float32)
+        gt = np.array([[2.0, 4.0, 5.0]], dtype=np.float32)
+        metrics, *_ = module.depth_evaluation(pred, gt, max_depth=None, **alignment)
+        self.assertAlmostEqual(metrics["Abs Rel"], 0.948516071, places=6)
+        self.assertAlmostEqual(metrics["RMSE"], 8.141754150, places=6)
 
 
 class ExactDeltaThresholdTest(unittest.TestCase):
