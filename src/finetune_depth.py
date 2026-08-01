@@ -410,6 +410,8 @@ def build_model(
 def _commit_checkpoint(
     output_dir: str, fname: str, temporary_fname: str, accelerator: Accelerator
 ) -> None:
+    # Rank-0 fsync/replace can raise before the barrier, leaving peer ranks
+    # blocked there until timeout. Deferred: SA R2-3 (CODE_REVIEW_FINDINGS.md).
     if accelerator.is_main_process:
         temporary = os.path.join(output_dir, f"checkpoint-{temporary_fname}.pth")
         target = os.path.join(output_dir, f"checkpoint-{fname}.pth")
@@ -519,6 +521,9 @@ def run(
             if args.batch_size == 1
             else build_val_loaders(args, accelerator, batch_size=1)
         )
+    # Validated pre-shard: accelerator.prepare can still yield len 0 per rank
+    # (one batch, two ranks, drop_last), so an epoch can run zero optimizer
+    # steps. Deferred: SA R2-1 (CODE_REVIEW_FINDINGS.md).
     _validate_loader_lengths(data_loader_train, data_loaders_val, data_loaders_stream)
 
     printer.info("Loading depth-conditioned model")
