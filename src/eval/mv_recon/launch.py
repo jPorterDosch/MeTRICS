@@ -423,9 +423,9 @@ def main(args):
             if accelerator.is_main_process:
                 to_write = ""
                 # Copy the error log from each process to the main error log
-                for i in range(accelerator.num_processes):
+                for i in range(8):
                     if not os.path.exists(osp.join(save_path, f"logs_{i}.txt")):
-                        continue
+                        break
                     with open(osp.join(save_path, f"logs_{i}.txt"), "r") as f_sub:
                         to_write += f_sub.read()
 

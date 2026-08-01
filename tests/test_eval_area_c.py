@@ -214,7 +214,7 @@ class PointCloudFinitenessTest(unittest.TestCase):
             np.array([[2, 3, 4], [6, 7, 8], [10, 11, 12]]),
         )
 
-    def test_rank_log_loop_uses_world_size_and_skips_gaps(self):
+    def test_rank_log_loop_preserves_main_cap_and_gap_stop(self):
         tree = ast.parse((ROOT / "src/eval/mv_recon/launch.py").read_text())
         loops = [
             node
@@ -223,14 +223,14 @@ class PointCloudFinitenessTest(unittest.TestCase):
             and isinstance(node.iter, ast.Call)
             and getattr(node.iter.func, "id", None) == "range"
             and node.iter.args
-            and ast.unparse(node.iter.args[0]) == "accelerator.num_processes"
+            and ast.unparse(node.iter.args[0]) == "8"
         ]
         self.assertEqual(len(loops), 1)
         missing_log_if = next(
             node for node in loops[0].body if isinstance(node, ast.If)
         )
         self.assertTrue(
-            any(isinstance(node, ast.Continue) for node in missing_log_if.body)
+            any(isinstance(node, ast.Break) for node in missing_log_if.body)
         )
 
     def test_unsupported_confidence_threshold_is_not_advertised(self):
