@@ -65,9 +65,18 @@ The behavior columns below compare import state with the PR; “upstream behavio
 
 These two metric-arithmetic divergences are live, predate this PR, lie outside every Cycle 1 region, and were hidden by comparison only to `main`. They do not alter any Cycle 1 verdict.
 
+The similarly labelled affine evaluators solve different objectives. Adam L1 is reached only through `src/eval/video_depth/eval_depth.py` (lines 132-169, 245-283, 347-380) and writes standalone `result_scale&shift.json`; closed-form L2 is reached only through `src/finetune_depth.py:1023-1025,1088-1090` and is logged as `absrel_affine`/`rmse_affine`. No tracked table, figure, summary script, or W&B panel consumes both, but a human could compare the similar labels by hand. Those numbers are not comparable.
+
 ## Undecidable divergence
 
 `af60361` recomputes the criterion per clip at `src/finetune_depth.py:1222` and `:1395`. Its numerical effect is **UNDECIDABLE** without the prohibited real-data/GPU entrypoint. The settling run is: on the same checkpoint and the same real validation batch with `B=2`, run the configured criterion once on the batch and once through `_criterion_per_clip`; compare every `loss` and detail value and the final `_reduce_metrics` result. That run was not performed in this review.
+
+The following pre-PR divergences are also **UNDECIDABLE** without unavailable real data. Neither run was performed; neither changes a Cycle 1 verdict.
+
+| File and change | Import behavior | Current behavior | Metrics affected | Settling run |
+| --- | --- | --- | --- | --- |
+| `src/eval/pose_evaluation/test_co3d.py` (`c6437bd`) | JSON/NPZ sequence population and manual c2w inversion. | JGZ/PyTorch3D records with fast-eval sampling, and extrinsics built by `convert_pt3d_RT_to_opencv`. | CO3D Racc, Tacc, and AUC, through both population and GT-extrinsic changes. | Use the same checkpoint, seed, categories, and frame IDs through both complete pipelines on real annotations; compare generated GT extrinsic matrices first, then Racc/Tacc/AUC. |
+| `experiments/eval_all.sh` (`74e3fd5`) | The hammer stage was not pinned with `--dataset hammer`. | `--dataset hammer` changes which clip is exported on a mixed HAMMER+ScanNet validation run. | The exported clip and paired CSV. | Use the same mixed-run checkpoint, config, and seed with import and current scripts; log the first sampled clip and compare the paired CSV. |
 
 ## Transient, self-cancelled history
 
