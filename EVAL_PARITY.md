@@ -25,18 +25,29 @@ Numerical parity outranks independent correctness here: a correction that change
 
 Decisions marked REVERT or GATE but not represented by a later commit in this branch remain decided but not yet applied.
 
+## Known defects restored for parity
+
+The six applied reverts intentionally put these defects from `main` back into the evaluator. They remain live unless a future default-off correction is selected explicitly:
+
+- Custom masks are applied only after affine fitting, so excluded pixels can still influence the fitted alignment.
+- Video `scale&shift` uses the historical Adam L1 route rather than the exact affine solver.
+- Temporal reprojection uses NumPy last-write collision handling rather than a nearest-depth z-buffer, so source order can change the projected depth.
+- Reconstruction finiteness filtering applies a component-wise mask and can fabricate coordinate tuples instead of preserving point/ground-truth/color rows together.
+- Reconstruction log collection examines at most ranks 0–7 and stops at the first missing rank log, so later present logs can be omitted.
+- The reported `delta < 1.` metric uses a strict comparison, so even an exactly correct depth pixel does not satisfy it.
+
 ## Retained or gated divergences
 
 The behavior columns below compare `main` with the PR; “upstream behavior” means the reachable parity baseline on `main`, not a claim about true upstream source bytes.
 
 | File and current line | Upstream behavior (`main` parity baseline) | Our behavior | Metrics affected | Datasets/configs affected | Is any existing reported number stale? |
 | --- | --- | --- | --- | --- | --- |
-| `src/eval/monodepth/tools.py:152`; `src/eval/video_depth/tools.py:152`; `src/eval/temporal_consistency/metrics.py:173` | Contradictory alignment modes are resolved by existing precedence and produce a score. | **GATED:** default preserves precedence; `reject_contradictory_modes=True` raises. | All depth metrics returned by the selected alignment path. | Only calls enabling more than one alignment mode; no shipped dataset is proven to exclude this misconfiguration. | Only results made with the opt-in strict mode would be unavailable rather than numerically stale; default results remain comparable. |
+| `src/eval/monodepth/tools.py:160`; `src/eval/video_depth/tools.py:160`; `src/eval/temporal_consistency/metrics.py:176` | Contradictory alignment modes are resolved by existing precedence and produce a score. | **GATED:** default preserves precedence; `reject_contradictory_modes=True` raises. | All depth metrics returned by the selected alignment path. | Only calls enabling more than one alignment mode; no shipped dataset is proven to exclude this misconfiguration. | Only results made with the opt-in strict mode would be unavailable rather than numerically stale; default results remain comparable. |
 | `src/eval/mv_recon/criterion.py:178` | Normalization aggregates the batch when normalization is enabled. | Per-sample valid counts produce per-sample normalization factors. | Point-cloud reconstruction metrics for normalized calls. | External callers with normalization enabled. The shipped launcher fixes `norm_mode=False`, so shipped baseline configurations cannot reach it. | No shipped-launcher reported number is stale; external normalized results must record evaluator version. |
 
 ## Undecidable divergence
 
-`af60361` recomputes the criterion per clip at `src/finetune_depth.py:1222` and `:1386`. Its numerical effect is **UNDECIDABLE** without the prohibited real-data/GPU entrypoint. The settling run is: on the same checkpoint and the same real validation batch with `B=2`, run the configured criterion once on the batch and once through `_criterion_per_clip`; compare every `loss` and detail value and the final `_reduce_metrics` result. That run was not performed in this review.
+`af60361` recomputes the criterion per clip at `src/finetune_depth.py:1222` and `:1395`. Its numerical effect is **UNDECIDABLE** without the prohibited real-data/GPU entrypoint. The settling run is: on the same checkpoint and the same real validation batch with `B=2`, run the configured criterion once on the batch and once through `_criterion_per_clip`; compare every `loss` and detail value and the final `_reduce_metrics` result. That run was not performed in this review.
 
 ## Transient, self-cancelled history
 
