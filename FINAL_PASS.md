@@ -2,8 +2,10 @@
 
 This round records the user's final-pass decisions without restating the merge
 verdict. Report durability is intended: the two local readability reports remain
-untracked and are not deliverables. Items 2, 4, 5, 6, 7, and 9b are approved for
-application; item 8 is declined; item 3 remains open pending the read-only
+untracked and are not deliverables. Items 2, 4, 5, 6, and 7 were applied; item
+8 is declined. Item 9b was not attempted because the remaining hard-timeout
+budget could not safely accommodate three sanctioned source reverts and
+restorations. Item 3 remains open for a user decision after the read-only
 investigation recorded below.
 
 ## Manager questions
