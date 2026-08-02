@@ -225,17 +225,17 @@ No lint or formatting violation was fixed. The 25 rule violations and five pre-e
 - Real evaluator numerical parity, DDP loader sharding, checkpoint failure injection, stale-result re-scoring, and every deferred experiment below remain unperformed.
 - Ruff provenance classification was performed after the rest of this gate: all 25 rule violations and five format failures are pre-existing, while the format failures in `src/streamvggt/depth_cond/model.py` and `src/visualize_depth.py` were introduced by this PR.
 
-## User decisions owed
+## User decisions and outcomes
 
-These are merger/product decisions, not omitted agent work:
+These are merger/product decisions and their current outcomes:
 
-1. **Area A R1-6:** choose teacher-confidence semantics for DISTILL after the specified controlled GPU experiment.
-2. **Area A R2-5:** decide whether FINETUNE `lambda_track` should gain a real track term or reject/deprecate the no-op while preserving frozen identity compatibility.
-3. **Area A R2-8:** establish whether `CameraLoss.delta` defines a robust-loss curve or should be deprecated as a compatibility API.
-4. **Area C R2-3:** choose fail-fast completeness versus explicitly labelled partial scores for failed video sequences.
-5. **Area C R2-5:** approve a canonical prediction/GT identity mapping after inspecting real NYUv2, Sintel, Bonn, and KITTI layouts.
-6. **Self-audit R2-1:** decide the distributed policy for a rank whose prepared loader is empty after the specified two-rank reproduction.
-7. **Self-audit R2-3:** decide the cross-rank checkpoint failure protocol after `fsync`/`os.replace` fault injection.
+1. Resolved: **Area A R1-6** teacher-confidence weighting was declined by the user (item 10).
+2. Resolved: **Area A R2-5** inert `lambda_track` was declined by the user (item 11).
+3. Resolved: **Area A R2-8** unused `CameraLoss.delta` was declined by the user (item 12).
+4. Resolved: **Area C R2-3** is accepted pre-existing behavior by user decision (item 13).
+5. Resolved: **Area C R2-5** is accepted pre-existing behavior by user decision (item 14).
+6. Resolved: **Self-audit R2-1** now fails fast on zero-length prepared loaders (item 15).
+7. Resolved: **Self-audit R2-3** timeout behavior is accepted by user decision (item 16).
 8. **DUST-1:** keep the 13 vendored lines and explicitly waive the read-only constraint, or restore the vendored file and move the timing shim into first-party code.
 9. **`reject_contradictory_modes`:** reachability fact—only `tests/test_eval_area_c.py:183` passes `True`; no shipped path does. Cycle 2's separate justification is that this is a deliberate library-level opt-in for external callers whose false default preserves parity. Decide whether to keep that external API, wire a shipped selector, or remove it.
 10. **TU-1 (`src/train_utils.py:27,41`):** decide rank-variable precedence. `LOCAL_RANK` outranks `SLURM_PROCID`, so multi-node process 8 can believe it is global rank zero. This is a live pre-existing defect left unfixed, not a disproved defect.
