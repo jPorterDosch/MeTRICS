@@ -30,7 +30,7 @@ import torch
 import trimesh
 from accelerate import Accelerator
 
-from dust3r.inference import loss_of_one_batch  # noqa
+from dust3r.inference import loss_of_one_batch, sample_query_points  # noqa
 from eval.temporal_consistency.metrics import depth2point, point2depth
 from finetune_depth import (
     FinetuneDepthCfg,
@@ -83,6 +83,13 @@ def _format_frame_timing(frame_times_ms) -> str:
 
 def _run_streaming_inference(model, views, frame_times_ms=None):
     """Run the first-party streaming path, optionally collecting frame times."""
+    query_pts = (
+        sample_query_points(views[0]["valid_mask"], M=64).to(
+            device=views[0]["img"].device
+        )
+        if "valid_mask" in views[0]
+        else None
+    )
     on_cuda = views[0]["img"].device.type == "cuda"
     dtype = (
         torch.bfloat16
@@ -90,7 +97,7 @@ def _run_streaming_inference(model, views, frame_times_ms=None):
         else torch.float16
     )
     with torch.cuda.amp.autocast(dtype=dtype, enabled=on_cuda), torch.no_grad():
-        output = model.inference(views, None, frame_times_ms=frame_times_ms)
+        output = model.inference(views, query_pts, frame_times_ms=frame_times_ms)
     return {"views": output.views, "pred": output.ress}
 
 
