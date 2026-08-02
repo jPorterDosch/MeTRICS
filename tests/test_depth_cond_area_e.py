@@ -51,9 +51,7 @@ def test_empty_spot_sensor_window_reaches_inference_with_zero_density() -> None:
         "sparse_depth": torch.zeros(1, 2, 2),
         "sparse_depth_mask": torch.zeros(1, 2, 2, dtype=torch.bool),
     }
-    mcfg = SimpleNamespace(
-        depth_cond=None, lora=None, encoder_cache=None, train=None
-    )
+    mcfg = SimpleNamespace(depth_cond=None, lora=None, encoder_cache=None, train=None)
     with (
         mock.patch("argparse.ArgumentParser.parse_args", return_value=args),
         mock.patch.object(spot, "resolve_checkpoint", return_value="checkpoint"),
@@ -61,7 +59,9 @@ def test_empty_spot_sensor_window_reaches_inference_with_zero_density() -> None:
         mock.patch.object(spot, "load_saved_args", return_value={}),
         mock.patch.object(spot, "rebuild_metric_cfg", return_value=mcfg),
         mock.patch.object(
-            spot, "Accelerator", return_value=SimpleNamespace(device=torch.device("cpu"))
+            spot,
+            "Accelerator",
+            return_value=SimpleNamespace(device=torch.device("cpu")),
         ),
         mock.patch.object(spot, "build_model", return_value=(Model(), None)),
         mock.patch.object(spot, "load_spot_views", return_value=[view]),
