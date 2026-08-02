@@ -333,7 +333,9 @@ class MetricStreamVGGT(nn.Module):
         timing = frame_times_ms is not None
         timing_device = frames[0]["img"].device
         cuda_timing = timing and timing_device.type == "cuda"
-        timing_stream = torch.cuda.current_stream(timing_device) if cuda_timing else None
+        timing_stream = (
+            torch.cuda.current_stream(timing_device) if cuda_timing else None
+        )
         cond_events, cond_host = [], []
         if self.conditioner is not None:
             token_list, residual_list = [], []
@@ -369,7 +371,9 @@ class MetricStreamVGGT(nn.Module):
         # the backbone's own sync has already resolved these events. It appended
         # one entry per frame, so fold conditioning onto the matching rows rather
         # than reporting two half-measurements of the same frame.
-        cond_ms = [s.elapsed_time(e) for s, e in cond_events] if cuda_timing else cond_host
+        cond_ms = (
+            [s.elapsed_time(e) for s, e in cond_events] if cuda_timing else cond_host
+        )
         base = len(frame_times_ms) - len(cond_ms) if timing else 0
         for i, ms in enumerate(cond_ms):
             frame_times_ms[base + i] += ms

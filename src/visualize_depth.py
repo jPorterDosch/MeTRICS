@@ -606,9 +606,7 @@ def _export_heatmaps(
             if frame_times_ms is not None:
                 # a clip shorter than the timing list means the caller sliced
                 # frames after inference; pad rather than mis-align the rows
-                row += [
-                    f"{frame_times_ms[i]:.3f}" if i < len(frame_times_ms) else ""
-                ]
+                row += [f"{frame_times_ms[i]:.3f}" if i < len(frame_times_ms) else ""]
             w.writerow(row)
     written += 1
     mean_gterr_sat = float(np.nanmean(gterr_sat)) if gterr_sat else float("nan")
