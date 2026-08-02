@@ -6,9 +6,13 @@ and `IMPLEMENTATION_NOTES.md` stay local and untracked by user decision;
 `FINAL_PASS.md` and `EVAL_PARITY.md` are the tracked deliverables. Item 9b was
 deferred in rounds 1 and 2, then partly completed by `89f5a10` and `7140e32`:
 the affine and rank-log regions are test-guarded, while component-mask tuple
-fabrication remains byte-comparison-only. DUST-1 is the sole open item.
+fabrication remains byte-comparison-only. DUST-1 was the sole open item at the
+Phase 10 checkpoint and is resolved by revert at current HEAD.
 
-## Manager questions
+## Historical Phase 10 manager questions
+
+The answers in this section preserve the pre-revert Phase 10 snapshot. They are
+superseded by the current dispositions and Phase 11 sections below.
 
 ### 1. Are the parity reverts intact?
 
@@ -275,9 +279,11 @@ This ledger supersedes stale Cycle 3 conclusions while retaining their history:
 7. **Fixed by `075ed03`.** The two PR-owned format failures were outstanding at
    the Cycle 3 checkpoint and were subsequently formatted; no other file was
    formatted for this item.
-8. **Declined by the user.** The 25 pre-existing ruff errors and five
-   pre-existing format failures remain deliberately untouched because changing
-   existing code posed parity risk.
+8. **Declined by the user.** The pre-existing lint and format failures remain
+   deliberately untouched because changing existing code posed parity risk.
+   At current HEAD the mandated changed-Python-file command reports 20 ruff
+   errors; the other five historical errors are in the now-pristine vendored
+   `src/dust3r/inference.py`, which is no longer selected by that command.
 9. **Resolved.** The parity reverts remain intact at their behavior-bearing
    regions, subject to the disclosed whitespace-only component-mask difference
    and the authorized fail-fast divergence.
@@ -341,9 +347,10 @@ round 1/2 history; it is not the current status after `89f5a10` and `7140e32`.
 
 ## Restated verdict
 
-**FINAL VERDICT: DUST-1 is resolved by the user's explicit revert decision and
-first-party rerouting; all other Phase 10 items have a current disposition
-above.**
+**FINAL VERDICT: MERGE-READY WITH NAMED CAVEATS — DUST-1 is resolved by the
+user's explicit revert decision and first-party rerouting; real-model numerical
+equivalence and CUDA timing remain unexercised, and the accepted pre-existing
+defects listed above remain live.**
 
 ## Phase 11, round 1 DUST-1 resolution
 
@@ -358,3 +365,22 @@ above.**
   so the timed model workload retains the prior shape.
 - The timing columns and query-point behavior are preserved. The cost is one
   small first-party adapter around the model-owned timing path.
+
+## Phase 11, round 2 independent verification
+
+- The vendored inference blob equals `main` at
+  `f5e585bd66516c5485ffbeb2db9b708d16bdc2ef`; no vendored tree is changed.
+- A synthetic CPU comparison, with identical input and RNG state, found equal
+  query points and elementwise-equal predictions from the timed and untimed
+  wrappers. Inspection confirms identical preprocessing, view ordering,
+  no-grad and CUDA-autocast behavior. The timing list only selects timer/event
+  bookkeeping inside the model. A full real-weight CPU/GPU comparison was not
+  run.
+- Both visualizer modules import successfully in either order. The helper calls
+  the vendored query-point sampler; it does not copy the implementation.
+- All nine required CPU suites passed at HEAD. The timing audit test still
+  checks one-frame summary formatting only; it does not cover collection or
+  route equivalence.
+- The current changed-Python-file ruff command reports 20 errors, not the
+  historical 25, because the five errors in the restored vendored file fall
+  outside `git diff --name-only main...HEAD -- '*.py'`.
