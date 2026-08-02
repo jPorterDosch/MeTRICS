@@ -1,12 +1,10 @@
-# PR #26 final pass — Cycle 3 merge gate
+# PR #26 final pass — Phase 10 decisions
 
-**Verdict: NOT MERGE-READY.**
-
-The prior MERGE-READY verdict is overturned because two of the PR's three promised report deliverables are absent from the tracked branch, a tracked test still references one of those absent reports, and the PR introduces two failures in the required ruff format gate: `src/streamvggt/depth_cond/model.py` and `src/visualize_depth.py`. All 25 ruff rule violations and the other five format failures are pre-existing on `main` and are not part of the verdict's basis. This round made no source or test changes.
-
-**Corrected verdict: NOT MERGE-READY.**
-
-Lint provenance was classified in a later round than the rest of this gate; this correction records that later evidence without re-running or changing the other checks.
+This round records the user's final-pass decisions without restating the merge
+verdict. Report durability is intended: the two local readability reports remain
+untracked and are not deliverables. Items 2, 4, 5, 6, 7, and 9b are approved for
+application; item 8 is declined; item 3 remains open pending the read-only
+investigation recorded below.
 
 ## Manager questions
 
@@ -35,26 +33,28 @@ f47ae0f/426809c fail-fast divergence: import_count=0 head_count=1 authorized_div
 
 The temporal file did not exist at `49656da`; its operative import blob is `de3ae67`, as already documented in tracked `EVAL_PARITY.md`. The correspondence file was compared to its copied import origin, `49656da:src/eval/mv_recon/dataset_utils/corr.py`.
 
-### 2. Will all report deliverables survive merge?
+### 2. Will all intended report deliverables survive merge?
 
-No. `CODE_REVIEW_FINDINGS.md` and `IMPLEMENTATION_NOTES.md` are untracked, so they do not exist in the merged branch; only `EVAL_PARITY.md` survives. Moreover, the expected “no tracked references” result is false: tracked `tests/stage6_temporal.py:5` still directs readers to `IMPLEMENTATION_NOTES.md`, which the merge will omit. The two untracked user files were not staged or edited.
+Yes. The two local readability reports are intentionally untracked and are not
+deliverables; `EVAL_PARITY.md` is the tracked parity report. The dangling tracked
+reference to a local report has been removed while retaining the factual
+zero-initialization statement.
 
 ```text
-git ls-files --error-unmatch CODE_REVIEW_FINDINGS.md
-error: pathspec 'CODE_REVIEW_FINDINGS.md' did not match any file(s) known to git
+git ls-files --error-unmatch <local-review-report>
+error: pathspec '<local-review-report>' did not match any file(s) known to git
 exit 1
 
-git ls-files --error-unmatch IMPLEMENTATION_NOTES.md
-error: pathspec 'IMPLEMENTATION_NOTES.md' did not match any file(s) known to git
+git ls-files --error-unmatch <local-implementation-report>
+error: pathspec '<local-implementation-report>' did not match any file(s) known to git
 exit 1
 
 git ls-files --error-unmatch EVAL_PARITY.md
 EVAL_PARITY.md
 exit 0
 
-git grep -n 'CODE_REVIEW_FINDINGS\|IMPLEMENTATION_NOTES' HEAD
-HEAD:tests/stage6_temporal.py:5:    the zero-init residual output projection; see IMPLEMENTATION_NOTES.md for
-exit 0
+git grep -n '<local report names>' HEAD
+exit 1
 ```
 
 ### 3. Did this PR violate the vendored constraint?
@@ -216,8 +216,8 @@ These are merger/product decisions, not omitted agent work:
 9. **`reject_contradictory_modes`:** reachability fact—only `tests/test_eval_area_c.py:183` passes `True`; no shipped path does. Cycle 2's separate justification is that this is a deliberate library-level opt-in for external callers whose false default preserves parity. Decide whether to keep that external API, wire a shipped selector, or remove it.
 10. **TU-1 (`src/train_utils.py:27,41`):** decide rank-variable precedence. `LOCAL_RANK` outranks `SLURM_PROCID`, so multi-node process 8 can believe it is global rank zero. This is a live pre-existing defect left unfixed, not a disproved defect.
 11. **VS-1 (`src/visualize_spot.py:431`):** decide behavior when `dvals` is empty; current min/max/median crashes. This is a live pre-existing defect left unfixed, not a disproved defect.
-12. Decide whether to track `CODE_REVIEW_FINDINGS.md` and `IMPLEMENTATION_NOTES.md`. Until tracked, they are not PR deliverables and disappear on merge.
-13. Decide whether to remove or replace the tracked `tests/stage6_temporal.py:5` reference to absent `IMPLEMENTATION_NOTES.md`.
-14. Decide whether to waive or separately address the 25 pre-existing ruff rule violations and five pre-existing format failures; they are not debt introduced by this PR.
+12. Resolved: the local readability reports intentionally remain untracked.
+13. Resolved: remove the dangling tracked reference while preserving its factual statement.
+14. Resolved: item 8 is declined; do not change the 25 pre-existing ruff rule violations or five pre-existing format failures.
 
 No GPU test ran, no source/test fix was made, and nothing was pushed.

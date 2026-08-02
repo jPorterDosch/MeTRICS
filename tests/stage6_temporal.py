@@ -2,8 +2,8 @@
 
 (1) At S=1, enabling temporal: attention leaves the conditioner output
     unchanged vs temporal: none within 1e-5 (holds exactly at init thanks to
-    the zero-init residual output projection; see IMPLEMENTATION_NOTES.md for
-    why strict post-training S=1 passthrough is not achievable).
+    the zero-init residual output projection; strict post-training S=1
+    passthrough is not achievable).
 (2) Causality: with randomized temporal weights, frame 0 of an S=3 clip equals
     the S=1 result -- earlier frames are unaffected by later ones.
 (3) At init the no-op also holds for S>1 (zero-init residual).
