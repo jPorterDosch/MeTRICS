@@ -342,6 +342,8 @@ def test_validation_mode_produces_no_auxiliary_term() -> None:
         val_log_images=0,
     )
     base_loss = torch.tensor(2.0)
+    assert model.conditioner is not None
+    conditioner = model.conditioner
 
     def fake_loss_of_one_batch(
         views, model, _criterion, _accelerator, **_kwargs
@@ -360,6 +362,14 @@ def test_validation_mode_produces_no_auxiliary_term() -> None:
         mock.patch.object(finetune_depth_module, "_prepare_batch"),
         mock.patch.object(finetune_depth_module, "_val_depth_metrics", return_value={}),
         mock.patch.object(finetune_depth_module, "_log_val_images"),
+        mock.patch.object(
+            conditioner,
+            "set_reconstruction_target",
+            wraps=conditioner.set_reconstruction_target,
+        ) as stage_reconstruction,
+        mock.patch.object(
+            conditioner, "pop_aux_loss", wraps=conditioner.pop_aux_loss
+        ) as pop_aux_loss,
     ):
         results = finetune_depth_module.val_loop(
             model,
@@ -372,6 +382,10 @@ def test_validation_mode_produces_no_auxiliary_term() -> None:
             mcfg=model.cfg,
         )
 
+    assert stage_reconstruction.call_count == 0, (
+        "val_loop must not stage MAE reconstruction targets"
+    )
+    assert pop_aux_loss.call_count == 0, "val_loop must not pop MAE auxiliary losses"
     assert not any("mae_recon" in name for name in results), (
         f"val_loop leaked MAE auxiliary metrics: {sorted(results)}"
     )
@@ -379,8 +393,7 @@ def test_validation_mode_produces_no_auxiliary_term() -> None:
         "val_loop contaminated checkpoint loss with MAE auxiliary loss: "
         f"expected {base_loss.item()}, got {results['loss_avg']}"
     )
-    assert model.conditioner is not None
-    assert model.conditioner.pop_aux_loss() is None
+    assert conditioner.pop_aux_loss() is None
     print(f"[mae-val] keys={sorted(results)}; loss_avg={results['loss_avg']}")
 
 
