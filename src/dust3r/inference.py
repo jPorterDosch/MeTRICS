@@ -76,11 +76,7 @@ def loss_of_one_batch(
     ret=None,
     img_mask=None,
     inference=False,
-    frame_times_ms=None,
 ):
-    # frame_times_ms: optional list, inference=True only -- one entry per frame
-    # is appended (see StreamVGGT.inference) and echoed in the result dict. The
-    # training branch below is deliberately left alone.
     if len(batch) > 2:
         assert (
             symmetrize_batch is False
@@ -95,14 +91,9 @@ def loss_of_one_batch(
     with torch.cuda.amp.autocast(dtype=dtype):
         if inference:
             with torch.no_grad():
-                if frame_times_ms is None:
-                    output = model.inference(batch, query_pts)
-                else:
-                    output = model.inference(
-                        batch, query_pts, frame_times_ms=frame_times_ms
-                    )
+                output = model.inference(batch, query_pts)
                 preds, batch = output.ress, output.views
-                result = dict(views=batch, pred=preds, frame_times_ms=frame_times_ms)
+                result = dict(views=batch, pred=preds)
                 return result[ret] if ret else result
         else:
             output = model(batch, query_pts)
