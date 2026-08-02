@@ -437,7 +437,11 @@ def _validate_loader_lengths(
     )
     for name, loader in loaders:
         if len(loader) == 0:
-            raise ValueError(f"{name} is empty")
+            raise ValueError(
+                f"{name} has zero batches after sharding; dataset is too small for "
+                "the world size: lower the world size, lower the batch size, or "
+                "disable drop_last"
+            )
 
 
 def _validate_resume_step(args: FinetuneDepthCfg) -> None:
@@ -521,11 +525,6 @@ def run(
             if args.batch_size == 1
             else build_val_loaders(args, accelerator, batch_size=1)
         )
-    # Validated pre-shard: accelerator.prepare can still yield len 0 per rank
-    # (one batch, two ranks, drop_last), so an epoch can run zero optimizer
-    # steps.
-    _validate_loader_lengths(data_loader_train, data_loaders_val, data_loaders_stream)
-
     printer.info("Loading depth-conditioned model")
     model, _ = build_model(args, mcfg, device)
 
@@ -557,6 +556,7 @@ def run(
             if stream_is_val
             else [accelerator.prepare(dl) for dl in data_loaders_stream]
         )
+    _validate_loader_lengths(data_loader_train, data_loaders_val, data_loaders_stream)
 
     def save_model(
         epoch: int, fname: str, best_so_far: float, data_iter_step: int

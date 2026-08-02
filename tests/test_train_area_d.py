@@ -303,8 +303,16 @@ class TrainAreaDTests(unittest.TestCase):
                 train_utils.is_rank_zero = original
 
     def test_empty_loader_is_rejected_before_progress_reporting(self) -> None:
-        with self.assertRaisesRegex(ValueError, "validation loader 0"):
-            fd._validate_loader_lengths([object()], [[]], [[object()]])
+        prepared_loader = fd.Accelerator(cpu=True).prepare(
+            torch.utils.data.DataLoader([], batch_size=1, drop_last=True)
+        )
+        message = (
+            "training loader has zero batches after sharding; dataset is too small "
+            "for the world size: lower the world size, lower the batch size, or "
+            "disable drop_last"
+        )
+        with self.assertRaisesRegex(ValueError, message):
+            fd._validate_loader_lengths(prepared_loader, [], [])
 
 
 if __name__ == "__main__":
