@@ -6,6 +6,7 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
+import finetune_depth as finetune_depth_module
 from streamvggt.depth_cond.conditioner import DepthConditioner, dpt_fusion_sizes
 from streamvggt.depth_cond.config import (
     DepthCondCfg,
@@ -218,19 +219,25 @@ def test_decoder_is_dropped_at_inference_and_parameter_invariant() -> None:
 
 def test_encoder_and_decoder_both_train() -> None:
     torch.manual_seed(11)
-    conditioner = DepthConditioner(mae_cfg(), {"token_dim": 5}, PATCH_SIZE).train()
+    model = make_tiny_model(InjectionType.TOKEN).train()
+    model.freeze_for_finetune()
+    conditioner = model.conditioner
+    assert conditioner is not None
     assert all(
         parameter.requires_grad for parameter in conditioner.encoder.parameters()
-    )
+    ), "freeze_for_finetune froze an MAE encoder parameter"
     assert all(
         parameter.requires_grad for parameter in conditioner.mae_decoder.parameters()
-    )
+    ), "freeze_for_finetune froze an MAE decoder parameter"
     depth = torch.linspace(1.0, 3.0, 28 * 28).reshape(1, 1, 28, 28)
     valid = torch.ones_like(depth, dtype=torch.bool)
     visible = torch.zeros_like(valid)
     visible[..., ::4, ::4] = True
     sparse = depth * visible
-    optimizer = torch.optim.Adam(conditioner.parameters(), lr=1e-2)
+    optimizer = torch.optim.Adam(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=1e-2,
+    )
     before_encoder = [p.detach().clone() for p in conditioner.encoder.parameters()]
     before_decoder = [p.detach().clone() for p in conditioner.mae_decoder.parameters()]
     conditioner.set_reconstruction_target(make_target(depth, valid))
@@ -241,10 +248,13 @@ def test_encoder_and_decoder_both_train() -> None:
     encoder_grads = [p.grad for p in conditioner.encoder.parameters()]
     decoder_grads = [p.grad for p in conditioner.mae_decoder.parameters()]
     assert all(
-        g is None or torch.isfinite(g).all() for g in encoder_grads + decoder_grads
+        g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+        for g in encoder_grads
     )
-    assert any(g is not None and g.abs().sum() > 0 for g in encoder_grads)
-    assert any(g is not None and g.abs().sum() > 0 for g in decoder_grads)
+    assert all(
+        g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+        for g in decoder_grads
+    )
     optimizer.step()
     encoder_moved = any(
         not torch.equal(old, new)
@@ -317,13 +327,61 @@ def test_auxiliary_loss_masking_and_empty_withheld() -> None:
 
 
 def test_validation_mode_produces_no_auxiliary_term() -> None:
-    conditioner = DepthConditioner(mae_cfg(), {"token_dim": 5}, PATCH_SIZE).eval()
-    depth = torch.ones(1, 1, 14, 14)
-    valid = torch.ones_like(depth, dtype=torch.bool)
-    conditioner.set_reconstruction_target(make_target(depth, valid))
-    conditioner(depth, torch.zeros_like(valid))
-    assert conditioner.pop_aux_loss() is None
-    print("[mae-val] eval forward produced no auxiliary term")
+    model = make_tiny_model(InjectionType.TOKEN)
+    batch = make_frames(sequence=1)
+    batch[0]["dataset"] = ["tiny"]
+    batch[0]["depthmap"] = torch.ones(1, 28, 28)
+    batch[0]["valid_mask"] = torch.ones(1, 28, 28, dtype=torch.bool)
+    accelerator = finetune_depth_module.Accelerator(cpu=True)
+    args = SimpleNamespace(
+        amp=0,
+        export_glb_max_clips=0,
+        output_dir="",
+        print_freq=1,
+        seed=0,
+        val_log_images=0,
+    )
+    base_loss = torch.tensor(2.0)
+
+    def fake_loss_of_one_batch(
+        views, model, _criterion, _accelerator, **_kwargs
+    ) -> dict:
+        prediction = model(views)
+        return {
+            "loss": (base_loss.clone(), {"depth_term": torch.tensor(0.25)}),
+            "pred": prediction,
+            "views": views,
+        }
+
+    with (
+        mock.patch.object(
+            finetune_depth_module, "loss_of_one_batch", fake_loss_of_one_batch
+        ),
+        mock.patch.object(finetune_depth_module, "_prepare_batch"),
+        mock.patch.object(finetune_depth_module, "_val_depth_metrics", return_value={}),
+        mock.patch.object(finetune_depth_module, "_log_val_images"),
+    ):
+        results = finetune_depth_module.val_loop(
+            model,
+            None,
+            [[batch]],
+            accelerator,
+            epoch=0,
+            step=0,
+            args=args,
+            mcfg=model.cfg,
+        )
+
+    assert not any("mae_recon" in name for name in results), (
+        f"val_loop leaked MAE auxiliary metrics: {sorted(results)}"
+    )
+    assert results["loss_avg"] == base_loss.item(), (
+        "val_loop contaminated checkpoint loss with MAE auxiliary loss: "
+        f"expected {base_loss.item()}, got {results['loss_avg']}"
+    )
+    assert model.conditioner is not None
+    assert model.conditioner.pop_aux_loss() is None
+    print(f"[mae-val] keys={sorted(results)}; loss_avg={results['loss_avg']}")
 
 
 def test_config_rejects_every_malformed_mae_knob() -> None:
