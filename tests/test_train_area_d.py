@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from collections import defaultdict
+from unittest import mock
 
 import torch
 from accelerate import PartialState
@@ -36,6 +37,12 @@ class ReturningReducer:
 
 
 class TrainAreaDTests(unittest.TestCase):
+    def test_slurm_global_rank_precedes_local_rank(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"LOCAL_RANK": "0", "SLURM_PROCID": "8"}, clear=True
+        ):
+            self.assertFalse(train_utils.is_rank_zero())
+
     def _write_manifest(self, directory: str, cfg: fd.FinetuneDepthCfg) -> bytes:
         contents = json.dumps(fd.build_manifest(cfg), sort_keys=True).encode()
         with open(os.path.join(directory, "manifest.json"), "wb") as handle:

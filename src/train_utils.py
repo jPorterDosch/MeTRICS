@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 # launchers set OMPI_COMM_WORLD_RANK / PMI_RANK. The first one present wins.
 _RANK_ENV_VARS = (
     "RANK",
-    "LOCAL_RANK",
     "SLURM_PROCID",
+    "LOCAL_RANK",
     "OMPI_COMM_WORLD_RANK",
     "PMI_RANK",
 )
