@@ -258,3 +258,7 @@ No GPU test ran, no source/test fix was made, and nothing was pushed.
   denominator) is **accepted pre-existing behavior**. The defect is present at
   import state `49656da`, `main` (`489d28f`), and HEAD. It remains live, but
   the user chose not to address it here.
+- Item 14 (GT and prediction files paired by independent sort position without
+  identity or count assertions) is **accepted pre-existing behavior**. The
+  defect is present at import state `49656da`, `main` (`489d28f`), and HEAD. It
+  remains live, but the user chose not to address it here.
