@@ -61,6 +61,28 @@ exit 1
 
 The branch contains 13 changed lines in read-only `src/dust3r/inference.py`, so the literal tree constraint is violated. Commit evidence shows these were the user's own in-flight edits carried by `196d8e2`, not an agent editing vendored code. The change is an ordinary modification, forwards optional timing only when `frame_times_ms` is supplied, and is numerically inert for existing callers that omit it. I do not treat DUST-1 as independently merge-blocking once disclosed, but the user must explicitly keep/waive or relocate it.
 
+Read-only call-graph investigation answers:
+
+1. Every training and evaluator caller reaches `loss_of_one_batch`; inference
+   callers reach the edited inference branch. Only the two visualizers pass
+   `frame_times_ms` (`src/visualize_depth.py:936` and
+   `src/visualize_spot.py:447`); all other tracked and untracked callers omit it.
+2. First-party `StreamVGGT.inference` and the depth-conditioned override perform
+   the timing, while the visualizers request and report it. The dust3r function
+   is not a second implementation, but it is the current forwarding adapter
+   between those first-party pieces and is therefore load-bearing for both
+   visualizer entrypoints.
+3. Removing the 13 lines without changing callers would break both visualizers
+   at their unconditional `frame_times_ms=` keyword, even when timing is off;
+   training and evaluator calls omit that keyword and would retain their old
+   route. This conclusion is from the static call graph; no entrypoint ran.
+
+Recommendation: relocate the optional timing forwarding to a first-party batch
+inference wrapper and have the two visualizers use it, then restore the vendored
+file. Until that replacement exists, removing the lines alone would break two
+reachable first-party entrypoints, so keep the user decision open for the next
+round rather than editing vendored code here.
+
 ```text
 git diff --numstat main...HEAD -- src/dust3r/inference.py
 11  2  src/dust3r/inference.py
