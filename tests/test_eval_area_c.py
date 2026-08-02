@@ -1,5 +1,6 @@
 import ast
 import importlib.util
+import json
 import pathlib
 import sys
 import tempfile
@@ -288,6 +289,58 @@ class RankLogAggregationTest(unittest.TestCase):
             self.assertNotIn("gap-rank-2", gap_result)
             self.assertIn("cap-rank-7", cap_result)
             self.assertNotIn("cap-rank-8", cap_result)
+
+
+class VideoAffineRouteTest(unittest.TestCase):
+    def test_main_routes_scale_and_shift_to_adam_l1_solver(self):
+        module = load_module(
+            "area_c_video_affine", "src/eval/video_depth/eval_depth.py"
+        )
+
+        def report_selected_route(_pred, _gt, **kwargs):
+            return (
+                {
+                    "selected_adam_l1": kwargs.get("align_with_lad2", False),
+                    "valid_pixels": 1,
+                },
+                None,
+                None,
+                None,
+            )
+
+        with (
+            tempfile.TemporaryDirectory() as output_dir,
+            mock.patch.object(module.glob, "glob", return_value=["unused"]),
+            mock.patch.object(
+                module,
+                "group_by_directory",
+                side_effect=[{"demo": ["pred"]}, {"rgbd_bonn_demo": ["gt"]}],
+            ),
+            mock.patch.object(
+                module.Image,
+                "open",
+                return_value=np.full((2, 2), 5000, dtype=np.uint16),
+            ),
+            mock.patch.object(
+                module.np, "load", return_value=np.ones((2, 2), dtype=np.float32)
+            ),
+            mock.patch.object(
+                module, "depth_evaluation", side_effect=report_selected_route
+            ),
+        ):
+            module.main(
+                SimpleNamespace(
+                    eval_dataset="bonn",
+                    output_dir=output_dir,
+                    align="scale&shift",
+                    pose_eval_stride=1,
+                )
+            )
+
+            result = json.loads(
+                pathlib.Path(output_dir, "result_scale&shift.json").read_text()
+            )
+        self.assertEqual(result["selected_adam_l1"], 1.0)
 
 
 class PointNormalizationTest(unittest.TestCase):
