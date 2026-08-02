@@ -262,3 +262,6 @@ No GPU test ran, no source/test fix was made, and nothing was pushed.
   identity or count assertions) is **accepted pre-existing behavior**. The
   defect is present at import state `49656da`, `main` (`489d28f`), and HEAD. It
   remains live, but the user chose not to address it here.
+- Item 16 (rank-0 checkpoint-commit failure can leave peers waiting for the
+  6000-second barrier timeout, SA R2-3) is **accepted by user decision**. No
+  code change was made; it is not an open review item.
