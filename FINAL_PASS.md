@@ -246,6 +246,20 @@ These are merger/product decisions and their current outcomes:
 
 No GPU test ran, no source/test fix was made, and nothing was pushed.
 
+## Phase 10, round 3 item 9b coverage
+
+- The affine `scale&shift` route is now guarded at the public `main(args)`
+  boundary: the emitted result records selection of the import-state Adam-L1
+  route. The test is red at pre-revert `9b39ce6` and green at HEAD.
+- The rank-log cap and first-gap truncation are now guarded at the public
+  `main(args)` boundary: created rank logs demonstrate the eight-rank cap and
+  exclusion of logs after the first gap. The test is red at pre-revert
+  `6fd172d` and green at HEAD.
+- Component-mask tuple fabrication remains byte-comparison-only. It was not
+  reached before this round's hard timeout; its only public boundary is the
+  substantially heavier nonempty reconstruction path through
+  `eval.mv_recon.launch.main`.
+
 ## Phase 10, round 2 decisions
 
 - Item 10 (teacher-confidence weighting, A R1-6) was **declined by the user**.
