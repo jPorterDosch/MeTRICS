@@ -254,3 +254,7 @@ No GPU test ran, no source/test fix was made, and nothing was pushed.
   change was made; it is not an open review item.
 - Item 12 (unused `CameraLoss.delta`, A R2-8) was **declined by the user**. No
   code change was made; it is not an open review item.
+- Item 13 (failed video-evaluation sequences silently omitted from the dataset
+  denominator) is **accepted pre-existing behavior**. The defect is present at
+  import state `49656da`, `main` (`489d28f`), and HEAD. It remains live, but
+  the user chose not to address it here.
