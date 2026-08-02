@@ -30,6 +30,7 @@ import torch
 import trimesh
 from accelerate import Accelerator
 
+from dust3r.inference import loss_of_one_batch  # noqa
 from eval.temporal_consistency.metrics import depth2point, point2depth
 from finetune_depth import (
     FinetuneDepthCfg,
@@ -943,7 +944,18 @@ def main() -> None:
             # Fresh list per clip: timings are per-clip, and reusing one would
             # concatenate clips into a single fake ramp.
             frame_times_ms = [] if args.timing else None
-            result = _run_streaming_inference(model, batch, frame_times_ms)
+            if frame_times_ms is None:
+                result = loss_of_one_batch(
+                    batch,
+                    model,
+                    None,
+                    accelerator,
+                    inference=True,
+                    symmetrize_batch=False,
+                    use_amp=True,
+                )
+            else:
+                result = _run_streaming_inference(model, batch, frame_times_ms)
             views, preds = result["views"], result["pred"]
             confs = _clip_confidences(preds)
             conf_maps = _stack_depth_conf(preds)  # [B,S,H,W], the heatmap source
