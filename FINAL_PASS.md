@@ -260,10 +260,10 @@ This ledger supersedes stale Cycle 3 conclusions while retaining their history:
    preserved.
 3. **Resolved by revert — DUST-1.** The earlier open finding is retained below
    as history. `bfad0af` restored `src/dust3r/inference.py` byte-for-byte from
-   `main`; `6889915` moved the visualizers onto the existing first-party model
-   inference path. The cost is a small first-party wrapper around that path;
-   the per-frame timing columns remain available and no vendored logic was
-   copied.
+   `main`; `6889915` and `7e6c7a3` route visualizer timing through the existing
+   first-party model inference path while preserving the untimed vendored call.
+   The cost is a small first-party wrapper around that path; the per-frame
+   timing columns remain available and no vendored logic was copied.
 4. **Resolved by `2a6a2da`.** `reject_contradictory_modes` is documented as a
    library opt-in with no shipped caller; its false default preserves parity.
 5. **Fixed by `8717715` — TU-1.** Global rank precedence is `RANK`,
@@ -349,11 +349,12 @@ above.**
 
 - `src/dust3r/inference.py` was restored to the `main` blob without formatting
   or adjacent cleanup.
-- Both visualizers now call the existing first-party streaming model inference
-  path, whose base and depth-conditioned implementations already own per-frame
-  timing. Measuring only around the complete call would have lost the
-  per-frame columns; recreating the vendored wrapper would have duplicated its
+- With `--timing`, both visualizers now call the existing first-party streaming
+  model inference path, whose base and depth-conditioned implementations
+  already own per-frame timing. Untimed runs retain the vendored wrapper call.
+  Measuring only around the complete call would have lost the per-frame
+  columns; recreating the vendored wrapper would have duplicated its
   query-point and inference plumbing.
-- The timing columns are preserved. The behavior cost is that these depth-only
-  visualizers pass no tracking query points; they do not consume tracking
-  outputs.
+- The timing columns are preserved. The behavior cost is limited to timing
+  mode: these depth-only visualizers pass no tracking query points, whose
+  outputs they do not consume.
