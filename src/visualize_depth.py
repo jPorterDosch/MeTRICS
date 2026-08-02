@@ -8,12 +8,10 @@
 # (causal, per-frame KV-cache) inference path on a handful of validation
 # clips, and writes each clip's predicted-depth point cloud to a .glb.
 #
-# It deliberately reuses the training code's helpers -- build_model,
-# build_train_loader, _prepare_batch, _set_data_epoch, _clip_predictions and
-# loss_of_one_batch -- so the visualized geometry is produced by the SAME path
-# that eval uses; there is no second, drifting reconstruction of the pipeline.
+# It deliberately reuses the training code's model and data helpers so the
+# visualized geometry is produced by the same model path that eval uses.
 #
-# Requires a CUDA device: loss_of_one_batch runs under torch.cuda.amp.autocast.
+# Requires a CUDA device for end-to-end model inference.
 #
 # Example:
 #   cd src
@@ -32,7 +30,6 @@ import torch
 import trimesh
 from accelerate import Accelerator
 
-from dust3r.inference import loss_of_one_batch  # noqa
 from eval.temporal_consistency.metrics import depth2point, point2depth
 from finetune_depth import (
     FinetuneDepthCfg,
@@ -81,6 +78,19 @@ def _format_frame_timing(frame_times_ms) -> str:
         f"median {np.median(rest):.1f} ms (min {rest.min():.1f}, "
         f"max {rest.max():.1f}) | growth {slope:+.3f} ms/frame"
     )
+
+
+def _run_streaming_inference(model, views, frame_times_ms=None):
+    """Run the first-party streaming path, optionally collecting frame times."""
+    on_cuda = views[0]["img"].device.type == "cuda"
+    dtype = (
+        torch.bfloat16
+        if on_cuda and torch.cuda.get_device_capability()[0] >= 8
+        else torch.float16
+    )
+    with torch.cuda.amp.autocast(dtype=dtype, enabled=on_cuda), torch.no_grad():
+        output = model.inference(views, None, frame_times_ms=frame_times_ms)
+    return {"views": output.views, "pred": output.ress}
 
 
 def resolve_checkpoint(weights: str, which: str) -> Path:
@@ -933,16 +943,7 @@ def main() -> None:
             # Fresh list per clip: timings are per-clip, and reusing one would
             # concatenate clips into a single fake ramp.
             frame_times_ms = [] if args.timing else None
-            result = loss_of_one_batch(
-                batch,
-                model,
-                None,
-                accelerator,
-                inference=True,
-                symmetrize_batch=False,
-                use_amp=True,
-                frame_times_ms=frame_times_ms,
-            )
+            result = _run_streaming_inference(model, batch, frame_times_ms)
             views, preds = result["views"], result["pred"]
             confs = _clip_confidences(preds)
             conf_maps = _stack_depth_conf(preds)  # [B,S,H,W], the heatmap source

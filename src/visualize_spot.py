@@ -48,7 +48,6 @@ import torch
 from accelerate import Accelerator
 from PIL import Image
 
-from dust3r.inference import loss_of_one_batch  # noqa
 from finetune_depth import (
     FinetuneDepthCfg,
     _clip_predictions,
@@ -63,6 +62,7 @@ from visualize_depth import (
     _export_heatmaps,
     _format_frame_timing,
     _per_frame_scene,
+    _run_streaming_inference,
     _stack_depth_conf,
     load_saved_args,
     rebuild_metric_cfg,
@@ -444,16 +444,7 @@ def main() -> None:
     _prepare_batch(views, mcfg)  # rescales img; skips sparse sim (real sparse present)
     frame_times_ms = [] if args.timing else None
     with torch.no_grad():
-        result = loss_of_one_batch(
-            views,
-            model,
-            None,
-            accelerator,
-            inference=True,
-            symmetrize_batch=False,
-            use_amp=True,
-            frame_times_ms=frame_times_ms,
-        )
+        result = _run_streaming_inference(model, views, frame_times_ms)
     preds = result["pred"]
     if frame_times_ms and not args.heatmaps:
         # _export_heatmaps is what normally reports these; without it the
