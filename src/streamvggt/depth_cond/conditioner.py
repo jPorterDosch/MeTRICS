@@ -24,6 +24,7 @@ from .config import (
     NormType,
     TemporalType,
 )
+from .mae import MAEDepthDecoder, MAEDepthEncoder
 
 
 def masked_downsample(
@@ -135,13 +136,27 @@ class DepthConditioner(nn.Module):
                 self.encoder = ConvDepthEncoder(cfg.conv_channels, patch_size)
                 enc_channels = cfg.conv_channels
             case EncoderType.MAE:
-                raise NotImplementedError(
-                    "depth_cond.encoder='mae' (MAE-style encoder for the sparse input) is a "
-                    "planned variant that has not been built yet. Use 'identity' or 'conv'."
+                self.encoder = MAEDepthEncoder(
+                    dim=cfg.mae_dim,
+                    depth=cfg.mae_depth,
+                    num_heads=cfg.mae_num_heads,
+                    patch_size=patch_size,
                 )
+                enc_channels = cfg.mae_dim
             case _:
                 raise ValueError(f"unknown encoder type: {cfg.encoder!r}")
         self._enc_channels = enc_channels
+        self.mae_decoder = None
+        if cfg.encoder is EncoderType.MAE and cfg.mae_recon_weight > 0.0:
+            self.mae_decoder = MAEDepthDecoder(
+                encoder_dim=cfg.mae_dim,
+                decoder_dim=cfg.mae_decoder_dim,
+                depth=cfg.mae_decoder_depth,
+                num_heads=cfg.mae_num_heads,
+                patch_size=patch_size,
+            )
+        self._reconstruction_target: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._aux_loss: torch.Tensor | None = None
 
         # --- AXIS 3: temporal mixing (over S only) ---
         match cfg.temporal:
@@ -239,6 +254,56 @@ class DepthConditioner(nn.Module):
         return torch.stack([disp, mask], dim=2)
 
     # ------------------------------------------------------------------
+    # Training-only MAE reconstruction state.
+    # ------------------------------------------------------------------
+    def set_reconstruction_target(self, views: list[dict]) -> None:
+        """Stage real GT depth and validity for the next training forward."""
+        if self.mae_decoder is None:
+            self._reconstruction_target = None
+            return
+        depths, valid_masks = [], []
+        for view in views:
+            depth = view["depthmap"]
+            if depth.dim() == 4:
+                depth = depth[..., 0]
+            valid = depth > 0
+            if "valid_mask" in view:
+                valid = valid & view["valid_mask"].to(
+                    dtype=torch.bool, device=depth.device
+                )
+            depths.append(depth)
+            valid_masks.append(valid)
+        self._reconstruction_target = (
+            torch.stack(depths, dim=1),
+            torch.stack(valid_masks, dim=1),
+        )
+
+    def pop_aux_loss(self) -> torch.Tensor | None:
+        """Return and clear the most recent reconstruction loss."""
+        loss, self._aux_loss = self._aux_loss, None
+        return loss
+
+    def _reconstruction_loss(
+        self, latent: torch.Tensor, visible: torch.Tensor
+    ) -> torch.Tensor | None:
+        target_state, self._reconstruction_target = self._reconstruction_target, None
+        if self.mae_decoder is None or not self.training or target_state is None:
+            return None
+        target_depth, target_valid = target_state
+        target_depth = target_depth.to(device=latent.device, dtype=latent.dtype)
+        target_valid = target_valid.to(device=latent.device)
+        target = self.prepare(target_depth, target_valid)[:, :, 0]
+        B, S, _, ph, pw = latent.shape
+        tokens = latent.flatten(0, 1).flatten(2).transpose(1, 2)
+        prediction = self.mae_decoder(tokens, (ph, pw)).reshape(
+            B, S, ph * self.patch_size, pw * self.patch_size
+        )
+        withheld = target_valid & ~visible.to(device=latent.device, dtype=torch.bool)
+        if not torch.any(withheld):
+            return prediction.sum() * 0.0
+        return (prediction[withheld] - target[withheld]).abs().mean()
+
+    # ------------------------------------------------------------------
     def forward(
         self,
         depth: torch.Tensor,
@@ -252,9 +317,12 @@ class DepthConditioner(nn.Module):
                   with an entry for EVERY HeadType (None = head not conditioned).
         TOKEN arm: returns gated token features [B,S,P_patch,token_dim].
         """
+        self._aux_loss = None
         x = self.prepare(depth, mask)  # [B,S,2,H,W]
         if self.encoder is not None:
             x = self.encoder(x)
+        if self.cfg.encoder is EncoderType.MAE:
+            self._aux_loss = self._reconstruction_loss(x, mask)
         if self.temporal is not None:
             x = self.temporal(x)
 
@@ -295,9 +363,9 @@ class DepthConditioner(nn.Module):
                     # channel 1 the validity
                     pooled, frac = masked_downsample(flat[:, 0:1], flat[:, 1:2], out_hw)
                     scale_inputs.append(torch.cat([pooled, frac], dim=1))
-                case EncoderType.CONV:
-                    # learned dense latent: channels are no longer a
-                    # (signal, mask) pair, so resize instead of masked-pool
+                case EncoderType.CONV | EncoderType.MAE:
+                    # Learned latent channels are no longer a (signal, mask)
+                    # pair, so resize instead of masked pooling.
                     scale_inputs.append(
                         F.interpolate(
                             flat, size=out_hw, mode="bilinear", align_corners=False
@@ -330,8 +398,8 @@ class DepthConditioner(nn.Module):
             case EncoderType.IDENTITY:
                 # raw full-res map: fold patches into channels to reach the patch grid
                 flat = F.pixel_unshuffle(flat, self.patch_size)  # [B*S, 2*ps^2, ph, pw]
-            case EncoderType.CONV:
-                pass  # conv stem already produced a patch-grid latent
+            case EncoderType.CONV | EncoderType.MAE:
+                pass  # learned encoder already produced a patch-grid latent
             case _:
                 # new EncoderType members must be threaded here explicitly
                 raise ValueError(
