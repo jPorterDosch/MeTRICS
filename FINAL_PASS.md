@@ -250,3 +250,5 @@ No GPU test ran, no source/test fix was made, and nothing was pushed.
 
 - Item 10 (teacher-confidence weighting, A R1-6) was **declined by the user**.
   No code change was made; it is not an open review item.
+- Item 11 (inert `lambda_track`, A R2-5) was **declined by the user**. No code
+  change was made; it is not an open review item.
