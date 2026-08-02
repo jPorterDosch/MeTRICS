@@ -145,6 +145,7 @@ def depth_evaluation(
         ground_truth_depth (numpy.ndarray or torch.Tensor): The ground truth depth map.
         max_depth (float): The maximum depth value to consider. Default is 80 meters.
         align_with_lstsq (bool): If True, perform least squares alignment of the predicted depth with ground truth.
+        reject_contradictory_modes (bool): Opt-in library strictness that rejects multiple alignment modes; no shipped path enables it.
 
     Returns:
         dict: A dictionary containing the evaluation metrics.
