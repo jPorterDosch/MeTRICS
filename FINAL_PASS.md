@@ -258,11 +258,12 @@ This ledger supersedes stale Cycle 3 conclusions while retaining their history:
 2. **Resolved by `6b83815`.** The dangling tracked reference to the local
    implementation report was removed while its factual zero-init statement was
    preserved.
-3. **Open — DUST-1.** Round 1 found that `src/visualize_depth.py` and
-   `src/visualize_spot.py` pass `frame_times_ms` unconditionally to
-   `dust3r.inference.loss_of_one_batch`; deleting the 13 vendored lines alone
-   breaks both visualizers. The choices are keep-and-waive, or change both
-   visualizers to stop routing through the vendored entry point.
+3. **Resolved by revert — DUST-1.** The earlier open finding is retained below
+   as history. `bfad0af` restored `src/dust3r/inference.py` byte-for-byte from
+   `main`; `6889915` moved the visualizers onto the existing first-party model
+   inference path. The cost is a small first-party wrapper around that path;
+   the per-frame timing columns remain available and no vendored logic was
+   copied.
 4. **Resolved by `2a6a2da`.** `reject_contradictory_modes` is documented as a
    library opt-in with no shipped caller; its false default preserves parity.
 5. **Fixed by `8717715` — TU-1.** Global rank precedence is `RANK`,
@@ -340,6 +341,19 @@ round 1/2 history; it is not the current status after `89f5a10` and `7140e32`.
 
 ## Restated verdict
 
-**FINAL VERDICT: NOT MERGE-READY — DUST-1 remains open for the user's explicit
-keep-and-waive or first-party rerouting decision; all other Phase 10 items have
-a current disposition above.**
+**FINAL VERDICT: DUST-1 is resolved by the user's explicit revert decision and
+first-party rerouting; all other Phase 10 items have a current disposition
+above.**
+
+## Phase 11, round 1 DUST-1 resolution
+
+- `src/dust3r/inference.py` was restored to the `main` blob without formatting
+  or adjacent cleanup.
+- Both visualizers now call the existing first-party streaming model inference
+  path, whose base and depth-conditioned implementations already own per-frame
+  timing. Measuring only around the complete call would have lost the
+  per-frame columns; recreating the vendored wrapper would have duplicated its
+  query-point and inference plumbing.
+- The timing columns are preserved. The behavior cost is that these depth-only
+  visualizers pass no tracking query points; they do not consume tracking
+  outputs.
