@@ -67,7 +67,7 @@ def get_ray_map(c2w1, c2w2, intrinsics, h, w):
     grid = np.stack([i, j, np.ones_like(i)], axis=-1)
     ro = c2w[:3, 3]
     rd = np.linalg.inv(intrinsics) @ grid.reshape(-1, 3).T
-    rd = (c2w @ np.vstack([rd, np.ones_like(rd[0])])).T[:, :3].reshape(h, w, 3)
+    rd = (c2w @ np.vstack([rd, np.zeros_like(rd[0])])).T[:, :3].reshape(h, w, 3)
     rd = rd / np.linalg.norm(rd, axis=-1, keepdims=True)
     ro = np.broadcast_to(ro, (h, w, 3))
     ray_map = np.concatenate([ro, rd], axis=-1)
@@ -108,6 +108,10 @@ class BaseMultiViewDataset(EasyDataset):
 
         self.n_corres = n_corres
         self.nneg = nneg
+        if isinstance(self.n_corres, int) and self.n_corres < 0:
+            raise ValueError(f"n_corres must be >= 0, got {self.n_corres}")
+        if self.nneg < 0:
+            raise ValueError(f"nneg must be >= 0, got {self.nneg}")
         assert (
             self.n_corres == "all"
             or isinstance(self.n_corres, int)
@@ -258,8 +262,6 @@ class BaseMultiViewDataset(EasyDataset):
             start = min(pos_ref, len(ids_all) - num_views)
             return [start + i for i in range(num_views)], True
 
-        all_possible_pos = np.arange(pos_ref, len(ids_all))
-
         remaining_sum = len(ids_all) - 1 - pos_ref
 
         if remaining_sum >= num_views - 1:
@@ -270,16 +272,14 @@ class BaseMultiViewDataset(EasyDataset):
             # floor to match when the scene is too short for the requested
             # minimum (feasibility beats the configured lower bound)
             max_interval = min(max_interval, 2 * remaining_sum // (num_views - 1))
-            if max_interval < min_interval:
+            lo = min(min_interval, remaining_sum // (num_views - 1))
+            if lo < min_interval:
                 # the configured stride floor cannot be honored: this scene has
                 # too few frames for num_views clips at that stride, so the clip
                 # is denser than asked. Warn once per (scene length, num_views,
                 # floor) so a misconfigured stride_range vs short scenes is
                 # visible without flooding every __getitem__.
-                self._warn_short_scene(
-                    len(ids_all), num_views, min_interval, max_interval
-                )
-            lo = min(min_interval, max_interval)
+                self._warn_short_scene(len(ids_all), num_views, min_interval, lo)
 
             # `intervals` holds the GAPS between consecutive picks; accumulate()
             # turns them into absolute positions below. Build only the one the
@@ -294,28 +294,17 @@ class BaseMultiViewDataset(EasyDataset):
                 intervals = [fixed_interval for _ in range(num_views - 1)]
             else:
                 # irregular: each gap drawn independently, so the frame rate
-                # varies within the clip. max_interval carries a factor 2 above
-                # (gaps average out rather than each fitting), so the walk CAN
-                # run past the end of the scene -- the filter/backfill below
-                # exists for exactly this case.
-                intervals = [
-                    rng.choice(range(lo, max_interval + 1))
-                    for _ in range(num_views - 1)
-                ]
+                # varies within the clip. Reserve the minimum gap for every
+                # remaining view so later positions never need backfilling.
+                intervals = []
+                remaining = remaining_sum
+                for gaps_left in range(num_views - 1, 0, -1):
+                    hi = min(max_interval, remaining - (gaps_left - 1) * lo)
+                    interval = rng.choice(range(lo, hi + 1))
+                    intervals.append(interval)
+                    remaining -= interval
 
             pos = list(itertools.accumulate([pos_ref] + intervals))
-            pos = [p for p in pos if p < len(ids_all)]
-            pos_candidates = [p for p in all_possible_pos if p not in pos]
-            pos = (
-                pos
-                + rng.choice(
-                    pos_candidates, num_views - len(pos), replace=False
-                ).tolist()
-            )
-
-            # sorted unconditionally: the backfill above appends arbitrary
-            # positions, and order is an invariant (see docstring)
-            pos = sorted(pos)
             is_video = True
         else:
             # Unreachable by construction: every loader builds its start ids as

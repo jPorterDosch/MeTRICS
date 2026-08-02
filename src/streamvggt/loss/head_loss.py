@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 
 from .utils import (
-    check_and_fix_inf_nan,
     closed_form_scale_and_shift,
     normalize_pointcloud,
     point_map_to_normal,
@@ -17,13 +16,14 @@ class CameraLoss(torch.nn.Module):
         self.weights = weights
 
     def forward(self, pred_pose: torch.Tensor, gt_pose: torch.Tensor) -> torch.Tensor:
+        if not torch.isfinite(pred_pose).all():
+            raise ValueError("pred_pose contains non-finite values")
+        if not torch.isfinite(gt_pose).all():
+            raise ValueError("gt_pose contains non-finite values")
+
         loss_T = (pred_pose[..., :3] - gt_pose[..., :3]).abs()
         loss_R = (pred_pose[..., 3:7] - gt_pose[..., 3:7]).abs()
         loss_FL = (pred_pose[..., 7:] - gt_pose[..., 7:]).abs()
-
-        loss_T = check_and_fix_inf_nan(loss_T, "loss_T")
-        loss_R = check_and_fix_inf_nan(loss_R, "loss_R")
-        loss_FL = check_and_fix_inf_nan(loss_FL, "loss_FL")
 
         # Clamp outlier translation loss to prevent instability, then average
         loss_T = loss_T.clamp(max=100).mean()
@@ -94,19 +94,17 @@ class DepthOrPmapLoss(torch.nn.Module):
     def normal_loss(
         self, pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
-        pred_norm, _ = point_map_to_normal(pred, mask)
-        gt_norm, _ = point_map_to_normal(gt, mask)
+        pred_norm, pred_valid = point_map_to_normal(pred, mask)
+        gt_norm, gt_valid = point_map_to_normal(gt, mask)
         cos_sim = F.cosine_similarity(pred_norm, gt_norm, dim=-1)
-        return 1 - cos_sim.mean()
+        valid = pred_valid & gt_valid
+        return (1 - cos_sim[valid].mean()) if valid.any() else pred.sum() * 0.0
 
     def image_gradient_loss(
         self, pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         assert pred.dim() == 4 and pred.shape[-1] == 1
         assert gt.shape == pred.shape
-
-        B, H, W, _ = pred.shape
-        _ = pred.device
 
         dx_pred = pred[:, :, 1:] - pred[:, :, :-1]  # [B,H,W-1,1]
         dx_gt = gt[:, :, 1:] - gt[:, :, :-1]
@@ -116,22 +114,15 @@ class DepthOrPmapLoss(torch.nn.Module):
         dy_gt = gt[:, 1:, :] - gt[:, :-1, :]
         dy_mask = mask[:, 1:, :] & mask[:, :-1, :]  # [B,H-1,W]
 
-        min_h = min(dy_pred.shape[1], dx_pred.shape[1])
-        min_w = min(dx_pred.shape[2], dy_pred.shape[2])
-
-        dx_pred = dx_pred[:, :min_h, :min_w, :]  # [B,H-1,W-1,1]
-        dx_gt = dx_gt[:, :min_h, :min_w, :]
-        dx_mask = dx_mask[:, :min_h, :min_w]  # [B,H-1,W-1]
-
-        dy_pred = dy_pred[:, :min_h, :min_w, :]  # [B,H-1,W-1,1]
-        dy_gt = dy_gt[:, :min_h, :min_w, :]
-        dy_mask = dy_mask[:, :min_h, :min_w]  # [B,H-1,W-1]
-
-        loss_dx = F.l1_loss(
-            dx_pred * dx_mask.unsqueeze(-1), dx_gt * dx_mask.unsqueeze(-1)
+        loss_dx = (
+            (dx_pred - dx_gt).abs()[dx_mask].mean()
+            if dx_mask.any()
+            else pred.sum() * 0.0
         )
-        loss_dy = F.l1_loss(
-            dy_pred * dy_mask.unsqueeze(-1), dy_gt * dy_mask.unsqueeze(-1)
+        loss_dy = (
+            (dy_pred - dy_gt).abs()[dy_mask].mean()
+            if dy_mask.any()
+            else pred.sum() * 0.0
         )
 
         return (loss_dx + loss_dy) / 2
@@ -156,7 +147,11 @@ class DepthOrPmapLoss(torch.nn.Module):
                 gt_normalized, _ = normalize_pointcloud(gt, valid_mask)
             else:
                 pred_normalized, gt_normalized = pred, gt
-            scale, shift = closed_form_scale_and_shift(pred_normalized, gt_normalized)
+            scale, shift = closed_form_scale_and_shift(
+                pred_normalized, gt_normalized, valid_mask
+            )
+            scale = scale.view(-1, 1, 1, 1)
+            shift = shift.view(-1, 1, 1, pred.shape[-1])
             pred_aligned = pred_normalized * scale + shift
         if self.conf_weighting:
             sigma_p = sigma_p.clamp(min=1e-6)

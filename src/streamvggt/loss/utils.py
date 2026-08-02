@@ -88,12 +88,10 @@ def normalize_prediction_robust(
     valid = ssum > 0
 
     if ms is None:
-        m = torch.zeros_like(ssum)
-        s = torch.ones_like(ssum)
-
-        m[valid] = torch.median(
-            (mask[valid] * target[valid]).view(valid.sum(), -1), dim=1
-        ).values
+        m = torch.zeros_like(ssum, dtype=target.dtype)
+        s = torch.ones_like(ssum, dtype=target.dtype)
+        for index in valid.nonzero(as_tuple=True)[0]:
+            m[index] = torch.median(target[index][mask[index].bool()])
     else:
         m, s = ms
 
@@ -136,7 +134,7 @@ def compute_scale_and_shift(
 
 
 def closed_form_scale_and_shift(
-    pred: torch.Tensor, gt: torch.Tensor
+    pred: torch.Tensor, gt: torch.Tensor, valid_mask: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
@@ -148,39 +146,34 @@ def closed_form_scale_and_shift(
         shift:  (B,)
     """
     assert pred.dim() == 4 and gt.dim() == 4, "Inputs must be 4D tensors"
-    B, H, W, C = pred.shape
-    _ = pred.device
-
-    pred_flat = pred.view(-1, C)  # (N, C)
-    gt_flat = gt.view(-1, C)  # (N, C)
-
-    if C == 1:
-        pred_mean = pred_flat.mean(dim=0)
-        gt_mean = gt_flat.mean(dim=0)
-
-        numerator = ((pred_flat - pred_mean) * (gt_flat - gt_mean)).sum(dim=0)
-        denominator = ((pred_flat - pred_mean) ** 2).sum(dim=0).clamp(min=1e-6)
-        scale = numerator / denominator
-
-        shift = gt_mean - scale * pred_mean
-        return scale, shift
-
-    elif C == 3:
-        pred_mean = pred_flat.mean(0)
-        gt_mean = gt_flat.mean(0)
-        pred_centered = pred_flat - pred_mean
-        gt_centered = gt_flat - gt_mean
-
-        scale = (pred_centered * gt_centered).sum() / (pred_centered**2).sum().clamp(
-            min=1e-6
-        )
-        shift = gt_mean - scale * pred_mean
-        return scale, shift
-
-    else:
+    C = pred.shape[-1]
+    if C not in (1, 3):
         raise ValueError(
             f"Unsupported channel dimension C={C}. Only 1 or 3 channels are supported."
         )
+
+    scales = []
+    shifts = []
+    for batch_pred, batch_gt, batch_mask in zip(pred, gt, valid_mask, strict=True):
+        pred_valid = batch_pred[batch_mask.bool()]
+        gt_valid = batch_gt[batch_mask.bool()]
+        if pred_valid.numel() == 0:
+            scales.append(pred.new_tensor(1.0))
+            shifts.append(pred.new_zeros(C))
+            continue
+        pred_mean = pred_valid.mean(dim=0)
+        gt_mean = gt_valid.mean(dim=0)
+        pred_centered = pred_valid - pred_mean
+        gt_centered = gt_valid - gt_mean
+        scale = (pred_centered * gt_centered).sum() / (pred_centered**2).sum().clamp(
+            min=1e-6
+        )
+        scales.append(scale)
+        shifts.append(gt_mean - scale * pred_mean)
+
+    scale = torch.stack(scales)
+    shift = torch.stack(shifts)
+    return scale, shift[:, 0] if C == 1 else shift
 
 
 def normalize_pointcloud(

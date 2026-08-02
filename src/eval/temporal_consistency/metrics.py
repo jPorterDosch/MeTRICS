@@ -155,6 +155,7 @@ def depth_evaluation(
     scale_only: bool = False,
     use_gpu: bool = False,
     disp_input: bool = False,
+    reject_contradictory_modes: bool = False,
 ) -> tuple[dict[str, float], torch.Tensor]:
     """
     Evaluate the depth map using various metrics and return a depth error parity map, with an option for least squares alignment.
@@ -164,19 +165,17 @@ def depth_evaluation(
         ground_truth_depth (numpy.ndarray or torch.Tensor): The ground truth depth map.
         max_depth (float): The maximum depth value to consider. Default is 80 meters.
         align_with_lstsq (bool): If True, perform least squares alignment of the predicted depth with ground truth.
+        reject_contradictory_modes (bool): Opt-in library strictness that rejects multiple alignment modes; no shipped path enables it.
 
     Returns:
         dict: A dictionary containing the evaluation metrics.
         torch.Tensor: The depth error parity map.
     """
-    # validate the mode up front: without this, the no-flag default used to
-    # run median scaling, compute every metric, and only then die in the
-    # parity-map dispatch below
-    if not (metric_scale or scale_and_shift or scale_only):
-        raise ValueError(
-            "depth_evaluation requires an alignment mode: pass one of "
-            "metric_scale, scale_and_shift, or scale_only"
-        )
+    modes = (metric_scale, scale_and_shift, scale_only)
+    if not any(modes):
+        raise ValueError("depth_evaluation requires an alignment mode")
+    if reject_contradictory_modes and sum(modes) > 1:
+        raise ValueError("depth_evaluation accepts at most one alignment mode")
 
     if isinstance(predicted_depth_original, np.ndarray):
         predicted_depth_original = torch.from_numpy(predicted_depth_original)
@@ -225,6 +224,13 @@ def depth_evaluation(
         s, t = closed_form_scale_and_shift(predicted_depth, ground_truth_depth)
         predicted_depth = s * predicted_depth + t
     elif scale_only:
+        if predicted_depth.numel() and (
+            not torch.isfinite(predicted_depth).all()
+            or predicted_depth.abs().sum() == 0
+        ):
+            raise ValueError(
+                "scale-only alignment requires finite, nonzero predictions"
+            )
         # Compute initial scale factor 's' using the closed-form solution (L2 norm)
         dot_pred_gt = torch.nanmean(ground_truth_depth)
         dot_pred_pred = torch.nanmean(predicted_depth)
@@ -346,11 +352,7 @@ def depth_evaluation(
         mask, ground_truth_depth_original, gt_depth_map_full
     )
 
-    num_valid_pixels = (
-        torch.sum(mask).item()
-        if custom_mask is None
-        else torch.sum(mask_within_mask).item()
-    )
+    num_valid_pixels = predicted_depth.numel()
     if num_valid_pixels == 0:
         (
             abs_rel,

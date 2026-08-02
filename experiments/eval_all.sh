@@ -71,6 +71,12 @@ SCANNET_ROOT="${SCANNET_ROOT:-/gpfs/data/jtompki1/cli277/metric/processed_scanne
 SPOT_SEQ="${SPOT_SEQ:-/oscar/data/jtompki1/cli277/new_spot_data/0}"
 CLIPS="${CLIPS:-32}"        # ablation clips
 NUM_VIEWS="${NUM_VIEWS:-32}"  # frames per visualized clip
+# TIMING=1 adds per-frame inference milliseconds (frame_ms) to every summary
+# CSV. Measured with CUDA events, so it does not stall the loop it measures --
+# but the numbers are only meaningful on an otherwise idle GPU, which a shared
+# node is not. Off by default.
+TIMING_ARGS=()
+[ "${TIMING:-}" = 1 ] && TIMING_ARGS=(--timing)
 
 # SPOT windows: start 0 is the most STATIC segment of seq 0 and start 998 the
 # most dynamic (measured by frame-to-frame RGB change over all 1279 frames).
@@ -140,10 +146,10 @@ viz_pair () {  # $1 = out dir, $2 = scales array name, rest = extra flags
     local -n scales=$1; shift
     python visualize_depth.py "${CKPT_ARGS[@]}" --base --pretrained "$PRETRAINED" \
         --num-clips 1 --num-views "$NUM_VIEWS" --heatmaps "${scales[@]}" \
-        --out-dir "$out" "$@"
+        "${TIMING_ARGS[@]}" --out-dir "$out" "$@"
     python visualize_depth.py "${CKPT_ARGS[@]}" \
         --num-clips 1 --num-views "$NUM_VIEWS" --heatmaps "${scales[@]}" \
-        --out-dir "$out" "$@"
+        "${TIMING_ARGS[@]}" --out-dir "$out" "$@"
     heatmap_gifs "$out/heatmaps"
 }
 
@@ -156,7 +162,7 @@ spot_pair () {  # $1 = out dir, $2 = --start
     local geom=(--rotate cw --landscape-crop --crop-anchor top
                 --start "$start" --stride 2 --num-views "$NUM_VIEWS"
                 --seq-dir "$SPOT_SEQ" --heatmaps "${SPOT_SCALES[@]}"
-                --out-dir "$out")
+                "${TIMING_ARGS[@]}" --out-dir "$out")
     python visualize_spot.py "${CKPT_ARGS[@]}" --base --pretrained "$PRETRAINED" "${geom[@]}"
     python visualize_spot.py "${CKPT_ARGS[@]}" "${geom[@]}"
     heatmap_gifs "$out/heatmaps"

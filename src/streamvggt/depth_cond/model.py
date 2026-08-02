@@ -7,6 +7,9 @@ the frozen-encoder feature cache. Nothing here branches on values outside the
 MetricCfg object.
 """
 
+import hashlib
+import time
+
 import torch
 import torch.nn as nn
 
@@ -66,11 +69,10 @@ class MetricStreamVGGT(nn.Module):
                 cfg.depth_cond, out_spec, patch_size=patch_size
             )
 
-        self.cache = (
-            EncoderFeatureCache(cfg.encoder_cache.dir)
-            if cfg.encoder_cache.enabled
-            else None
+        self._encoder_cache_dir = (
+            cfg.encoder_cache.dir if cfg.encoder_cache.enabled else None
         )
+        self.cache = None
         self.model.aggregator.grad_checkpointing = cfg.train.grad_checkpoint
         self._lora_applied = False
 
@@ -90,6 +92,17 @@ class MetricStreamVGGT(nn.Module):
     # ------------------------------------------------------------------
     # setup
     # ------------------------------------------------------------------
+    def initialize_encoder_cache(self, checkpoint_path: str) -> None:
+        if self._encoder_cache_dir is None:
+            return
+        checkpoint_hash = hashlib.sha256()
+        with open(checkpoint_path, "rb") as checkpoint:
+            for chunk in iter(lambda: checkpoint.read(1024 * 1024), b""):
+                checkpoint_hash.update(chunk)
+        self.cache = EncoderFeatureCache(
+            self._encoder_cache_dir, checkpoint_hash.hexdigest()
+        )
+
     def load_pretrained(self, path: str, map_location: str | torch.device = "cpu"):
         """Load the pretrained StreamVGGT checkpoint (raw state_dict) into the
         base model. Must run BEFORE apply_lora_adapters (wrapping renames keys)."""
@@ -104,7 +117,9 @@ class MetricStreamVGGT(nn.Module):
             and not any(k.startswith("aggregator.") for k in sd)
         ):
             sd = sd["model"]
-        return self.model.load_state_dict(sd, strict=True)
+        result = self.model.load_state_dict(sd, strict=True)
+        self.initialize_encoder_cache(path)
+        return result
 
     def apply_lora_adapters(self) -> int:
         if self.cfg.lora.enabled and not self._lora_applied:
@@ -228,18 +243,25 @@ class MetricStreamVGGT(nn.Module):
         that change pixels per epoch would poison the cache. If any view lacks
         a key, the whole batch falls back to the live encoder.
         """
+        if self.cache is None and self._encoder_cache_dir is not None:
+            raise RuntimeError(
+                "encoder cache requires load_pretrained before its first use"
+            )
         if self.cache is None:
             return None
         B, S, _, H, W = images.shape
         keys = []  # [S][B]
-        for view in views:
+        for view_index, view in enumerate(views):
             if "cache_key" not in view:
                 return None
             k = view["cache_key"]
             if isinstance(k, str):
                 k = [k]
             if len(k) != B:
-                return None
+                raise ValueError(
+                    f"view {view_index} cache_key count mismatch: expected {B} "
+                    f"cache keys, received {len(k)}"
+                )
             keys.append(list(k))
 
         param = next(self.model.aggregator.patch_embed.parameters())
@@ -254,10 +276,8 @@ class MetricStreamVGGT(nn.Module):
                     loaded[(s, b)] = t.to(dtype=param.dtype)
 
         if missing:
-            # autocast is disabled explicitly: the training loop wraps the whole
-            # model call in bf16 autocast, and cached features must be the exact
-            # fp32 values the live fp32 path would produce (Stage 4 contract) --
-            # otherwise the first epoch would persist bf16-quantized features.
+            # Keep the persistent representation fp32 instead of making cache
+            # contents depend on the caller's current autocast mode.
             with (
                 torch.no_grad(),
                 torch.autocast(device_type=images.device.type, enabled=False),
@@ -295,15 +315,41 @@ class MetricStreamVGGT(nn.Module):
         )
 
     def inference(
-        self, frames: list[dict], query_points: torch.Tensor | None = None
+        self,
+        frames: list[dict],
+        query_points: torch.Tensor | None = None,
+        frame_times_ms=None,
     ) -> StreamVGGTOutput:
         """Streaming inference: per-frame conditioning (S=1 is the degenerate
         case of the same [B,S,H,W] contract; token feats enter before the KV
-        cache each step)."""
+        cache each step).
+
+        frame_times_ms: see StreamVGGT.inference. Conditioning runs as its own
+        loop over frames here, so its per-frame cost is timed separately and
+        added onto the backbone's entry -- otherwise the reported latency would
+        omit a real part of the per-frame work, which matters once the encoder
+        stops being `identity`."""
         token_list, residual_list = None, None
+        timing = frame_times_ms is not None
+        timing_device = frames[0]["img"].device
+        cuda_timing = timing and timing_device.type == "cuda"
+        timing_stream = (
+            torch.cuda.current_stream(timing_device) if cuda_timing else None
+        )
+        cond_events, cond_host = [], []
         if self.conditioner is not None:
             token_list, residual_list = [], []
             for frame in frames:
+                if cuda_timing:
+                    cond_events.append(
+                        (
+                            torch.cuda.Event(enable_timing=True),
+                            torch.cuda.Event(enable_timing=True),
+                        )
+                    )
+                    cond_events[-1][0].record(timing_stream)
+                elif timing:
+                    t0 = time.perf_counter()
                 img = frame["img"]
                 if img.dim() == 3:
                     img = img.unsqueeze(0)
@@ -311,9 +357,24 @@ class MetricStreamVGGT(nn.Module):
                 conditioning = self._route_conditioning([frame], images)
                 token_list.append(conditioning["depth_token_feats"])
                 residual_list.append(conditioning["depth_head_residuals"])
-        return self.model.inference(
+                if cuda_timing:
+                    cond_events[-1][1].record(timing_stream)
+                elif timing:
+                    cond_host.append((time.perf_counter() - t0) * 1e3)
+        out = self.model.inference(
             frames,
             query_points,
             depth_token_feats_list=token_list,
             depth_head_residuals_list=residual_list,
+            frame_times_ms=frame_times_ms,
         )
+        # the backbone's own sync has already resolved these events. It appended
+        # one entry per frame, so fold conditioning onto the matching rows rather
+        # than reporting two half-measurements of the same frame.
+        cond_ms = (
+            [s.elapsed_time(e) for s, e in cond_events] if cuda_timing else cond_host
+        )
+        base = len(frame_times_ms) - len(cond_ms) if timing else 0
+        for i, ms in enumerate(cond_ms):
+            frame_times_ms[base + i] += ms
+        return out

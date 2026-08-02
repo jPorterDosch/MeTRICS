@@ -65,6 +65,12 @@ def extract_correspondences_from_pts3d(
         corres1_to_2, corres2_to_1, ret_recip=True
     )
     is_reciprocal2 = corres1_to_2[corres2_to_1] == np.arange(len(corres2_to_1))
+    valid1 = view1["valid_mask"].reshape(-1)
+    valid2 = view2["valid_mask"].reshape(-1)
+    is_reciprocal1 &= valid1 & valid2[corres1_to_2]
+    is_reciprocal2 &= valid2 & valid1[corres2_to_1]
+    pos1 = is_reciprocal1.nonzero()[0]
+    pos2 = corres1_to_2[pos1]
 
     if target_n_corres is None:
         if ret_xy:
@@ -73,15 +79,30 @@ def extract_correspondences_from_pts3d(
         return pos1, pos2
 
     available_negatives = min((~is_reciprocal1).sum(), (~is_reciprocal2).sum())
-    target_n_positives = int(target_n_corres * (1 - nneg))
+    target_n_positives = target_n_corres - nneg
     n_positives = min(len(pos1), target_n_positives)
+    # Filling this shortfall with negatives silently changes the configured ratio.
+    # Failing here avoids a plausible but misleading training run.
+    if n_positives < target_n_positives:
+        raise ValueError(
+            f"Correspondence ratio misconfiguration: requested "
+            f"{target_n_positives} positive correspondences but only {len(pos1)} "
+            f"are available; this pair cannot satisfy target_n_corres="
+            f"{target_n_corres} with nneg={nneg}. Lower n_corres, raise nneg, "
+            f"or drop the pair."
+        )
     n_negatives = min(target_n_corres - n_positives, available_negatives)
 
     if n_negatives + n_positives != target_n_corres:
         # should be really rare => when there are not enough negatives
         # in that case, break nneg and add a few more positives ?
         n_positives = target_n_corres - n_negatives
-        assert n_positives <= len(pos1)
+        assert n_positives <= len(pos1), (
+            f"Not enough negatives: requested {nneg} negatives but only "
+            f"{n_negatives} are available; reaching target_n_corres="
+            f"{target_n_corres} would require {n_positives} positives but only "
+            f"{len(pos1)} exist."
+        )
 
     assert n_positives <= len(pos1)
     assert n_positives <= len(pos2)

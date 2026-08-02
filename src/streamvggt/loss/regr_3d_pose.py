@@ -282,7 +282,6 @@ class Regr3DPose(Criterion, MultiLoss):
         pr_pts_self = [pred["pts3d_in_self_view"] for pred in preds]
         pr_pts_cross = [pred["pts3d_in_other_view"] for pred in preds]
         conf_self = [torch.log(pred["conf_self"]).detach().clip(eps) for pred in preds]
-        conf_cross = [torch.log(pred["conf"]).detach().clip(eps) for pred in preds]
 
         if not self.norm_all:
             if self.max_metric_scale:
@@ -306,10 +305,8 @@ class Regr3DPose(Criterion, MultiLoss):
         if self.norm_mode and not self.gt_scale:
             norm_factor_gt = self.get_norm_factor_point_cloud(
                 gt_pts_self[:1],
-                gt_pts_cross[:1],
                 valids[:1],
                 conf_self[:1],
-                conf_cross[:1],
                 norm_self_only=norm_self_only,
             )
         else:
@@ -320,10 +317,8 @@ class Regr3DPose(Criterion, MultiLoss):
         if self.norm_mode:
             norm_factor_pr = self.get_norm_factor_point_cloud(
                 pr_pts_self[:1],
-                pr_pts_cross[:1],
                 valids[:1],
                 conf_self[:1],
-                conf_cross[:1],
                 norm_self_only=norm_self_only,
             )
         else:

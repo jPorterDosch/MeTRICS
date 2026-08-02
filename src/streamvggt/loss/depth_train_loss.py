@@ -113,10 +113,10 @@ class DepthTrainLoss(MultiLoss):
         }
         for g, p in zip(gts, preds, strict=True):
             if "depth" in p:
-                sigma_p = p["depth_conf"]
+                sigma_p = p["depth_conf"] if self.conf_weighting else None
                 valid_mask = g["valid_mask"]
                 if not valid_mask.any():
-                    valid_mask = torch.ones_like(g["valid_mask"])
+                    continue
                 term, comps = self.depth_loss(
                     p["depth"],
                     g["depthmap"].unsqueeze(-1),

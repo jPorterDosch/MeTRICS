@@ -10,6 +10,7 @@ import dataclasses
 import enum
 import hashlib
 import json
+import math
 import pathlib
 from dataclasses import dataclass, field
 
@@ -97,6 +98,19 @@ class DepthCondCfg:
         self.norm = NormType(self.norm)
         self.heads = [HeadType(h) for h in self.heads]
         self.sim_mode = SparseSimMode(self.sim_mode)
+        if self.enabled and self.injection is InjectionType.HEAD and not self.heads:
+            raise ValueError(
+                "depth_cond.heads must be non-empty when enabled with head injection"
+            )
+        if (
+            self.enabled
+            and self.norm is NormType.FIXED
+            and (not math.isfinite(self.norm_constant_m) or self.norm_constant_m <= 0)
+        ):
+            raise ValueError(
+                "depth_cond.norm_constant_m must be finite and positive when "
+                f"depth_cond.norm=fixed, got {self.norm_constant_m}"
+            )
         if self.token_append:
             raise NotImplementedError(
                 "depth_cond.token_append=True (append extra tokens) is not built; "
@@ -124,6 +138,13 @@ class LoRACfg:
 
     def validate(self) -> None:
         self.targets = [LoRATarget(t) for t in self.targets]
+        if self.enabled and not self.targets:
+            raise ValueError("lora.targets must be non-empty when LoRA is enabled")
+        if self.enabled and (not math.isfinite(self.alpha) or self.alpha <= 0):
+            raise ValueError(
+                "lora.alpha must be finite and positive when LoRA is enabled, "
+                f"got {self.alpha}"
+            )
         # unconditional: a nonsensical rank must never survive into a run,
         # even one that currently has LoRA disabled
         if self.rank <= 0:

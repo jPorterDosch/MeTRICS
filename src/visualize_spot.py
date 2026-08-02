@@ -61,7 +61,9 @@ from visualize_depth import (
     _CONF_VMIN,
     _REL_VMAX,
     _export_heatmaps,
+    _format_frame_timing,
     _per_frame_scene,
+    _run_streaming_inference,
     _stack_depth_conf,
     load_saved_args,
     rebuild_metric_cfg,
@@ -318,6 +320,14 @@ def main() -> None:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--heatmaps", action="store_true")
     ap.add_argument(
+        "--timing",
+        action="store_true",
+        help="measure per-frame inference time (CUDA events) and add a frame_ms "
+        "column to the summary CSV. SPOT is the honest place to read this: real "
+        "sensor sparsity means the conditioning encoder sees real input rather "
+        "than a simulated mask.",
+    )
+    ap.add_argument(
         "--hm-scale",
         type=int,
         default=1,
@@ -420,27 +430,38 @@ def main() -> None:
     sensor_mask = torch.stack([v["sparse_depth_mask"][0] for v in views])
     dens = sensor_mask.float().mean().item()
     dvals = sensor[sensor_mask]
-    print(
-        f"sensor sparse depth: {dens:.2%} of pixels | "
-        f"range [{dvals.min():.2f}, {dvals.max():.2f}] m, median {dvals.median():.2f}"
-    )
+    if dvals.numel():
+        print(
+            f"sensor sparse depth: {dens:.2%} of pixels | "
+            f"range [{dvals.min():.2f}, {dvals.max():.2f}] m, median {dvals.median():.2f}"
+        )
+    else:
+        print("sensor sparse depth: 0.00% of pixels | 0 valid sensor pixels")
     for v in views:
         for k, t in v.items():
             if torch.is_tensor(t):
                 v[k] = t.to(device)
 
     _prepare_batch(views, mcfg)  # rescales img; skips sparse sim (real sparse present)
+    frame_times_ms = [] if args.timing else None
     with torch.no_grad():
-        result = loss_of_one_batch(
-            views,
-            model,
-            None,
-            accelerator,
-            inference=True,
-            symmetrize_batch=False,
-            use_amp=True,
-        )
+        if frame_times_ms is None:
+            result = loss_of_one_batch(
+                views,
+                model,
+                None,
+                accelerator,
+                inference=True,
+                symmetrize_batch=False,
+                use_amp=True,
+            )
+        else:
+            result = _run_streaming_inference(model, views, frame_times_ms)
     preds = result["pred"]
+    if frame_times_ms and not args.heatmaps:
+        # _export_heatmaps is what normally reports these; without it the
+        # measurement would be taken and silently dropped
+        print(f"per-frame inference: {_format_frame_timing(frame_times_ms)}")
     pred_depth = torch.stack([p["depth"].detach() for p in preds], dim=1)
     pred_depth = pred_depth.squeeze(-1).float().cpu()[0]  # [S,H,W]
     print(f"pred depth: range [{pred_depth.min():.2f}, {pred_depth.max():.2f}] m")
@@ -544,6 +565,7 @@ def main() -> None:
             conf=pred_conf,
             conf_vmin=args.conf_vmin,
             conf_vmax=args.conf_vmax,
+            frame_times_ms=frame_times_ms,
         )
         print(f"wrote {n} heatmap PNGs")
 

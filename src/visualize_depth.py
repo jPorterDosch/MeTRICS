@@ -8,12 +8,10 @@
 # (causal, per-frame KV-cache) inference path on a handful of validation
 # clips, and writes each clip's predicted-depth point cloud to a .glb.
 #
-# It deliberately reuses the training code's helpers -- build_model,
-# build_train_loader, _prepare_batch, _set_data_epoch, _clip_predictions and
-# loss_of_one_batch -- so the visualized geometry is produced by the SAME path
-# that eval uses; there is no second, drifting reconstruction of the pipeline.
+# It deliberately reuses the training code's model and data helpers so the
+# visualized geometry is produced by the same model path that eval uses.
 #
-# Requires a CUDA device: loss_of_one_batch runs under torch.cuda.amp.autocast.
+# Requires a CUDA device for end-to-end model inference.
 #
 # Example:
 #   cd src
@@ -32,7 +30,7 @@ import torch
 import trimesh
 from accelerate import Accelerator
 
-from dust3r.inference import loss_of_one_batch  # noqa
+from dust3r.inference import loss_of_one_batch, sample_query_points  # noqa
 from eval.temporal_consistency.metrics import depth2point, point2depth
 from finetune_depth import (
     FinetuneDepthCfg,
@@ -64,6 +62,43 @@ _CKPT_NAMES = {
     "last": "checkpoint-last.pth",
 }
 _AUTO_ORDER = ("final", "best", "last")
+
+
+def _format_frame_timing(frame_times_ms) -> str:
+    t = np.asarray(frame_times_ms, dtype=float)
+    if len(t) == 1:
+        return f"frame0 {t[0]:.1f} ms"
+    rest = t[1:]
+    slope = (
+        float(np.polyfit(np.arange(len(rest)), rest, 1)[0])
+        if len(rest) >= 2
+        else float("nan")
+    )
+    return (
+        f"frame0 {t[0]:.1f} ms | frames 1-{len(t) - 1} "
+        f"median {np.median(rest):.1f} ms (min {rest.min():.1f}, "
+        f"max {rest.max():.1f}) | growth {slope:+.3f} ms/frame"
+    )
+
+
+def _run_streaming_inference(model, views, frame_times_ms=None):
+    """Run the first-party streaming path, optionally collecting frame times."""
+    query_pts = (
+        sample_query_points(views[0]["valid_mask"], M=64).to(
+            device=views[0]["img"].device
+        )
+        if "valid_mask" in views[0]
+        else None
+    )
+    on_cuda = views[0]["img"].device.type == "cuda"
+    dtype = (
+        torch.bfloat16
+        if on_cuda and torch.cuda.get_device_capability()[0] >= 8
+        else torch.float16
+    )
+    with torch.cuda.amp.autocast(dtype=dtype, enabled=on_cuda), torch.no_grad():
+        output = model.inference(views, query_pts, frame_times_ms=frame_times_ms)
+    return {"views": output.views, "pred": output.ress}
 
 
 def resolve_checkpoint(weights: str, which: str) -> Path:
@@ -386,6 +421,7 @@ def _export_heatmaps(
     conf: torch.Tensor | None = None,
     conf_vmin: float = _CONF_VMIN,
     conf_vmax: float = _CONF_VMAX,
+    frame_times_ms: list[float] | None = None,
 ) -> int:
     """2D heatmap companions to the GLB export, from the SAME predictions.
 
@@ -413,6 +449,11 @@ def _export_heatmaps(
       {tag}_summary.csv       the SAME per-frame numbers as text, plus the
                               fraction of valid pixels clipped at rel_vmax and
                               the confidence/error rank correlation.
+
+    frame_times_ms: optional per-frame inference milliseconds (see
+    StreamVGGT.inference). Adds a frame_ms CSV column and a console line
+    separating frame 0 (empty kv-cache) from the steady-state frames and their
+    growth slope; omitted entirely when None.
                               The PNG is a picture of these curves and cannot
                               be compared across runs by eye; the CSV is what
                               you diff between base and finetuned.
@@ -561,6 +602,8 @@ def _export_heatmaps(
         if conf_np is not None:
             meta += [["# conf_vmin", conf_vmin], ["# conf_vmax", conf_vmax]]
             header += ["conf_mean", "conf_saturated_frac", "conf_err_corr"]
+        if frame_times_ms is not None:
+            header += ["frame_ms"]
         w.writerows(meta)
         w.writerow(header)
         for i in range(S):
@@ -578,6 +621,10 @@ def _export_heatmaps(
                     f"{conf_sat[i]:.6f}",
                     f"{conf_corr[i]:.6f}",
                 ]
+            if frame_times_ms is not None:
+                # a clip shorter than the timing list means the caller sliced
+                # frames after inference; pad rather than mis-align the rows
+                row += [f"{frame_times_ms[i]:.3f}" if i < len(frame_times_ms) else ""]
             w.writerow(row)
     written += 1
     mean_gterr_sat = float(np.nanmean(gterr_sat)) if gterr_sat else float("nan")
@@ -612,6 +659,12 @@ def _export_heatmaps(
             f"  [{tag}] conf: mean {np.nanmean(conf_means):.3f}, "
             f"Spearman(conf, |pred-gt|/gt) = {mean_conf_corr:+.3f} ({verdict})"
         )
+    if frame_times_ms:
+        # Frame 0 is reported apart from the rest on purpose: it runs against an
+        # EMPTY kv-cache and also absorbs lazy CUDA init, so averaging it in
+        # hides the very growth this measures. The slope is the answer to "does
+        # per-frame cost grow with sequence length" -- fit on frames 1.. only.
+        print(f"  [{tag}] time: {_format_frame_timing(frame_times_ms)}")
 
     fig, ax = plt.subplots(figsize=(7, 3.2), constrained_layout=True)
     ax.plot(gterr_means, label="|pred-gt|/gt (per frame)", marker="o", ms=3)
@@ -767,6 +820,13 @@ def main() -> None:
         "them useless. Set --rel-vmax 0.5 --tcons-vmax 0.03 for a scannet run.",
     )
     ap.add_argument(
+        "--timing",
+        action="store_true",
+        help="measure per-frame inference time (CUDA events, so the timed loop "
+        "is the loop that normally runs) and add a frame_ms column to the "
+        "summary CSV. Off by default; the model path is untouched when off.",
+    )
+    ap.add_argument(
         "--conf-vmin",
         type=float,
         default=_CONF_VMIN,
@@ -888,15 +948,21 @@ def main() -> None:
             _prepare_batch(batch, mcfg)
             # inference=True -> the causal per-frame KV-cache path (deployment
             # path), no criterion. result carries views + per-view preds.
-            result = loss_of_one_batch(
-                batch,
-                model,
-                None,
-                accelerator,
-                inference=True,
-                symmetrize_batch=False,
-                use_amp=True,
-            )
+            # Fresh list per clip: timings are per-clip, and reusing one would
+            # concatenate clips into a single fake ramp.
+            frame_times_ms = [] if args.timing else None
+            if frame_times_ms is None:
+                result = loss_of_one_batch(
+                    batch,
+                    model,
+                    None,
+                    accelerator,
+                    inference=True,
+                    symmetrize_batch=False,
+                    use_amp=True,
+                )
+            else:
+                result = _run_streaming_inference(model, batch, frame_times_ms)
             views, preds = result["views"], result["pred"]
             confs = _clip_confidences(preds)
             conf_maps = _stack_depth_conf(preds)  # [B,S,H,W], the heatmap source
@@ -931,6 +997,7 @@ def main() -> None:
                         conf=conf_maps[b],
                         conf_vmin=args.conf_vmin,
                         conf_vmax=args.conf_vmax,
+                        frame_times_ms=frame_times_ms,
                     )
                     print(f"  [{mode}] clip {exported}: {n_png} heatmap PNGs")
                 mean_c, min_c, max_c = confs[b]

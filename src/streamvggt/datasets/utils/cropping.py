@@ -92,7 +92,10 @@ def rescale_image_depthmap(
 
     # no offset here; simple rescaling
     camera_intrinsics = camera_matrix_of_crop(
-        camera_intrinsics, input_resolution, output_resolution, scaling=scale_final
+        camera_intrinsics,
+        input_resolution,
+        output_resolution,
+        scaling=output_resolution / input_resolution,
     )
 
     return image.to_pil(), depthmap, camera_intrinsics
@@ -106,6 +109,7 @@ def camera_matrix_of_crop(
     offset_factor=0.5,
     offset=None,
 ):
+    scaling = np.broadcast_to(np.asarray(scaling), (2,))
     # Margins to offset the origin
     margins = np.asarray(input_resolution) * scaling - output_resolution
     assert np.all(margins >= 0.0)
@@ -114,7 +118,7 @@ def camera_matrix_of_crop(
 
     # Generate new camera parameters
     output_camera_matrix_colmap = opencv_to_colmap_intrinsics(input_camera_matrix)
-    output_camera_matrix_colmap[:2, :] *= scaling
+    output_camera_matrix_colmap[:2, :] *= scaling[:, None]
     output_camera_matrix_colmap[:2, 2] -= offset
     output_camera_matrix = colmap_to_opencv_intrinsics(output_camera_matrix_colmap)
 

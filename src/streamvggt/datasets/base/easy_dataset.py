@@ -46,6 +46,10 @@ class EasyDataset:
             raise NotImplementedError()  # cannot deal yet
         num_of_aspect_ratios = len(self._resolutions)
         num_of_views = self.num_views
+        if not fixed_length and num_of_views < 4:
+            raise ValueError(
+                f"fixed_length=False requires num_views >= 4, got {num_of_views}"
+            )
         sampler = CustomRandomSampler(
             self,
             batch_size,

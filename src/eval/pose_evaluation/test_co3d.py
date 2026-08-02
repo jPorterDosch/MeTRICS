@@ -207,6 +207,7 @@ def setup_args():
     """Set up command-line arguments for the CO3D evaluation script."""
     parser = argparse.ArgumentParser(description='Test VGGT on CO3D dataset')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode (only test on apple category)')
+    parser.add_argument('--fast_eval', action='store_true')
     parser.add_argument('--use_ba', action='store_true', default=False, help='Enable bundle adjustment')
     parser.add_argument('--min_num_images', type=int, default=50, help='Minimum number of images for a sequence')
     parser.add_argument('--num_frames', type=int, default=10, help='Number of frames to use for testing')
@@ -307,6 +308,8 @@ def main():
     """Main function to evaluate VGGT on CO3D dataset."""
     # Parse command-line arguments
     args = setup_args()
+    if args.use_ba:
+        raise NotImplementedError("--use_ba is not implemented")
 
     # Setup device and data type
     device = "cuda" if torch.cuda.is_available() else "cpu"

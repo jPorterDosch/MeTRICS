@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 # launchers set OMPI_COMM_WORLD_RANK / PMI_RANK. The first one present wins.
 _RANK_ENV_VARS = (
     "RANK",
-    "LOCAL_RANK",
     "SLURM_PROCID",
+    "LOCAL_RANK",
     "OMPI_COMM_WORLD_RANK",
     "PMI_RANK",
 )
@@ -100,10 +100,9 @@ def resolve_output_dir(cfg: FinetuneDepthCfg, run_id: str) -> str:
     re-sliced here, so the truncation length lives in exactly one place.
 
     Resume: continue the run that OWNS the checkpoint -- the output dir is the
-    checkpoint's parent -- regardless of any identity-knob drift in the current
-    config (e.g. a bumped --epochs to extend the run). Deriving it from the
-    current id instead would silently fork the resumed run into a fresh
-    directory, splitting one logical run across two dirs / wandb runs.
+    checkpoint's parent. The entrypoint first rejects identity drift against the
+    owning manifest; notably, changing epochs is rejected because it changes the
+    learning-rate schedule.
 
     Fresh run: <save_dir>/<exp_group>/<run_id>, failing fast if it already exists
     (an experiment with this exact config has been run or is running, and
@@ -116,11 +115,13 @@ def resolve_output_dir(cfg: FinetuneDepthCfg, run_id: str) -> str:
     output_dir = os.path.join(cfg.save_dir, cfg.exp_group, run_id)
     if not is_rank_zero():
         return output_dir
-    if os.path.exists(output_dir):
+    try:
+        os.makedirs(output_dir, exist_ok=False)
+    except FileExistsError:
         raise RuntimeError(
             f"Output dir {output_dir} already exists: an experiment with this exact "
             "config hash has already been launched. Refusing to re-run. Either change "
             f"the config, pass --resume {os.path.join(output_dir, 'checkpoint-last.pth')} "
             "to continue an interrupted run, or remove the directory deliberately."
-        )
+        ) from None
     return output_dir

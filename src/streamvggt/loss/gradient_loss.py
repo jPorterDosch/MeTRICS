@@ -8,6 +8,8 @@ class GradientLoss(torch.nn.Module):
     def __init__(self, scales: int = 4, reduction: str = "batch-based") -> None:
         super().__init__()
 
+        if reduction not in {"batch-based", "image-based"}:
+            raise ValueError(f"invalid reduction {reduction!r}")
         if reduction == "batch-based":
             self.__reduction = reduction_batch_based
         else:
@@ -58,6 +60,11 @@ class TemporalGradientMatchingLoss(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        if temp_grad_scales < 1:
+            raise ValueError(f"invalid temp_grad_scales {temp_grad_scales!r}")
+        if diff_depth_th < 0:
+            raise ValueError(f"invalid diff_depth_th {diff_depth_th!r}")
+
         self.data_loss = TrimmedMAELoss(trim=trim, reduction=reduction)
         self.temp_grad_scales = temp_grad_scales
         self.temp_grad_decay = temp_grad_decay
@@ -107,4 +114,4 @@ class TemporalGradientMatchingLoss(torch.nn.Module):
                 ) * pow(self.temp_grad_decay, scale)
                 cnt += 1
 
-        return total / cnt
+        return total / cnt if cnt else prediction.sum() * 0.0

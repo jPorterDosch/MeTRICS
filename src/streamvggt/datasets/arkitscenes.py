@@ -35,6 +35,8 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
         highres_root=None,
         **kwargs,
     ):
+        if is_metric is not True:
+            raise ValueError(f"ARKitScenes is_metric must be True, got {is_metric!r}")
         self.ROOT = ROOT
         self.video = True
         self.is_metric = is_metric

@@ -3,8 +3,6 @@ from typing import Any
 
 from .utils import (
     normalize_prediction_robust,
-    reduction_batch_based,
-    reduction_image_based,
 )
 
 
@@ -73,12 +71,14 @@ class TrimmedMAELoss(torch.nn.Module):
     def __init__(self, trim: float = 0.2, reduction: str = "batch-based") -> None:
         super().__init__()
 
+        if not 0 <= trim < 1:
+            raise ValueError(f"invalid trim {trim!r}")
+        if reduction not in {"batch-based", "image-based"}:
+            raise ValueError(f"invalid reduction {reduction!r}")
+
         self.trim = trim
 
-        if reduction == "batch-based":
-            self.__reduction = reduction_batch_based
-        else:
-            self.__reduction = reduction_image_based
+        self.reduction = reduction
 
     def forward(
         self,
@@ -89,15 +89,24 @@ class TrimmedMAELoss(torch.nn.Module):
     ) -> torch.Tensor:
         if torch.sum(mask) == 0:
             return torch.sum(prediction) * 0.0
-        M = torch.sum(mask, (1, 2))
         res = prediction - target
         if weight_mask is not None:
             res = res * weight_mask
-        res = res[mask.bool()].abs()
-        trimmed, _ = torch.sort(res.view(-1), descending=False)
-        keep_num = int(len(res) * (1.0 - self.trim))
-        if keep_num <= 0:
-            return torch.sum(prediction) * 0.0
-        trimmed = trimmed[:keep_num]
+        if self.reduction == "batch-based":
+            valid_res = res[mask.bool()].abs()
+            keep_num = int(len(valid_res) * (1.0 - self.trim))
+            if keep_num <= 0:
+                return torch.sum(prediction) * 0.0
+            return torch.sort(valid_res).values[:keep_num].mean()
 
-        return self.__reduction(trimmed, M)
+        image_losses = []
+        for image_res, image_mask in zip(res, mask, strict=True):
+            valid_res = image_res[image_mask.bool()].abs()
+            keep_num = int(len(valid_res) * (1.0 - self.trim))
+            if keep_num > 0:
+                image_losses.append(torch.sort(valid_res).values[:keep_num].mean())
+        return (
+            torch.stack(image_losses).mean()
+            if image_losses
+            else torch.sum(prediction) * 0.0
+        )

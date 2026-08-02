@@ -11,7 +11,6 @@ import datetime
 import json
 import math
 import os
-import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -248,6 +247,41 @@ def build_manifest(cfg: FinetuneDepthCfg) -> dict:
     return experiment_manifest(cfg, exclude=_NON_IDENTITY_FIELDS)
 
 
+def _validate_resume_identity(cfg: FinetuneDepthCfg, manifest: dict) -> None:
+    if not cfg.resume:
+        return
+    manifest_path = Path(cfg.resume).resolve().parent / "manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError(f"missing owning manifest for resume: {manifest_path}")
+    try:
+        with manifest_path.open() as handle:
+            owner = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"cannot parse owning manifest for resume: {manifest_path}: {error}"
+        ) from error
+    if not isinstance(owner, dict):
+        raise RuntimeError(
+            f"owning manifest for resume must be a JSON object: {manifest_path}"
+        )
+
+    owner = {
+        key: value
+        for key, value in owner.items()
+        if key not in ("experiment_hash", "experiment_id")
+    }
+    missing = object()
+    drift = []
+    for key in sorted(set(owner) | set(manifest)):
+        old, new = owner.get(key, missing), manifest.get(key, missing)
+        if old != new:
+            old_value = "<missing>" if old is missing else repr(old)
+            new_value = "<missing>" if new is missing else repr(new)
+            drift.append(f"{key}: owner={old_value}, current={new_value}")
+    if drift:
+        raise ValueError("resume config identity drift: " + "; ".join(drift))
+
+
 def build_train_loader(
     args: FinetuneDepthCfg,
     split: Split,
@@ -355,6 +389,8 @@ def build_model(
     if load_pretrained and args.pretrained and not args.resume:
         print(f"Loading pretrained StreamVGGT: {args.pretrained}")
         print(model.load_pretrained(args.pretrained))
+    elif load_pretrained and args.resume:
+        model.initialize_encoder_cache(args.resume)
     n = model.apply_lora_adapters()
     stats = model.freeze_for_finetune()
     model.to(device)
@@ -369,6 +405,65 @@ def build_model(
         raise RuntimeError("base attention projections must stay frozen")
 
     return model, stats
+
+
+def _commit_checkpoint(
+    output_dir: str, fname: str, temporary_fname: str, accelerator: Accelerator
+) -> None:
+    # Rank-0 fsync/replace can raise before the barrier, leaving peer ranks
+    # blocked there until timeout.
+    if accelerator.is_main_process:
+        temporary = os.path.join(output_dir, f"checkpoint-{temporary_fname}.pth")
+        target = os.path.join(output_dir, f"checkpoint-{fname}.pth")
+        with open(temporary, "rb") as checkpoint:
+            os.fsync(checkpoint.fileno())
+        os.replace(temporary, target)
+    accelerator.wait_for_everyone()
+
+
+def _validate_loader_lengths(
+    train_loader: DataLoader,
+    val_loaders: list[DataLoader],
+    stream_loaders: list[DataLoader],
+) -> None:
+    loaders = [("training loader", train_loader)]
+    loaders.extend(
+        (f"validation loader {index}", loader)
+        for index, loader in enumerate(val_loaders)
+    )
+    loaders.extend(
+        (f"streaming loader {index}", loader)
+        for index, loader in enumerate(stream_loaders)
+    )
+    for name, loader in loaders:
+        if len(loader) == 0:
+            raise ValueError(
+                f"{name} has zero batches after sharding; dataset is too small for "
+                "the world size: lower the world size, lower the batch size, or "
+                "disable drop_last"
+            )
+
+
+def _validate_resume_step(args: FinetuneDepthCfg) -> None:
+    if args.start_step != 0:
+        raise ValueError(
+            "mid-epoch resume is unsupported because sampler and RNG state are not "
+            f"restored (checkpoint start_step={args.start_step})"
+        )
+
+
+def _wandb_init_kwargs(args: FinetuneDepthCfg, run_id: str) -> dict:
+    tracker_id = experiment_id({"exp_group": args.exp_group, "run_id": run_id})
+    kwargs = {
+        "name": f"{args.exp_group}_{run_id}",
+        "group": args.exp_group,
+        "dir": args.output_dir,
+        "id": tracker_id,
+        "resume": "allow",
+    }
+    if WANDB_ENTITY:
+        kwargs["entity"] = WANDB_ENTITY
+    return kwargs
 
 
 def run(
@@ -397,15 +492,8 @@ def run(
             json.dump({**manifest, **record}, f, indent=2, sort_keys=True)
 
     wandb_config = {**to_primitive(args), **manifest, **record}
-    wandb_init_kwargs = {
-        "name": f"{args.exp_group}_{run_id}",
-        # group -> every run sharing exp_group is bucketed together in the wandb
-        # UI (e.g. all arms of one ablation ladder); run_id keeps names unique
-        "group": args.exp_group,
-        "dir": args.output_dir,
-    }
-    if WANDB_ENTITY:
-        wandb_init_kwargs["entity"] = WANDB_ENTITY
+    # Stable id reconnects resumes; "allow" admits older checkpoints.
+    wandb_init_kwargs = _wandb_init_kwargs(args, run_id)
     accelerator.init_trackers(
         project_name=WANDB_PROJECT,
         config=wandb_config,
@@ -437,7 +525,6 @@ def run(
             if args.batch_size == 1
             else build_val_loaders(args, accelerator, batch_size=1)
         )
-
     printer.info("Loading depth-conditioned model")
     model, _ = build_model(args, mcfg, device)
 
@@ -451,6 +538,7 @@ def run(
     best_so_far = misc.load_model(
         args=args, model_without_ddp=model, optimizer=optimizer, loss_scaler=loss_scaler
     )
+    _validate_resume_step(args)
     if best_so_far is None:
         best_so_far = float("inf")
 
@@ -468,10 +556,12 @@ def run(
             if stream_is_val
             else [accelerator.prepare(dl) for dl in data_loaders_stream]
         )
+    _validate_loader_lengths(data_loader_train, data_loaders_val, data_loaders_stream)
 
     def save_model(
         epoch: int, fname: str, best_so_far: float, data_iter_step: int
     ) -> None:
+        temporary_fname = f".{fname}.tmp-{os.getpid()}"
         misc.save_model(
             accelerator=accelerator,
             args=picklable_args(args),
@@ -480,9 +570,10 @@ def run(
             loss_scaler=loss_scaler,
             epoch=epoch,
             step=data_iter_step,
-            fname=fname,
+            fname=temporary_fname,
             best_so_far=best_so_far,
         )
+        _commit_checkpoint(args.output_dir, fname, temporary_fname, accelerator)
 
     printer.info(f"Start training for {args.epochs} epochs")
     start_time = time.time()
@@ -638,6 +729,19 @@ def _prepare_batch(batch: list[dict], mcfg: MetricCfg) -> None:
     )
 
 
+def _check_finite_loss(
+    loss_value: float, loss_details: dict, accelerator: Accelerator
+) -> None:
+    local_finite = math.isfinite(loss_value)
+    finite = torch.tensor(local_finite, device=accelerator.device)
+    if accelerator.num_processes > 1:
+        finite = accelerator.reduce(finite, reduction="min")
+    if not finite.item():
+        if local_finite:
+            raise FloatingPointError("Non-finite loss detected on another rank")
+        raise FloatingPointError(f"Loss is {loss_value}, loss details: {loss_details}")
+
+
 def train_loop(
     model: torch.nn.Module,
     criterion: torch.nn.Module,
@@ -686,11 +790,7 @@ def train_loop(
             )
             loss, loss_details = result["loss"]
             loss_value = float(loss)
-            if not math.isfinite(loss_value):
-                print(
-                    f"Loss is {loss_value}, stopping training, loss details: {loss_details}"
-                )
-                sys.exit(1)
+            _check_finite_loss(loss_value, loss_details, accelerator)
             if not result.get("already_backprop", False):
                 loss_scaler(
                     loss,
@@ -983,6 +1083,7 @@ def _streaming_depth_metrics(
         for i in range(S):
             mask = valid[b, i] & (gt[b, i] > 0)  # [H,W]
             if not mask.any():
+                prev = None
                 continue
             res_affine, _, _, _ = depth_evaluation(
                 pred[b, i], gt[b, i], custom_mask=mask, scale_and_shift=True
@@ -1057,7 +1158,7 @@ def _reduce_metrics(
     )
     if accelerator.num_processes > 1:
         accelerator.wait_for_everyone()
-        accelerator.reduce(t, reduction="sum")
+        t = accelerator.reduce(t, reduction="sum")
 
     per_dataset: dict[str, dict[str, float]] = defaultdict(dict)
     blended_sum: dict[str, float] = defaultdict(float)
@@ -1097,6 +1198,7 @@ def _accumulate_batch_loss(
             "requires one dataset per batch (build_val_loaders guarantees this)"
         )
     dataset = labels.pop()
+    batch_size = views[0]["img"].shape[0]
 
     def scalar(v) -> float | None:
         """Same coercion misc.MetricLogger.update applies, so the per-dataset
@@ -1112,9 +1214,37 @@ def _accumulate_batch_loss(
     for name, val in (("loss", loss_value), *loss_details.items()):
         v = scalar(val)
         if v is not None:
-            sums[f"{dataset}/{name}"] += v
-            counts[f"{dataset}/{name}"] += 1
+            sums[f"{dataset}/{name}"] += v * batch_size
+            counts[f"{dataset}/{name}"] += batch_size
     return True
+
+
+def _criterion_per_clip(
+    criterion: torch.nn.Module, views: list[dict], preds: list[dict]
+):
+    batch_size = views[0]["img"].shape[0]
+
+    def one_clip(items: list[dict], index: int) -> list[dict]:
+        out = []
+        for item in items:
+            out.append(
+                {
+                    key: value[index : index + 1]
+                    if (
+                        isinstance(value, torch.Tensor)
+                        and value.ndim > 0
+                        and value.shape[0] == batch_size
+                    )
+                    or (isinstance(value, list) and len(value) == batch_size)
+                    else value
+                    for key, value in item.items()
+                }
+            )
+        return out
+
+    for index in range(batch_size):
+        clip_views = one_clip(views, index)
+        yield clip_views, *criterion(clip_views, one_clip(preds, index))
 
 
 def _log_val_stats(
@@ -1127,8 +1257,8 @@ def _log_val_stats(
 ) -> dict:
     """Whole-epoch avg/med aggregation + wandb logging, ported from
     finetune.py::test_one_epoch. Loss meters get avg (globally reduced) and
-    med (rank-local -- SmoothedValue only syncs count/total); depth metrics and
-    per-dataset losses arrive pre-reduced as plain avgs.
+    med (gathered from every rank); depth metrics and per-dataset losses arrive
+    pre-reduced as plain avgs.
 
     Logged keys are "<prefix>/<dataset>/<metric>_avg" per dataset and
     "<prefix>/all/<metric>_avg" for the dataset-blended figure, so a mixed val
@@ -1146,7 +1276,12 @@ def _log_val_stats(
             continue
         results[f"{name}_avg"] = meter.global_avg
         if len(meter.deque):
-            results[f"{name}_med"] = meter.median
+            observations = list(meter.deque)
+            if accelerator.num_processes > 1:
+                observations = [
+                    value for part in gather_object([observations]) for value in part
+                ]
+            results[f"{name}_med"] = torch.tensor(observations).median().item()
     results.update({f"{k}_avg": v for k, v in blended.items()})
 
     def loggable(val) -> bool:
@@ -1248,9 +1383,25 @@ def val_loop(
                 )
                 loss_value, loss_details = result["loss"]
                 metric_logger.update(loss=float(loss_value), **loss_details)
-                _accumulate_batch_loss(
-                    result["views"], loss_value, loss_details, loss_sums, loss_counts
-                )
+                if criterion is None:
+                    _accumulate_batch_loss(
+                        result["views"],
+                        loss_value,
+                        loss_details,
+                        loss_sums,
+                        loss_counts,
+                    )
+                else:
+                    for clip_views, clip_loss, clip_details in _criterion_per_clip(
+                        criterion, result["views"], result["pred"]
+                    ):
+                        _accumulate_batch_loss(
+                            clip_views,
+                            clip_loss,
+                            clip_details,
+                            loss_sums,
+                            loss_counts,
+                        )
                 for k, vals in _val_depth_metrics(
                     result["views"], result["pred"]
                 ).items():
@@ -1265,13 +1416,20 @@ def val_loop(
     )
     # the meters already carry the blended losses over every loader (and the
     # medians), so only the per-dataset half of this reduction is used
-    loss_per_dataset, _ = _reduce_metrics(loss_sums, loss_counts, accelerator)
+    loss_per_dataset, loss_blended = _reduce_metrics(
+        loss_sums, loss_counts, accelerator
+    )
     per_dataset = {
         ds: {**depth_per_dataset.get(ds, {}), **loss_per_dataset.get(ds, {})}
         for ds in set(depth_per_dataset) | set(loss_per_dataset)
     }
     results = _log_val_stats(
-        metric_logger, per_dataset, depth_blended, accelerator, prefix, step
+        metric_logger,
+        per_dataset,
+        {**depth_blended, **loss_blended},
+        accelerator,
+        prefix,
+        step,
     )
     _log_val_images(sampler, accelerator, prefix, epoch, step, args.val_log_images)
     # gated by the caller (only the final val pass asks for GLBs -- a quick
@@ -1368,6 +1526,11 @@ def streaming_eval(
 
 
 def main(cfg: FinetuneDepthCfg) -> None:
+    if cfg.resume is None and cfg.start_epoch != 0:
+        raise ValueError(
+            "start_epoch must be 0 for a fresh run; use --resume to continue"
+        )
+
     mcfg = MetricCfg(
         depth_cond=cfg.depth_cond,
         lora=cfg.lora,
@@ -1376,6 +1539,7 @@ def main(cfg: FinetuneDepthCfg) -> None:
     ).validate()
 
     manifest = build_manifest(cfg)
+    _validate_resume_identity(cfg, manifest)
     run_hash = experiment_hash(manifest)  # full, canonical identity (record + wandb)
     run_id = experiment_id(manifest)  # short display id, single source of truth
     cfg.output_dir = resolve_output_dir(cfg, run_id)

@@ -107,6 +107,11 @@ class DatasetConfig:
         self.dataset = DatasetName(self.dataset)
         self.split = Split(self.split)
         self.transform = TransformName(self.transform)
+        if self.is_metric is not True:
+            raise ValueError(
+                f"{self.dataset.value} provides metric depth; is_metric must be True, "
+                f"got {self.is_metric!r}"
+            )
         if self.num_views < 1:
             raise ValueError(f"num_views must be >= 1, got {self.num_views}")
         # one shared guard (see base_multiview_dataset): a scalar left over from
@@ -126,6 +131,15 @@ class DatasetConfig:
                 raise ValueError(
                     f"each resolution must be a positive (width, height), got {wh!r}"
                 )
+        if self.n_corres < 0:
+            raise ValueError(f"n_corres must be >= 0, got {self.n_corres}")
+        if self.nneg < 0:
+            raise ValueError(f"nneg must be >= 0, got {self.nneg}")
+        if self.n_corres > 0 and self.nneg > self.n_corres:
+            raise ValueError(
+                f"nneg must satisfy 0 <= nneg <= n_corres, got "
+                f"nneg={self.nneg}, n_corres={self.n_corres}"
+            )
         if self.nneg and self.n_corres <= 0:
             raise ValueError("nneg requires n_corres > 0")
         if self.epoch_size is not None and self.epoch_size < 1:

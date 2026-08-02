@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
@@ -121,12 +123,21 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
             return StreamVGGTOutput(ress=ress, views=views)  # [S] [B, C, H, W]
         
     def inference(self, frames, query_points: torch.Tensor = None, past_key_values=None,
-                  depth_token_feats_list=None, depth_head_residuals_list=None):
+                  depth_token_feats_list=None, depth_head_residuals_list=None,
+                  frame_times_ms=None):
         """Streaming inference with the causal KV cache.
 
         depth_token_feats_list / depth_head_residuals_list: optional per-frame
         depth-conditioning inputs (same semantics as in forward(), one entry per
         frame, entries may be None). Token feats enter BEFORE the KV cache.
+
+        frame_times_ms: optional list; when given, one wall-clock millisecond
+        entry per frame is APPENDED (aggregator + heads only -- the conditioning
+        encoder runs in a separate upstream loop, see
+        DepthConditionedStreamVGGT.inference, which adds its own per-frame cost
+        into the same list). Attention is over a cache that grows with the frame
+        index, so these are expected to ramp; frame 0 is the empty-cache case and
+        also absorbs lazy CUDA init, so read it separately from the rest.
         """
         if depth_token_feats_list is not None and len(depth_token_feats_list) != len(frames):
             raise ValueError(
@@ -147,7 +158,25 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
         all_ress = []
         processed_frames = []
 
+        # CUDA events rather than a per-frame synchronize(): they are enqueued on
+        # the stream like kernels, so the CPU keeps running ahead and the loop we
+        # measure stays the loop that normally runs. A single sync after the clip
+        # resolves them all. On CPU there is nothing to overlap, so perf_counter
+        # is already exact.
+        timing = frame_times_ms is not None
+        timing_device = frames[0]["img"].device
+        cuda_timing = timing and timing_device.type == "cuda"
+        timing_stream = torch.cuda.current_stream(timing_device) if cuda_timing else None
+        events, host_times = [], []
+
         for i, frame in enumerate(frames):
+            if cuda_timing:
+                events.append(
+                    (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+                )
+                events[-1][0].record(timing_stream)
+            elif timing:
+                t0 = time.perf_counter()
             images = frame["img"].unsqueeze(0)
             token_feats = depth_token_feats_list[i] if depth_token_feats_list is not None else None
             head_residuals = depth_head_residuals_list[i] if depth_head_residuals_list is not None else None
@@ -212,6 +241,18 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 if query_points is not None else {})
             })
             processed_frames.append(frame)
+            if cuda_timing:
+                events[-1][1].record(timing_stream)
+            elif timing:
+                host_times.append((time.perf_counter() - t0) * 1e3)
         
+        if cuda_timing:
+            # the one sync of the whole clip; the caller is about to read these
+            # outputs, which would sync anyway
+            torch.cuda.synchronize(timing_device)
+            frame_times_ms.extend(s.elapsed_time(e) for s, e in events)
+        elif timing:
+            frame_times_ms.extend(host_times)
+
         output = StreamVGGTOutput(ress=all_ress, views=processed_frames)
         return output

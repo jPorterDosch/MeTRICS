@@ -29,9 +29,6 @@ def get_args_parser():
     parser.add_argument("--device", type=str, default="cuda:0", help="device")
     parser.add_argument("--model_name", type=str, default="")
     parser.add_argument(
-        "--conf_thresh", type=float, default=0.0, help="confidence threshold"
-    )
-    parser.add_argument(
         "--output_dir",
         type=str,
         default="",
@@ -249,8 +246,6 @@ def main(args):
                                 pts = pred_pts[j].cpu().numpy()[0]
                                 conf = preds[j]["conf"].cpu().data.numpy()[0]
 
-                            # mask = mask & (conf > 1.8)
-
                             pts_gt = gt_pts[j].detach().cpu().numpy()[0]
 
                             H, W = image.shape[:2]
@@ -301,7 +296,7 @@ def main(args):
                     pts_gt_all_masked = pts_gt_all[masks_all > 0]
                     images_all_masked = images_all[masks_all > 0]
 
-                    mask = np.isfinite(pts_all_masked)  
+                    mask = np.isfinite(pts_all_masked)
                     pts_all_masked = pts_all_masked[mask]
 
                     mask_gt = np.isfinite(pts_gt_all_masked)

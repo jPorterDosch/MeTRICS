@@ -129,7 +129,7 @@ def main(args):
                     ],
                     axis=0,
                 )
-                # for depth eval, set align_with_lad2=False to use median alignment; set align_with_lad2=True to use scale&shift alignment
+                # align_with_lad2 selects the historical scale-and-shift route.
                 if args.align == "scale&shift":
                     depth_results, error_map, depth_predict, depth_gt = (
                         depth_evaluation(
@@ -242,7 +242,7 @@ def main(args):
                     ],
                     axis=0,
                 )
-                # for depth eval, set align_with_lad2=False to use median alignment; set align_with_lad2=True to use scale&shift alignment
+                # align_with_lad2 selects the historical scale-and-shift route.
                 if args.align == "scale&shift":
                     depth_results, error_map, depth_predict, depth_gt = (
                         depth_evaluation(
@@ -344,7 +344,7 @@ def main(args):
                     axis=0,
                 )
 
-                # for depth eval, set align_with_lad2=False to use median alignment; set align_with_lad2=True to use scale&shift alignment
+                # align_with_lad2 selects the historical scale-and-shift route.
                 if args.align == "scale&shift":
                     depth_results, error_map, depth_predict, depth_gt = (
                         depth_evaluation(
