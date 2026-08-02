@@ -394,6 +394,8 @@ def test_validation_mode_produces_no_auxiliary_term() -> None:
         f"expected {base_loss.item()}, got {results['loss_avg']}"
     )
     assert conditioner.pop_aux_loss() is None
+    assert model.conditioner is not None
+    assert model.conditioner.pop_aux_loss() is None
     print(f"[mae-val] keys={sorted(results)}; loss_avg={results['loss_avg']}")
 
 
