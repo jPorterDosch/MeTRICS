@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 class EncoderType(str, enum.Enum):
     IDENTITY = "identity"  # raw passthrough ("naive")
     CONV = "conv"
-    MAE = "mae"  # stub, not built
+    MAE = "mae"
 
 
 class InjectionType(str, enum.Enum):
@@ -81,6 +81,14 @@ class DepthCondCfg:
     # conv encoder width (encoder == CONV)
     conv_channels: int = 128
 
+    # MAE encoder and training-only reconstruction head (encoder == MAE)
+    mae_dim: int = 256
+    mae_depth: int = 4
+    mae_num_heads: int = 8
+    mae_decoder_dim: int = 128
+    mae_decoder_depth: int = 2
+    mae_recon_weight: float = 0.1
+
     # token arm: residual-add into RGB patch tokens (built). Appending extra
     # tokens is a possible future sub-flag; selecting it raises for now.
     token_append: bool = False
@@ -123,6 +131,32 @@ class DepthCondCfg:
         if self.sim_patch_size <= 0:
             raise ValueError(
                 f"sim_patch_size must be positive, got {self.sim_patch_size}"
+            )
+        if self.mae_dim <= 0:
+            raise ValueError(f"mae_dim must be positive, got {self.mae_dim}")
+        if self.mae_depth <= 0:
+            raise ValueError(f"mae_depth must be positive, got {self.mae_depth}")
+        if self.mae_num_heads <= 0:
+            raise ValueError(
+                f"mae_num_heads must be positive, got {self.mae_num_heads}"
+            )
+        if self.mae_dim % self.mae_num_heads != 0:
+            raise ValueError(
+                "mae_num_heads must divide mae_dim, got "
+                f"mae_num_heads={self.mae_num_heads}, mae_dim={self.mae_dim}"
+            )
+        if self.mae_decoder_dim <= 0:
+            raise ValueError(
+                f"mae_decoder_dim must be positive, got {self.mae_decoder_dim}"
+            )
+        if self.mae_decoder_depth <= 0:
+            raise ValueError(
+                f"mae_decoder_depth must be positive, got {self.mae_decoder_depth}"
+            )
+        if not math.isfinite(self.mae_recon_weight) or self.mae_recon_weight < 0:
+            raise ValueError(
+                "mae_recon_weight must be finite and non-negative, got "
+                f"{self.mae_recon_weight}"
             )
 
 
