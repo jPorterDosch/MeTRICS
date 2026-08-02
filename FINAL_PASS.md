@@ -245,3 +245,8 @@ These are merger/product decisions, not omitted agent work:
 14. Resolved: item 8 is declined; do not change the 25 pre-existing ruff rule violations or five pre-existing format failures.
 
 No GPU test ran, no source/test fix was made, and nothing was pushed.
+
+## Phase 10, round 2 decisions
+
+- Item 10 (teacher-confidence weighting, A R1-6) was **declined by the user**.
+  No code change was made; it is not an open review item.
