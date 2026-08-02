@@ -353,8 +353,8 @@ above.**
   model inference path, whose base and depth-conditioned implementations
   already own per-frame timing. Untimed runs retain the vendored wrapper call.
   Measuring only around the complete call would have lost the per-frame
-  columns; recreating the vendored wrapper would have duplicated its
-  query-point and inference plumbing.
-- The timing columns are preserved. The behavior cost is limited to timing
-  mode: these depth-only visualizers pass no tracking query points, whose
-  outputs they do not consume.
+  columns; recreating the vendored wrapper would have duplicated its inference
+  plumbing. The existing vendored query-point sampler is reused, not copied,
+  so the timed model workload retains the prior shape.
+- The timing columns and query-point behavior are preserved. The cost is one
+  small first-party adapter around the model-owned timing path.
