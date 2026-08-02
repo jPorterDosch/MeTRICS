@@ -1,12 +1,12 @@
 # PR #26 final pass — Phase 10 decisions
 
-This round records the user's final-pass decisions without restating the merge
-verdict. Report durability is intended: the two local readability reports remain
-untracked and are not deliverables. Items 2, 4, 5, 6, and 7 were applied; item
-8 is declined. Item 9b was not attempted because the remaining hard-timeout
-budget could not safely accommodate three sanctioned source reverts and
-restorations. Item 3 remains open for a user decision after the read-only
-investigation recorded below.
+This document states the current Phase 10 position and preserves earlier states
+as explicit history. Report durability is intentional: `CODE_REVIEW_FINDINGS.md`
+and `IMPLEMENTATION_NOTES.md` stay local and untracked by user decision;
+`FINAL_PASS.md` and `EVAL_PARITY.md` are the tracked deliverables. Item 9b was
+deferred in rounds 1 and 2, then partly completed by `89f5a10` and `7140e32`:
+the affine and rank-log regions are test-guarded, while component-mask tuple
+fabrication remains byte-comparison-only. DUST-1 is the sole open item.
 
 ## Manager questions
 
@@ -14,7 +14,14 @@ investigation recorded below.
 
 Yes at the behavior-bearing regions, with two disclosed qualifications. The import byte probes matched the restored custom-mask fit (`9e8b27a`), Adam-L1 route (`79ae439`), last-write temporal reprojection (`15e8c4d`), eight-rank/stop-at-gap collection (`a2c1e5a`), and strict delta boundary (`9a4798d`). The component-mask region (`e6b93ef`) differs only because two trailing spaces present in `49656da` were removed; its executable statements match. The `f47ae0f` region deliberately does not match: `426809c` restores the fail-fast `ValueError` at the user's explicit PHASE 7 direction to prevent misleading findings.
 
-Cycle 1 commit `1545cba` deleted four tests that pinned the affine route (two tests), malformed point tuples, and rank cap/gap. That decision was accepted, but it leaves the byte comparison as the only remaining guard on those regions. Current tests still exercise restored import behavior for custom-mask fitting, last-write reprojection, and strict delta. Search found no test that asserts the reverted-away mask-aware fit, exact-L2 route, z-buffer, tuple-safe filtering, dynamic rank scan, or inclusive delta behavior.
+Cycle 1 commit `1545cba` deleted four tests that pinned the affine route (two
+tests), malformed point tuples, and rank cap/gap. At the Cycle 3 checkpoint the
+affine and rank-log regions were byte-comparison-only; that stale state is
+retracted. The affine route is test-guarded as of `7140e32`, and rank-log cap
+and first-gap truncation are test-guarded as of `89f5a10`. Component-mask tuple
+fabrication remains byte-comparison-only, the one parity region still without a
+behavior test. Current tests also exercise restored import behavior for
+custom-mask fitting, last-write reprojection, and strict delta.
 
 Commands and literal results:
 
@@ -61,7 +68,11 @@ exit 1
 
 ### 3. Did this PR violate the vendored constraint?
 
-The branch contains 13 changed lines in read-only `src/dust3r/inference.py`, so the literal tree constraint is violated. Commit evidence shows these were the user's own in-flight edits carried by `196d8e2`, not an agent editing vendored code. The change is an ordinary modification, forwards optional timing only when `frame_times_ms` is supplied, and is numerically inert for existing callers that omit it. I do not treat DUST-1 as independently merge-blocking once disclosed, but the user must explicitly keep/waive or relocate it.
+DUST-1 remains open awaiting the user. The branch contains 13 changed lines in
+read-only `src/dust3r/inference.py`; commit evidence shows these were the user's
+own in-flight edits carried by `196d8e2`, not an agent editing vendored code.
+The user must choose either keep-and-waive, or change both visualizers to stop
+routing through the vendored entry point and then restore the vendored file.
 
 Read-only call-graph investigation answers:
 
@@ -214,37 +225,81 @@ Format provenance is:
 | format | `src/streamvggt/models/streamvggt.py` | pre-existing |
 | format | `src/visualize_depth.py` | introduced-by-this-PR |
 
-No lint or formatting violation was fixed. The 25 rule violations and five pre-existing format failures are debt for the user to waive or address separately; the two introduced format failures remain part of this PR's NOT MERGE-READY basis.
+Historical correction: at the Cycle 3 checkpoint no lint or formatting
+violation had been fixed, and the two PR-owned format failures were outstanding.
+That statement ceased to be current when `075ed03` fixed those two format
+failures. Item 8 remains declined by the user: all 25 pre-existing ruff errors
+and five pre-existing format failures are deliberately untouched because the
+user did not want to risk parity against existing code.
 
 ## Uncovered
 
-- Independent red reproduction covered 3 commits (`0a6a819`, `c03c57b`, `c018c86`) out of roughly 40 commits with test claims: about **3/40, or 7.5%**. Every other UPHELD red-before/green-after verdict still rests on a claim made by the same agent that wrote both the test and fix. This is the central limitation of the pass.
+- Independent red reproduction covered 3 commits (`0a6a819`, `c03c57b`,
+  `c018c86`) out of roughly 40 commits with test claims: about **3/40, or
+  7.5%**. Phase 10 subsequently added five more literal red reproductions, but
+  no new independent sampling denominator was established, so the independently
+  reproduced coverage figure remains 7.5%. This is the central limitation.
 - Nothing requiring a GPU, real data, real checkpoints, multi-rank execution, or a live wandb service was run.
 - No training, evaluation, export, `experiments/eval_all.sh`, `srun`, `sbatch`, `tests/val_images_wandb_check.py`, or actual CUDA timing/cache arithmetic was run.
 - The import blobs were not verified as verbatim upstream; that requires network access.
 - Real evaluator numerical parity, DDP loader sharding, checkpoint failure injection, stale-result re-scoring, and every deferred experiment below remain unperformed.
-- Ruff provenance classification was performed after the rest of this gate: all 25 rule violations and five format failures are pre-existing, while the format failures in `src/streamvggt/depth_cond/model.py` and `src/visualize_depth.py` were introduced by this PR.
+- Ruff provenance found 25 rule violations and five format failures to be
+  pre-existing. Two additional PR-owned format failures in
+  `src/streamvggt/depth_cond/model.py` and `src/visualize_depth.py` were present
+  at the Cycle 3 checkpoint and were fixed by `075ed03`.
 
-## User decisions and outcomes
+## Current item status at HEAD
 
-These are merger/product decisions and their current outcomes:
+This ledger supersedes stale Cycle 3 conclusions while retaining their history:
 
-1. Resolved: **Area A R1-6** teacher-confidence weighting was declined by the user (item 10).
-2. Resolved: **Area A R2-5** inert `lambda_track` was declined by the user (item 11).
-3. Resolved: **Area A R2-8** unused `CameraLoss.delta` was declined by the user (item 12).
-4. Resolved: **Area C R2-3** is accepted pre-existing behavior by user decision (item 13).
-5. Resolved: **Area C R2-5** is accepted pre-existing behavior by user decision (item 14).
-6. Resolved: **Self-audit R2-1** now fails fast on zero-length prepared loaders (item 15).
-7. Resolved: **Self-audit R2-3** timeout behavior is accepted by user decision (item 16).
-8. **DUST-1:** keep the 13 vendored lines and explicitly waive the read-only constraint, or restore the vendored file and move the timing shim into first-party code.
-9. **`reject_contradictory_modes`:** reachability fact—only `tests/test_eval_area_c.py:183` passes `True`; no shipped path does. Cycle 2's separate justification is that this is a deliberate library-level opt-in for external callers whose false default preserves parity. Decide whether to keep that external API, wire a shipped selector, or remove it.
-10. **TU-1 (`src/train_utils.py:27,41`):** decide rank-variable precedence. `LOCAL_RANK` outranks `SLURM_PROCID`, so multi-node process 8 can believe it is global rank zero. This is a live pre-existing defect left unfixed, not a disproved defect.
-11. **VS-1 (`src/visualize_spot.py:431`):** decide behavior when `dvals` is empty; current min/max/median crashes. This is a live pre-existing defect left unfixed, not a disproved defect.
-12. Resolved: the local readability reports intentionally remain untracked.
-13. Resolved: remove the dangling tracked reference while preserving its factual statement.
-14. Resolved: item 8 is declined; do not change the 25 pre-existing ruff rule violations or five pre-existing format failures.
+1. **Resolved — durability.** The two local reports remain untracked by user
+   decision, so this is not a defect. `FINAL_PASS.md` and `EVAL_PARITY.md` are
+   the tracked deliverables.
+2. **Resolved by `6b83815`.** The dangling tracked reference to the local
+   implementation report was removed while its factual zero-init statement was
+   preserved.
+3. **Open — DUST-1.** Round 1 found that `src/visualize_depth.py` and
+   `src/visualize_spot.py` pass `frame_times_ms` unconditionally to
+   `dust3r.inference.loss_of_one_batch`; deleting the 13 vendored lines alone
+   breaks both visualizers. The choices are keep-and-waive, or change both
+   visualizers to stop routing through the vendored entry point.
+4. **Resolved by `2a6a2da`.** `reject_contradictory_modes` is documented as a
+   library opt-in with no shipped caller; its false default preserves parity.
+5. **Fixed by `8717715` — TU-1.** Global rank precedence is `RANK`,
+   `SLURM_PROCID`, then `LOCAL_RANK`. It was rejected as pre-existing in Cycle 3
+   and was later fixed by explicit user decision.
+6. **Fixed by `118e683` — VS-1.** Empty sparse-depth windows report zero valid
+   pixels without fabricating a statistic. It was rejected as pre-existing in
+   Cycle 3 and was later fixed by explicit user decision.
+7. **Fixed by `075ed03`.** The two PR-owned format failures were outstanding at
+   the Cycle 3 checkpoint and were subsequently formatted; no other file was
+   formatted for this item.
+8. **Declined by the user.** The 25 pre-existing ruff errors and five
+   pre-existing format failures remain deliberately untouched because changing
+   existing code posed parity risk.
+9. **Resolved.** The parity reverts remain intact at their behavior-bearing
+   regions, subject to the disclosed whitespace-only component-mask difference
+   and the authorized fail-fast divergence.
+9b. **Partly completed after deferral.** Rounds 1 and 2 recorded this as not
+   attempted; `89f5a10` and `7140e32` then added public-boundary rank-log and
+   affine parity tests. Component-mask tuple fabrication remains
+   byte-comparison-only.
+10. **Declined by the user.** Teacher-confidence weighting was not changed.
+11. **Declined by the user.** Inert `lambda_track` was not changed.
+12. **Declined by the user.** Unused `CameraLoss.delta` was not changed.
+13. **Accepted pre-existing, live defect.** Failed video-evaluation sequences
+    can be omitted from the denominator at `49656da`, `489d28f`, and HEAD; the
+    user chose not to address it here.
+14. **Accepted pre-existing, live defect.** Prediction and GT files can be
+    paired by independent sort position without identity/count assertions at
+    `49656da`, `489d28f`, and HEAD; the user chose not to address it here.
+15. **Fixed by `85163d2`.** All three prepared-loader kinds fail fast at zero
+    batches; a one-batch loader does not trigger the guard.
+16. **Accepted by the user.** The 6000-second peer timeout after a rank-0
+    checkpoint-commit failure stands unchanged.
 
-No GPU test ran, no source/test fix was made, and nothing was pushed.
+No GPU test ran during this documentation correction, no source or test file
+was changed, and nothing was pushed.
 
 ## Phase 10, round 3 item 9b coverage
 
@@ -259,6 +314,9 @@ No GPU test ran, no source/test fix was made, and nothing was pushed.
   reached before this round's hard timeout; its only public boundary is the
   substantially heavier nonempty reconstruction path through
   `eval.mv_recon.launch.main`.
+
+The earlier statement that item 9b “was not attempted” remains true only as
+round 1/2 history; it is not the current status after `89f5a10` and `7140e32`.
 
 ## Phase 10, round 2 decisions
 
@@ -279,3 +337,9 @@ No GPU test ran, no source/test fix was made, and nothing was pushed.
 - Item 16 (rank-0 checkpoint-commit failure can leave peers waiting for the
   6000-second barrier timeout, SA R2-3) is **accepted by user decision**. No
   code change was made; it is not an open review item.
+
+## Restated verdict
+
+**FINAL VERDICT: NOT MERGE-READY — DUST-1 remains open for the user's explicit
+keep-and-waive or first-party rerouting decision; all other Phase 10 items have
+a current disposition above.**
