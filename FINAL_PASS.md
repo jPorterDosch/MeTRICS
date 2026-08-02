@@ -252,3 +252,5 @@ No GPU test ran, no source/test fix was made, and nothing was pushed.
   No code change was made; it is not an open review item.
 - Item 11 (inert `lambda_track`, A R2-5) was **declined by the user**. No code
   change was made; it is not an open review item.
+- Item 12 (unused `CameraLoss.delta`, A R2-8) was **declined by the user**. No
+  code change was made; it is not an open review item.
