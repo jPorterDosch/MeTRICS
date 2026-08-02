@@ -429,10 +429,13 @@ def main() -> None:
     sensor_mask = torch.stack([v["sparse_depth_mask"][0] for v in views])
     dens = sensor_mask.float().mean().item()
     dvals = sensor[sensor_mask]
-    print(
-        f"sensor sparse depth: {dens:.2%} of pixels | "
-        f"range [{dvals.min():.2f}, {dvals.max():.2f}] m, median {dvals.median():.2f}"
-    )
+    if dvals.numel():
+        print(
+            f"sensor sparse depth: {dens:.2%} of pixels | "
+            f"range [{dvals.min():.2f}, {dvals.max():.2f}] m, median {dvals.median():.2f}"
+        )
+    else:
+        print("sensor sparse depth: 0.00% of pixels | 0 valid sensor pixels")
     for v in views:
         for k, t in v.items():
             if torch.is_tensor(t):

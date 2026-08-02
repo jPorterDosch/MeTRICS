@@ -3,6 +3,7 @@
 import os
 import tempfile
 import threading
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -18,6 +19,67 @@ from streamvggt.depth_cond.config import (
     NormType,
 )
 from streamvggt.depth_cond.model import MetricStreamVGGT
+
+
+def test_empty_spot_sensor_window_reaches_inference_with_zero_density() -> None:
+    import visualize_spot as spot
+
+    class Model:
+        def load_state_dict(self, _state, strict=True) -> None:
+            assert strict
+
+        def eval(self) -> None:
+            pass
+
+    args = SimpleNamespace(
+        landscape_crop=False,
+        rotate="none",
+        crop_anchor="center",
+        weights="weights",
+        checkpoint="best",
+        base=False,
+        pretrained=None,
+        out_dir="out",
+        seq_dir="sequence",
+        start=0,
+        num_views=1,
+        stride=1,
+        timing=False,
+        heatmaps=False,
+    )
+    view = {
+        "sparse_depth": torch.zeros(1, 2, 2),
+        "sparse_depth_mask": torch.zeros(1, 2, 2, dtype=torch.bool),
+    }
+    mcfg = SimpleNamespace(
+        depth_cond=None, lora=None, encoder_cache=None, train=None
+    )
+    with (
+        mock.patch("argparse.ArgumentParser.parse_args", return_value=args),
+        mock.patch.object(spot, "resolve_checkpoint", return_value="checkpoint"),
+        mock.patch.object(spot.torch, "load", return_value={"model": {}}),
+        mock.patch.object(spot, "load_saved_args", return_value={}),
+        mock.patch.object(spot, "rebuild_metric_cfg", return_value=mcfg),
+        mock.patch.object(
+            spot, "Accelerator", return_value=SimpleNamespace(device=torch.device("cpu"))
+        ),
+        mock.patch.object(spot, "build_model", return_value=(Model(), None)),
+        mock.patch.object(spot, "load_spot_views", return_value=[view]),
+        mock.patch.object(spot, "_prepare_batch"),
+        mock.patch.object(
+            spot, "loss_of_one_batch", side_effect=RuntimeError("reached inference")
+        ),
+        mock.patch("builtins.print") as print_mock,
+    ):
+        try:
+            spot.main()
+        except RuntimeError as error:
+            assert str(error) == "reached inference"
+        else:
+            raise AssertionError("empty sensor window did not reach inference")
+    print_mock.assert_any_call(
+        "sensor sparse depth: 0.00% of pixels | 0 valid sensor pixels"
+    )
 
 
 def assert_value_error(message: str, callback) -> None:
@@ -181,6 +243,7 @@ def test_enabled_lora_requires_targets() -> None:
 
 
 if __name__ == "__main__":
+    test_empty_spot_sensor_window_reaches_inference_with_zero_density()
     test_concurrent_cache_writers_use_private_temp_files()
     test_cache_namespace_separates_encoder_checkpoints()
     test_build_model_resume_constructs_usable_encoder_cache()
