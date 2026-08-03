@@ -1,5 +1,5 @@
 <div align="center">
-<h1>MeTRIC: Metric Temporally-consistent Reconstruction In Causal Streaming</h1>
+<h1>MeTRICS: Metric Temporally-consistent Reconstruction In Causal Streaming</h1>
 </div>
 
 ### [Paper]TODO  | [Project Page]TODO | [Online Demo]TODO
@@ -10,7 +10,7 @@
 
 <sup>*</sup> Equal contribution.
 
-**MeTRIC**, a causal transformer architecture for **temporally consistent 4D geometry generation** built off of [StreamVGGT](https://github.com/wzzheng/StreamVGGT), delivers both fast inference and temporally-consistent 4D reconstruction.
+**MeTRICS**, a causal transformer architecture for **temporally consistent 4D geometry generation** built off of [StreamVGGT](https://github.com/wzzheng/StreamVGGT), delivers both fast inference and temporally-consistent 4D reconstruction.
 
 ## News
 TODO: as project progresses, update this section
@@ -20,15 +20,15 @@ TODO: add overview of method once everything finalized
 
 ### Installation
 
-1. Clone MeTRIC
+1. Clone MeTRICS
 ```bash
-git clone https://github.com/jPorterDosch/MeTRIC.git
-cd MeTRIC
+git clone https://github.com/jPorterDosch/MeTRICS.git
+cd MeTRICS
 ```
 2. Create conda environment
 ```bash
-conda create -n MeTRIC python=3.11 cmake=3.14.0
-conda activate MeTRIC 
+conda create -n MeTRICS python=3.11 cmake=3.14.0
+conda activate MeTRICS
 ```
 
 3. Install requirements
@@ -90,7 +90,7 @@ Sintel preprocessing is omitted since it is not necessary.
 The overall folder structure should be organized as follows：
 TODO: fill in rest of this once we have decided on directory structure
 ```
-MeTRIC
+MeTRICS
 ├── ckpt/
 |   ├── model.pt
 |   └── checkpoints.pth
