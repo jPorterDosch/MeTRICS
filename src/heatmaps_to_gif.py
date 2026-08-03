@@ -5,7 +5,9 @@ Groups files by everything before the trailing frame number -- e.g.
 base_clip0_depth_000.png .. _031.png -> base_clip0_depth.gif -- one GIF per
 (tag, series). With --compare, additionally writes side-by-side GIFs (one
 column per tag, in the order given, any number of arms >= 2) for every series
-ALL tags share: compare_depth.gif, compare_tcons.gif, ...
+ANY tag has -- compare_depth.gif, compare_tcons.gif, ... An arm missing a
+series (PromptDA returns no confidence) gets a captioned placeholder column
+rather than sinking the whole GIF.
 
 Those compare names carry no clip index, so comparing a second clip into the
 same directory would overwrite the first clip's GIFs -- pass --compare-name
@@ -24,7 +26,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 _FRAME_RE = re.compile(r"^(?P<prefix>.+)_(?P<idx>\d{3})\.png$")
 
@@ -46,6 +48,21 @@ def _positive_fps(s: str) -> float:
     if not (0 < fps <= 1000):
         raise argparse.ArgumentTypeError(f"--fps must be in (0, 1000], got {fps}")
     return fps
+
+
+def placeholder_panel(size: tuple[int, int], caption: str) -> Image.Image:
+    """A neutral panel standing in for a series an arm does not produce (e.g.
+    PromptDA has no confidence head), so the side-by-side GIF keeps one column
+    per arm instead of silently dropping the whole series."""
+    im = Image.new("RGB", size, (64, 64, 64))
+    draw = ImageDraw.Draw(im)
+    left, top, right, bottom = draw.textbbox((0, 0), caption)
+    draw.text(
+        ((size[0] - (right - left)) // 2, (size[1] - (bottom - top)) // 2),
+        caption,
+        fill=(210, 210, 210),
+    )
+    return im
 
 
 def write_gif(frames: list[Image.Image], out: Path, fps: float) -> None:
@@ -98,31 +115,46 @@ def main() -> None:
         tags = args.compare
         if len(tags) < 2:
             raise SystemExit("--compare needs at least two tags")
-        # series name = <tag>_<kind>; keep only kinds ALL tags share
-        kinds = set.intersection(
+        # series name = <tag>_<kind>; a kind is comparable when ANY tag has it.
+        # Tags lacking it (PromptDA writes no conf series) get a captioned
+        # placeholder column, so e.g. compare_conf.gif survives a three-arm run
+        # instead of silently disappearing.
+        kinds = set.union(
             *(
                 {p.removeprefix(t + "_") for p in series if p.startswith(t + "_")}
                 for t in tags
             )
         )
         if not kinds:
-            raise SystemExit(f"no shared series between {', '.join(map(repr, tags))}")
+            raise SystemExit(f"no series for any of {', '.join(map(repr, tags))}")
         for kind in sorted(kinds):
-            # strict: arms of one comparison must have the same frame count;
+            # strict: arms that have this series must agree on frame count;
             # silently truncating to the shortest would hide a partial export
-            seqs = [series[f"{t}_{kind}"] for t in tags]
+            have = [t for t in tags if f"{t}_{kind}" in series]
+            seqs = [series[f"{t}_{kind}"] for t in have]
             frames = []
+            missing_panels: dict[str, Image.Image] = {}
             for paths in zip(*seqs, strict=True):
-                imgs = [Image.open(p).convert("RGB") for p in paths]
-                # normalize followers to the first column's size (as before)
-                imgs = [
-                    im if im.size == imgs[0].size else im.resize(imgs[0].size)
-                    for im in imgs
-                ]
-                w = sum(im.width for im in imgs) + 4 * (len(imgs) - 1)
-                canvas = Image.new("RGB", (w, imgs[0].height), "white")
+                by_tag = {t: Image.open(p).convert("RGB") for t, p in zip(have, paths)}
+                size = by_tag[have[0]].size
+                cols = []
+                for t in tags:
+                    if t in by_tag:
+                        im = by_tag[t]
+                        # normalize followers to the first column's size
+                        cols.append(im if im.size == size else im.resize(size))
+                    else:
+                        if missing_panels.get(t) is None or (
+                            missing_panels[t].size != size
+                        ):
+                            missing_panels[t] = placeholder_panel(
+                                size, f"{t}: no {kind} output"
+                            )
+                        cols.append(missing_panels[t])
+                w = sum(im.width for im in cols) + 4 * (len(cols) - 1)
+                canvas = Image.new("RGB", (w, cols[0].height), "white")
                 x = 0
-                for im in imgs:  # 4px white gutter between columns
+                for im in cols:  # 4px white gutter between columns
                     canvas.paste(im, (x, 0))
                     x += im.width + 4
                 frames.append(canvas)

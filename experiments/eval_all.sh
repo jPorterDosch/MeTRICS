@@ -172,8 +172,12 @@ ARM_TAGS=(base_clip0 finetuned_clip0)
 [ "$PROMPTDA" = 1 ] && ARM_TAGS=(base_clip0 promptda_clip0 finetuned_clip0)
 
 heatmap_gifs () {  # $1 = heatmaps dir
-    [ -d "$1" ] && python heatmaps_to_gif.py --hm-dir "$1" \
-        --compare "${ARM_TAGS[@]}" --fps 10 || true
+    # no `|| true`: heatmaps_to_gif fails loudly on mismatched arm frame
+    # counts (a partial export), and under set -e that must abort the run
+    if [ -d "$1" ]; then
+        python heatmaps_to_gif.py --hm-dir "$1" \
+            --compare "${ARM_TAGS[@]}" --fps 10
+    fi
 }
 
 viz_pair () {  # $1 = out dir, $2 = scales array name, rest = extra flags

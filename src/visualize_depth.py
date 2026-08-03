@@ -21,6 +21,7 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 import matplotlib
@@ -176,11 +177,21 @@ def _infill_sparse_depth(depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
 def _run_promptda_inference(pmodel, views, frame_times_ms=None) -> list[dict]:
     """Per-frame PromptDA over an [S]-list of prepared views. Returns preds
     shaped like the other arms' (p["depth"] is [B,H,W,1]) so
-    _stack_depth_batch and the glb/heatmap exports work unchanged."""
+    _stack_depth_batch and the glb/heatmap exports work unchanged.
+
+    Timing is wall-clock around the WHOLE per-frame pipeline -- the CPU
+    nearest-neighbor infill, the host<->device copies, and the forward -- with
+    a CUDA sync on each side, so the frame_ms column stays like-for-like with
+    the streaming arms, whose timings cover their full per-frame inference.
+    """
     device = views[0]["img"].device
     preds = []
     with torch.no_grad():
         for view in views:
+            if frame_times_ms is not None:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
             img = view["img"].float()  # [B,3,H,W] in [0,1]; norm is internal
             sd = view["sparse_depth"].float().cpu().numpy()  # [B,H,W] meters
             sm = view["sparse_depth_mask"].cpu().numpy().astype(bool)
@@ -188,16 +199,11 @@ def _run_promptda_inference(pmodel, views, frame_times_ms=None) -> list[dict]:
                 [_infill_sparse_depth(sd[b], sm[b]) for b in range(sd.shape[0])]
             )
             prompt = torch.from_numpy(prompt).unsqueeze(1).to(device)  # [B,1,H,W]
-            if frame_times_ms is not None and device.type == "cuda":
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                depth = pmodel.predict(img, prompt)
-                end.record()
-                torch.cuda.synchronize()
-                frame_times_ms.append(start.elapsed_time(end))
-            else:
-                depth = pmodel.predict(img, prompt)
+            depth = pmodel.predict(img, prompt)
+            if frame_times_ms is not None:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                frame_times_ms.append((time.perf_counter() - t0) * 1000.0)
             preds.append({"depth": depth.permute(0, 2, 3, 1)})  # [B,H,W,1]
     return preds
 
@@ -859,6 +865,15 @@ def main() -> None:
         "package dir is env-overridable via PROMPTDA_REPO (import-time).",
     )
     ap.add_argument(
+        "--sparse-seed",
+        type=int,
+        default=0,
+        help="seed for the simulated sparse-prompt draw, applied per clip. "
+        "Keep it IDENTICAL across the arms you pair (the default is fine): it "
+        "is what makes all arms condition on the same sparse pattern, which "
+        "the frame-paired comparison in compare_heatmap_summaries.py assumes.",
+    )
+    ap.add_argument(
         "--out-dir",
         default=None,
         help="output dir (default: <weights-dir>/viz). GLBs land in <out-dir>/glb",
@@ -1062,6 +1077,7 @@ def main() -> None:
     os.makedirs(glb_dir, exist_ok=True)
 
     exported = 0
+    clip_idx = 0
     with torch.no_grad():
         for batch in loader:
             if exported >= args.num_clips:
@@ -1071,6 +1087,16 @@ def main() -> None:
                     "expected a batch-1 loader for streaming inference; got "
                     f"batch size {batch[0]['img'].shape[0]}"
                 )
+            # Reseed IMMEDIATELY before the sparse-prompt draw, per clip: the
+            # simulated prompt comes from the global torch RNG, and the three
+            # arms run as separate processes that consume different amounts of
+            # RNG state before/around this point (model init, streaming path).
+            # Without this each arm conditions on a DIFFERENT random prompt and
+            # the frame-paired A/B in compare_heatmap_summaries measures prompt
+            # lottery, not the model. Seeded per clip (not once) so later clips
+            # stay paired even if an arm's inference consumes RNG state.
+            torch.manual_seed(args.sparse_seed + clip_idx)
+            clip_idx += 1
             _prepare_batch(batch, mcfg)
             # inference=True -> the causal per-frame KV-cache path (deployment
             # path), no criterion. result carries views + per-view preds.
