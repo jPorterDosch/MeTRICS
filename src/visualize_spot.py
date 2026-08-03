@@ -65,7 +65,6 @@ from visualize_depth import (
     _CONF_VMAX,
     _CONF_VMIN,
     _PROMPTDA_CKPT_DEFAULT,
-    _PROMPTDA_REPO_DEFAULT,
     _REL_VMAX,
     _export_heatmaps,
     _format_frame_timing,
@@ -296,11 +295,6 @@ def main() -> None:
         "Needs the pose cache: run --base into this --out-dir first.",
     )
     ap.add_argument(
-        "--promptda-repo",
-        default=_PROMPTDA_REPO_DEFAULT,
-        help="vendored promptda package dir (as in visualize_depth)",
-    )
-    ap.add_argument(
         "--promptda-ckpt",
         default=_PROMPTDA_CKPT_DEFAULT,
         help="PromptDA checkpoint: local model.ckpt or HF repo id",
@@ -444,7 +438,7 @@ def main() -> None:
     if args.promptda:
         # the checkpoint is still loaded above: mcfg drives _prepare_batch, so
         # PromptDA sees exactly the frames/prompt the other arms see
-        pmodel = _load_promptda(args.promptda_repo, args.promptda_ckpt, device)
+        pmodel = _load_promptda(args.promptda_ckpt, device)
         model = None
     elif args.base:
         print(f"BASE model: loading pretrained weights {pretrained_path}")

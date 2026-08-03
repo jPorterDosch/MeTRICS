@@ -3,20 +3,20 @@
 
 Groups files by everything before the trailing frame number -- e.g.
 base_clip0_depth_000.png .. _031.png -> base_clip0_depth.gif -- one GIF per
-(tag, series). With --pair, additionally writes side-by-side GIFs (columns in
-the order given, 2 or more tags) for every series ALL tags share:
-pair_depth.gif, pair_tcons.gif, ...
+(tag, series). With --compare, additionally writes side-by-side GIFs (one
+column per tag, in the order given, any number of arms >= 2) for every series
+ALL tags share: compare_depth.gif, compare_tcons.gif, ...
 
-Those pair names carry no clip index, so pairing a second clip into the same
-directory would overwrite the first clip's GIFs -- pass --pair-name when
-looping over the clips of a --num-clips N export.
+Those compare names carry no clip index, so comparing a second clip into the
+same directory would overwrite the first clip's GIFs -- pass --compare-name
+when looping over the clips of a --num-clips N export.
 
 CPU only, PIL only. Examples:
     python heatmaps_to_gif.py --hm-dir ../viz/token_lora_seq/heatmaps
     python heatmaps_to_gif.py --hm-dir ../viz/token_lora_seq/heatmaps \\
-        --pair base_clip0 finetuned_clip0 promptda_clip0 --fps 10
+        --compare base_clip0 promptda_clip0 finetuned_clip0 --fps 10
     python heatmaps_to_gif.py --hm-dir ../viz/perscene/heatmaps \\
-        --pair base_clip3 finetuned_clip3 --pair-name pair_clip3
+        --compare base_clip3 finetuned_clip3 --compare-name compare_clip3
 """
 
 import argparse
@@ -65,19 +65,19 @@ def main() -> None:
     ap.add_argument("--hm-dir", required=True, help="the heatmaps/ directory")
     ap.add_argument("--fps", type=_positive_fps, default=10.0)
     ap.add_argument(
-        "--pair",
+        "--compare",
         nargs="+",
         metavar="TAG",
         help="also write side-by-side GIFs (one column per tag, left to right "
         "in the order given) for series ALL tags share, e.g. "
-        "--pair base_clip0 finetuned_clip0 promptda_clip0",
+        "--compare base_clip0 promptda_clip0 finetuned_clip0",
     )
     ap.add_argument(
-        "--pair-name",
-        default="pair",
-        help="filename stem for the --pair GIFs (default 'pair', giving "
-        "pair_conf.gif etc). One clip's pair GIFs overwrite another's without "
-        "this, since the tags are not part of the name.",
+        "--compare-name",
+        default="compare",
+        help="filename stem for the --compare GIFs (default 'compare', giving "
+        "compare_conf.gif etc). One clip's compare GIFs overwrite another's "
+        "without this, since the tags are not part of the name.",
     )
     args = ap.parse_args()
 
@@ -94,10 +94,10 @@ def main() -> None:
             args.fps,
         )
 
-    if args.pair:
-        tags = args.pair
+    if args.compare:
+        tags = args.compare
         if len(tags) < 2:
-            raise SystemExit("--pair needs at least two tags")
+            raise SystemExit("--compare needs at least two tags")
         # series name = <tag>_<kind>; keep only kinds ALL tags share
         kinds = set.intersection(
             *(
@@ -108,10 +108,11 @@ def main() -> None:
         if not kinds:
             raise SystemExit(f"no shared series between {', '.join(map(repr, tags))}")
         for kind in sorted(kinds):
+            # strict: arms of one comparison must have the same frame count;
+            # silently truncating to the shortest would hide a partial export
             seqs = [series[f"{t}_{kind}"] for t in tags]
-            n = min(len(s) for s in seqs)
             frames = []
-            for paths in zip(*(s[:n] for s in seqs)):
+            for paths in zip(*seqs, strict=True):
                 imgs = [Image.open(p).convert("RGB") for p in paths]
                 # normalize followers to the first column's size (as before)
                 imgs = [
@@ -125,7 +126,7 @@ def main() -> None:
                     canvas.paste(im, (x, 0))
                     x += im.width + 4
                 frames.append(canvas)
-            write_gif(frames, hm_dir / f"{args.pair_name}_{kind}.gif", args.fps)
+            write_gif(frames, hm_dir / f"{args.compare_name}_{kind}.gif", args.fps)
 
 
 if __name__ == "__main__":

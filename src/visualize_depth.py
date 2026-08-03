@@ -20,6 +20,7 @@
 # --------------------------------------------------------
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -29,6 +30,7 @@ import numpy as np
 import torch
 import trimesh
 from accelerate import Accelerator
+from huggingface_hub import hf_hub_download
 
 from dust3r.inference import loss_of_one_batch, sample_query_points  # noqa
 from eval.temporal_consistency.metrics import depth2point, point2depth
@@ -51,6 +53,18 @@ from streamvggt.depth_cond import (
     MetricCfg,
     TrainCondCfg,
 )
+
+# Third comparison arm: PromptDA (Prompt Depth Anything), vendored verbatim in
+# third_party/promptda (see its README). promptda is a namespace package (no
+# __init__.py), so the vendor DIR goes on sys.path, not the package itself --
+# which is why this import must sit below the path setup (hence the noqa).
+_PROMPTDA_REPO = os.environ.get(
+    "PROMPTDA_REPO",
+    str(Path(__file__).resolve().parent.parent / "third_party" / "promptda"),
+)
+if _PROMPTDA_REPO not in sys.path:
+    sys.path.insert(0, _PROMPTDA_REPO)
+from promptda.promptda import PromptDA  # noqa: E402
 
 # Checkpoint basenames finetune_depth.py writes, best -> worst preference when
 # --checkpoint is left at "auto". The pipeline no longer writes a separate
@@ -101,40 +115,23 @@ def _run_streaming_inference(model, views, frame_times_ms=None):
     return {"views": output.views, "pred": output.ress}
 
 
-# Third comparison arm: PromptDA (Prompt Depth Anything), vendored verbatim in
-# third_party/promptda (see its README). It is frame-independent (no KV cache)
-# and consumes the same [0,1] RGB + sparse-depth prompt the other arms see.
-_PROMPTDA_REPO_DEFAULT = os.environ.get(
-    "PROMPTDA_REPO",
-    str(Path(__file__).resolve().parent.parent / "third_party" / "promptda"),
-)
+# PromptDA is frame-independent (no KV cache) and consumes the same [0,1] RGB
+# + sparse-depth prompt the other arms see.
 _PROMPTDA_CKPT_DEFAULT = os.environ.get(
     "PROMPTDA_CKPT", "depth-anything/prompt-depth-anything-vitl"
 )
 
 
-def _load_promptda(repo_dir: str, ckpt: str, device) -> torch.nn.Module:
-    """Import the vendored promptda package and build the model in eval mode.
+def _load_promptda(ckpt: str, device) -> torch.nn.Module:
+    """Build the vendored PromptDA in eval mode.
 
     The checkpoint is resolved here (local path, else HF hub download) and its
     existence asserted BEFORE construction: PromptDA.load_checkpoint only warns
     on a missing file and would silently run with random depth-head weights.
     """
-    import sys
-
-    if not os.path.isdir(os.path.join(repo_dir, "promptda")):
-        raise SystemExit(
-            f"--promptda-repo {repo_dir!r} does not contain a promptda/ package "
-            "(expected the vendored copy in third_party/promptda)"
-        )
-    if repo_dir not in sys.path:
-        sys.path.insert(0, repo_dir)
-
     if os.path.exists(ckpt):
         resolved = ckpt
     else:
-        from huggingface_hub import hf_hub_download
-
         try:
             resolved = hf_hub_download(
                 repo_id=ckpt, repo_type="model", filename="model.ckpt"
@@ -149,8 +146,6 @@ def _load_promptda(repo_dir: str, ckpt: str, device) -> torch.nn.Module:
             ) from exc
     if not os.path.exists(resolved):
         raise SystemExit(f"PromptDA checkpoint {resolved!r} does not exist")
-
-    from promptda.promptda import PromptDA
 
     print(f"PROMPTDA model: loading weights {resolved}")
     return PromptDA(encoder="vitl", ckpt_path=resolved).to(device).eval()
@@ -857,16 +852,11 @@ def main() -> None:
         "are tagged promptda_* so all three arms can share one --out-dir.",
     )
     ap.add_argument(
-        "--promptda-repo",
-        default=_PROMPTDA_REPO_DEFAULT,
-        help="directory containing the vendored promptda package + torchhub "
-        f"(default {_PROMPTDA_REPO_DEFAULT}; env PROMPTDA_REPO)",
-    )
-    ap.add_argument(
         "--promptda-ckpt",
         default=_PROMPTDA_CKPT_DEFAULT,
         help="PromptDA checkpoint: local model.ckpt path or HF repo id "
-        f"(default {_PROMPTDA_CKPT_DEFAULT}; env PROMPTDA_CKPT)",
+        f"(default {_PROMPTDA_CKPT_DEFAULT}; env PROMPTDA_CKPT). The vendored "
+        "package dir is env-overridable via PROMPTDA_REPO (import-time).",
     )
     ap.add_argument(
         "--out-dir",
@@ -1048,7 +1038,7 @@ def main() -> None:
         # The StreamVGGT checkpoint is still loaded above: its saved config
         # rebuilds the val dataset, so PromptDA sees the exact clips/frames and
         # simulated sparsity the other arms see.
-        pmodel = _load_promptda(args.promptda_repo, args.promptda_ckpt, device)
+        pmodel = _load_promptda(args.promptda_ckpt, device)
         model = None
     elif args.base:
         # load_pretrained=True folds the base StreamVGGT weights in; no

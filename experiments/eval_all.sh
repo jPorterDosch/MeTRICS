@@ -44,11 +44,12 @@
 # third_party/promptda; disable with PROMPTDA=0, override weights with
 # PROMPTDA_CKPT). Each arm writes, per frame: predicted depth, |pred-gt|/gt
 # accuracy, the model's own predicted CONFIDENCE (promptda has none), and warp
-# self-consistency -- as PNG series, then as GIFs, including 3-column
-# pair_*.gif (pair_depth.gif, pair_conf.gif, ...) across the arms.
+# self-consistency -- as PNG series, then as GIFs, including side-by-side
+# compare_*.gif (compare_depth.gif, compare_conf.gif, ...) with one column per
+# arm, all arms at once.
 #
-# Every stage writes a summary CSV; the run ends with the paired base-vs-ours
-# and promptda-vs-ours tables for all of them via
+# Every stage writes a summary CSV; the run ends with ONE table per stage over
+# all arms (ours last = the subject each baseline is measured against) via
 # tests/compare_heatmap_summaries.py. The CSV is the
 # artifact to trust -- the GIFs are for looking at, and a saturated panel is
 # indistinguishable from "no difference" by eye. For the confidence series the
@@ -68,14 +69,25 @@
 
 set -euo pipefail
 
-# Resolve the repo from this script's own location so a worktree checkout runs
-# ITS code, not the main tree's. Under sbatch that resolves to the slurm spool
-# copy, so fall back to the checkout this file lives in; override with REPO=...
-# either way. PRETRAINED points at the main tree's 5 GB checkpoint, which
-# worktrees do not duplicate.
+# Resolve the repo so THIS checkout's code runs (main tree or any worktree, on
+# any machine), overridable with REPO=... :
+#   1. this script's own location -- correct for direct ./experiments/... runs;
+#   2. under sbatch the script executes from a slurm SPOOL copy, so (1) lands
+#      outside a repo -- fall back to the git toplevel of $PWD, which slurm
+#      sets to the SUBMIT directory: sbatch from the checkout you mean.
+#      (Deliberately not SLURM_SUBMIT_DIR -- it survives into nested
+#      environments like OOD sessions and can point somewhere stale.)
+# The src/visualize_depth.py probe is what detects case (2).
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-[ -f "$REPO/src/visualize_depth.py" ] || REPO=/oscar/home/jdosch/MeTRIC-promptda-viz
-PRETRAINED="${PRETRAINED:-/oscar/home/jdosch/MeTRIC/ckpt/checkpoints.pth}"
+if [ ! -f "$REPO/src/visualize_depth.py" ]; then
+    REPO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [ ! -f "${REPO:-/nonexistent}/src/visualize_depth.py" ]; then
+    echo "cannot locate the repo (script ran from a spool dir and the working" >&2
+    echo "directory is not inside a checkout); pass REPO=/path/to/checkout" >&2
+    exit 1
+fi
+PRETRAINED="${PRETRAINED:-$REPO/ckpt/checkpoints.pth}"
 HAMMER_ROOT="${HAMMER_ROOT:-/oscar/scratch/jdosch/data/processed_hammer}"
 SCANNET_ROOT="${SCANNET_ROOT:-/gpfs/data/jtompki1/cli277/metric/processed_scannet}"
 SPOT_SEQ="${SPOT_SEQ:-/oscar/data/jtompki1/cli277/new_spot_data/0}"
@@ -153,11 +165,15 @@ HAMMER_SCALES=(--rel-vmax 0.3  --tcons-vmax 0.05 --conf-vmax 10)  # base ~0.20 A
 SCANNET_SCALES=(--rel-vmax 0.5 --tcons-vmax 0.03 --conf-vmax 10)  # OOD, tcons ~0.01
 SPOT_SCALES=(--rel-vmax 1.0    --tcons-vmax 0.15 --conf-vmax 10)  # sensor-deviation, runs high
 
+# arm tag order for the side-by-side GIFs and the summary table: baselines
+# first, OUR arm last (compare_heatmap_summaries treats the last tag as the
+# subject every other arm is measured against)
+ARM_TAGS=(base_clip0 finetuned_clip0)
+[ "$PROMPTDA" = 1 ] && ARM_TAGS=(base_clip0 promptda_clip0 finetuned_clip0)
+
 heatmap_gifs () {  # $1 = heatmaps dir
-    local tags=(base_clip0 finetuned_clip0)
-    [ "$PROMPTDA" = 1 ] && tags+=(promptda_clip0)
     [ -d "$1" ] && python heatmaps_to_gif.py --hm-dir "$1" \
-        --pair "${tags[@]}" --fps 10 || true
+        --compare "${ARM_TAGS[@]}" --fps 10 || true
 }
 
 viz_pair () {  # $1 = out dir, $2 = scales array name, rest = extra flags
@@ -240,19 +256,12 @@ done
 
 echo ""
 echo "=============================================================="
-echo "PAIRED base-vs-finetuned SUMMARY -- $RUN_ID"
+echo "PAIRED SUMMARY (${ARM_TAGS[*]}) -- $RUN_ID"
 echo "=============================================================="
 mapfile -t HMDIRS < <(find "$OUT_ROOT" -type d -name heatmaps | sort)
 if [ ${#HMDIRS[@]} -gt 0 ]; then
     python "$REPO/tests/compare_heatmap_summaries.py" "${HMDIRS[@]}" \
-        | tee "$OUT_ROOT/summary.txt"
-    if [ "$PROMPTDA" = 1 ]; then
-        echo ""
-        echo "PAIRED promptda-vs-finetuned SUMMARY -- $RUN_ID"
-        python "$REPO/tests/compare_heatmap_summaries.py" "${HMDIRS[@]}" \
-            --tags promptda_clip0 finetuned_clip0 \
-            | tee "$OUT_ROOT/summary_vs_promptda.txt"
-    fi
+        --tags "${ARM_TAGS[@]}" | tee "$OUT_ROOT/summary.txt"
 else
     echo "(no heatmap dirs -- ablation-only run; see $OUT_ROOT/ablation.txt)"
 fi
