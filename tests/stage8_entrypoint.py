@@ -38,6 +38,14 @@ def driver() -> None:
     sys.path.insert(0, _SRC)
     sys.path.insert(0, _HERE)
 
+    # the entrypoint's progress lines ("Val Epoch: [0]", "Streaming eval:")
+    # go through accelerate's get_logger; without a handler Python logging
+    # drops INFO records silently and the orchestrator's stdout asserts can
+    # never match, so give the driver an explicit stdout handler.
+    import logging
+
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
+
     import finetune_depth
     from finetune_depth import FinetuneDepthCfg
     from synthetic import synthetic_loader
@@ -101,7 +109,12 @@ def _run(env: dict) -> subprocess.CompletedProcess:
 def run_checks() -> None:
     import torch  # noqa: F401 (import here so --driver path stays light)
 
-    with tempfile.TemporaryDirectory(prefix="stage8_", dir="/tmp") as save_dir:
+    # honor TMPDIR: on cluster GPU nodes /tmp is tmpfs, so the ~14GB of
+    # checkpoints this test writes count against the job's cgroup memory
+    # limit and OOM-kill the driver; point TMPDIR at disk to avoid that.
+    with tempfile.TemporaryDirectory(
+        prefix="stage8_", dir=os.environ.get("TMPDIR", "/tmp")
+    ) as save_dir:
         base_env = {
             **os.environ,
             "WANDB_MODE": "disabled",
@@ -122,25 +135,29 @@ def run_checks() -> None:
         assert "Val Epoch: [0]" in rA.stdout, "val_loop never ran (val_freq=1 default)"
         assert "Streaming eval:" in rA.stdout, "post-training streaming_eval never ran"
 
-        dirs = [d for d in os.listdir(save_dir) if d.startswith("stage8_")]
+        # resolve_output_dir lays runs out as <save_dir>/<exp_group>/<run_id>
+        group_dir = os.path.join(save_dir, "stage8")
+        dirs = os.listdir(group_dir) if os.path.isdir(group_dir) else []
         assert len(dirs) == 1, f"expected one output dir, got {dirs}"
-        out = os.path.join(save_dir, dirs[0])
+        out = os.path.join(group_dir, dirs[0])
+        # no checkpoint-final.pth by design: the epoch-boundary save after the
+        # last training epoch leaves checkpoint-last.pth holding the
+        # end-of-training weights (see the comment at the end of run()).
         for fname in (
             "manifest.json",
             "checkpoint-last.pth",
             "checkpoint-best.pth",
-            "checkpoint-final.pth",
         ):
             assert os.path.isfile(os.path.join(out, fname)), f"missing {fname} in {out}"
         print(
-            "[stage8] run A: e2e train() completed; manifest + mid-epoch + best + final checkpoints written; val + streaming eval ran"
+            "[stage8] run A: e2e train() completed; manifest + last + best checkpoints written; val + streaming eval ran"
         )
 
         # --- artifact is loadable from a process WITHOUT streamvggt on the path
         # (the checkpoint-pickle fix: args must reduce to builtins only) ---
         probe = (
             "import torch, argparse, sys\n"
-            f"ck = torch.load({os.path.join(out, 'checkpoint-final.pth')!r}, map_location='cpu', weights_only=False)\n"
+            f"ck = torch.load({os.path.join(out, 'checkpoint-last.pth')!r}, map_location='cpu', weights_only=False)\n"
             "assert isinstance(ck['args'], argparse.Namespace), type(ck['args'])\n"
             "assert isinstance(ck['args'].depth_cond['injection'], str), ck['args'].depth_cond\n"
             "assert 'model' in ck and any('aggregator' in k for k in ck['model'])\n"
@@ -161,17 +178,18 @@ def run_checks() -> None:
             "[stage8] run A: checkpoint unpickles with builtins only, no streamvggt import (pickle fix holds)"
         )
 
-        # --- Run B: resume from checkpoint-last, train one more epoch ---
-        # resume derives the output dir from the checkpoint's parent, so Run B
-        # continues INTO Run A's dir even though --epochs (an identity knob)
-        # changed; capture the final-checkpoint mtime so the assertion actually
-        # verifies Run B re-wrote it rather than matching Run A's leftover file.
-        final_ckpt = os.path.join(out, "checkpoint-final.pth")
-        mtime_a = os.path.getmtime(final_ckpt)
+        # --- Run B: resume from checkpoint-last with the SAME config ---
+        # _validate_resume_identity rejects any identity drift (including
+        # --epochs, which changes the LR schedule), so a resume must repeat the
+        # identical config. Resuming a completed 1-epoch run exercises the whole
+        # path anyway: misc.load_model restores weights/optimizer/start_epoch,
+        # the identity check passes against the owning manifest, the run
+        # continues INTO Run A's dir (no fork), and the post-training
+        # streaming eval runs again.
         rB = _run(
             {
                 **base_env,
-                "SC_EPOCHS": "2",
+                "SC_EPOCHS": "1",
                 "SC_RESUME": os.path.join(out, "checkpoint-last.pth"),
             }
         )
@@ -179,15 +197,15 @@ def run_checks() -> None:
             f"run B (resume) failed:\n{rB.stdout[-4000:]}\n{rB.stderr[-4000:]}"
         )
         assert "DRIVER_RESUMED" in rB.stdout, "resume path did not advance start_epoch"
-        new_dirs = [d for d in os.listdir(save_dir) if d.startswith("stage8_")]
+        new_dirs = os.listdir(group_dir) if os.path.isdir(group_dir) else []
         assert new_dirs == dirs, (
             f"resume forked a new output dir: {set(new_dirs) - set(dirs)}"
         )
-        assert os.path.getmtime(final_ckpt) > mtime_a, (
-            "resume did not re-write checkpoint-final in the run's dir"
+        assert "Streaming eval:" in rB.stdout, (
+            "resumed run skipped the post-training streaming eval"
         )
         print(
-            "[stage8] run B: --resume continued INTO the same dir and re-wrote checkpoint-final"
+            "[stage8] run B: --resume passed the identity check and continued INTO the same dir"
         )
 
     print("STAGE 8 PASS")

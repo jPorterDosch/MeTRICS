@@ -51,6 +51,7 @@ def get_data_loader(
     pin_mem=True,
     accelerator=None,
     fixed_length=False,
+    seed=None,
 ):
     """Wrap an already-constructed multi-view dataset in a DataLoader driven by
     its aspect-ratio-aware batched sampler.
@@ -59,6 +60,10 @@ def get_data_loader(
     not a string -- there is no ``eval`` here. A dataset without ``make_sampler``
     raises rather than silently falling back to a plain DataLoader, so a wiring
     mistake surfaces immediately instead of training on the wrong sampler.
+
+    ``seed`` pins worker seeding (and thus per-sample aug/stride draws) to a
+    dedicated generator instead of the global torch RNG, so the train stream is
+    identical across runs regardless of what the model consumed at init.
     """
 
     sampler = dataset.make_sampler(
@@ -68,9 +73,13 @@ def get_data_loader(
         world_size=1 if accelerator is None else accelerator.num_processes,
         fixed_length=fixed_length,
     )
+    # TODO: this pairs only the data stream across arms; model-side draws
+    # (dropout, MAE masking) stay unpaired. Revisit if we want paired masks.
+    generator = None if seed is None else torch.Generator().manual_seed(seed)
     return torch.utils.data.DataLoader(
         dataset,
         batch_sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_mem,
+        generator=generator,
     )
