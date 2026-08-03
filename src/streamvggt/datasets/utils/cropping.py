@@ -112,7 +112,10 @@ def camera_matrix_of_crop(
     scaling = np.broadcast_to(np.asarray(scaling), (2,))
     # Margins to offset the origin
     margins = np.asarray(input_resolution) * scaling - output_resolution
-    assert np.all(margins >= 0.0)
+    # scaling == output/input makes margins mathematically zero, but float
+    # roundoff can leave them at ~-1e-14; tolerate that, reject real overshoot.
+    assert np.all(margins >= -1e-6), f"negative crop margins: {margins}"
+    margins = np.clip(margins, 0.0, None)
     if offset is None:
         offset = offset_factor * margins
 

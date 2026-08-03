@@ -312,6 +312,7 @@ def build_train_loader(
                 drop_last=True,
                 accelerator=accelerator,
                 fixed_length=args.fixed_length,
+                seed=args.seed,
             )
         case Split.TEST:
             printer.info("Building validation datasets %s", args.val_dataset)
