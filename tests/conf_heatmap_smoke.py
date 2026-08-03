@@ -208,9 +208,7 @@ def run(hm_dir: Path) -> int:
     ]
     r = subprocess.run(cmp_cmd, capture_output=True, text=True)
     check(r.returncode == 0, f"exit {r.returncode}\n{r.stderr[-800:]}")
-    conf_row = next(
-        (ln for ln in r.stdout.splitlines() if ln.startswith("conf ")), ""
-    )
+    conf_row = next((ln for ln in r.stdout.splitlines() if ln.startswith("conf ")), "")
     check("--" in conf_row, f"conf-less arm shown as '--' in the table: {conf_row!r}")
     check(
         "gterr" in r.stdout and "tcons" in r.stdout, "still compares the error series"
