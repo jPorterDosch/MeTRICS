@@ -779,6 +779,12 @@ def train_loop(
                 misc.adjust_learning_rate(optimizer, epoch_f, args)
             step = int(epoch_f * len(data_loader))
 
+            unwrapped_model = accelerator.unwrap_model(model)
+            conditioner = getattr(unwrapped_model, "conditioner", None)
+            if conditioner is not None:
+                conditioner.pop_aux_loss()  # discard any interrupted prior step
+                conditioner.set_reconstruction_target(batch)
+
             result = loss_of_one_batch(
                 batch,
                 model,
@@ -789,9 +795,14 @@ def train_loop(
                 use_amp=bool(args.amp),
             )
             loss, loss_details = result["loss"]
+            mae_recon = conditioner.pop_aux_loss() if conditioner is not None else None
+            already_backprop = result.get("already_backprop", False)
+            if mae_recon is not None and not already_backprop:
+                loss = loss + mcfg.depth_cond.mae_recon_weight * mae_recon
+                loss_details["mae_recon"] = mae_recon.detach()
             loss_value = float(loss)
             _check_finite_loss(loss_value, loss_details, accelerator)
-            if not result.get("already_backprop", False):
+            if not already_backprop:
                 loss_scaler(
                     loss,
                     optimizer,
