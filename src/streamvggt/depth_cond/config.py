@@ -56,6 +56,9 @@ class SparseSimMode(str, enum.Enum):
     NONE = "none"  # no masking: full dense GT depth as conditioning
     RANDOM = "random"  # MAE-style: random visible patches, resampled per frame
     TUBE_MASK = "tube_mask"  # one patch mask shared by every frame of the clip
+    PIXEL_FREQ = (
+        "pixel_freq"  # per-pixel Bernoulli from an empirical validity-frequency map
+    )
 
 
 @dataclass
@@ -94,9 +97,13 @@ class DepthCondCfg:
     token_append: bool = False
 
     # sparse-depth simulation from GT depthmaps during training (sparse.py)
-    sim_mode: SparseSimMode = SparseSimMode.RANDOM
+    sim_mode: SparseSimMode = SparseSimMode.RANDOM  # pixel_freq uses the empirical map
     sim_patch_size: int = 14
     sim_mask_ratio: float = 0.95  # fraction of patches masked out (invisible)
+    # empirical per-pixel validity-frequency map (sim_mode == PIXEL_FREQ): .npz
+    # with key 'freq', [H,W] float32 in [0,1], raw sensor orientation. Loaded and
+    # density-checked in sparse.load_freq_map. Empty = unset.
+    sim_freq_map_path: str = ""
 
     def validate(self) -> None:
         # coerce plain strings (CLI / YAML / tests) to enum members
@@ -128,6 +135,17 @@ class DepthCondCfg:
             raise ValueError(
                 f"sim_mask_ratio must be in [0, 1), got {self.sim_mask_ratio}"
             )
+        if self.sim_mode is SparseSimMode.PIXEL_FREQ:
+            if not self.sim_freq_map_path:
+                raise ValueError(
+                    "--depth-cond.sim-freq-map-path is required when "
+                    "--depth-cond.sim-mode=pixel_freq"
+                )
+            if not pathlib.Path(self.sim_freq_map_path).is_file():
+                raise ValueError(
+                    "--depth-cond.sim-freq-map-path does not exist: "
+                    f"{self.sim_freq_map_path}"
+                )
         if self.sim_patch_size <= 0:
             raise ValueError(
                 f"sim_patch_size must be positive, got {self.sim_patch_size}"
