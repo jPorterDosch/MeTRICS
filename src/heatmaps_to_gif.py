@@ -3,19 +3,22 @@
 
 Groups files by everything before the trailing frame number -- e.g.
 base_clip0_depth_000.png .. _031.png -> base_clip0_depth.gif -- one GIF per
-(tag, series). With --pair, additionally writes side-by-side GIFs (left|right)
-for every series the two tags share: pair_depth.gif, pair_tcons.gif, ...
+(tag, series). With --compare, additionally writes side-by-side GIFs (one
+column per tag, in the order given, any number of arms >= 2) for every series
+ANY tag has -- compare_depth.gif, compare_tcons.gif, ... An arm missing a
+series (PromptDA returns no confidence) gets a captioned placeholder column
+rather than sinking the whole GIF.
 
-Those pair names carry no clip index, so pairing a second clip into the same
-directory would overwrite the first clip's GIFs -- pass --pair-name when
-looping over the clips of a --num-clips N export.
+Those compare names carry no clip index, so comparing a second clip into the
+same directory would overwrite the first clip's GIFs -- pass --compare-name
+when looping over the clips of a --num-clips N export.
 
 CPU only, PIL only. Examples:
     python heatmaps_to_gif.py --hm-dir ../viz/token_lora_seq/heatmaps
     python heatmaps_to_gif.py --hm-dir ../viz/token_lora_seq/heatmaps \\
-        --pair base_clip0 finetuned_clip0 --fps 10
+        --compare base_clip0 promptda_clip0 finetuned_clip0 --fps 10
     python heatmaps_to_gif.py --hm-dir ../viz/perscene/heatmaps \\
-        --pair base_clip3 finetuned_clip3 --pair-name pair_clip3
+        --compare base_clip3 finetuned_clip3 --compare-name compare_clip3
 """
 
 import argparse
@@ -23,7 +26,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 _FRAME_RE = re.compile(r"^(?P<prefix>.+)_(?P<idx>\d{3})\.png$")
 
@@ -47,6 +50,21 @@ def _positive_fps(s: str) -> float:
     return fps
 
 
+def placeholder_panel(size: tuple[int, int], caption: str) -> Image.Image:
+    """A neutral panel standing in for a series an arm does not produce (e.g.
+    PromptDA has no confidence head), so the side-by-side GIF keeps one column
+    per arm instead of silently dropping the whole series."""
+    im = Image.new("RGB", size, (64, 64, 64))
+    draw = ImageDraw.Draw(im)
+    left, top, right, bottom = draw.textbbox((0, 0), caption)
+    draw.text(
+        ((size[0] - (right - left)) // 2, (size[1] - (bottom - top)) // 2),
+        caption,
+        fill=(210, 210, 210),
+    )
+    return im
+
+
 def write_gif(frames: list[Image.Image], out: Path, fps: float) -> None:
     frames[0].save(
         out,
@@ -64,18 +82,19 @@ def main() -> None:
     ap.add_argument("--hm-dir", required=True, help="the heatmaps/ directory")
     ap.add_argument("--fps", type=_positive_fps, default=10.0)
     ap.add_argument(
-        "--pair",
-        nargs=2,
-        metavar=("LEFT_TAG", "RIGHT_TAG"),
-        help="also write side-by-side GIFs for series both tags share, e.g. "
-        "--pair base_clip0 finetuned_clip0",
+        "--compare",
+        nargs="+",
+        metavar="TAG",
+        help="also write side-by-side GIFs (one column per tag, left to right "
+        "in the order given) for series ALL tags share, e.g. "
+        "--compare base_clip0 promptda_clip0 finetuned_clip0",
     )
     ap.add_argument(
-        "--pair-name",
-        default="pair",
-        help="filename stem for the --pair GIFs (default 'pair', giving "
-        "pair_conf.gif etc). One clip's pair GIFs overwrite another's without "
-        "this, since the tags are not part of the name.",
+        "--compare-name",
+        default="compare",
+        help="filename stem for the --compare GIFs (default 'compare', giving "
+        "compare_conf.gif etc). One clip's compare GIFs overwrite another's "
+        "without this, since the tags are not part of the name.",
     )
     args = ap.parse_args()
 
@@ -92,33 +111,54 @@ def main() -> None:
             args.fps,
         )
 
-    if args.pair:
-        left_tag, right_tag = args.pair
-        # series name = <tag>_<kind>; match kinds across the two tags
-        kinds = {
-            p.removeprefix(left_tag + "_")
-            for p in series
-            if p.startswith(left_tag + "_")
-        } & {
-            p.removeprefix(right_tag + "_")
-            for p in series
-            if p.startswith(right_tag + "_")
-        }
+    if args.compare:
+        tags = args.compare
+        if len(tags) < 2:
+            raise SystemExit("--compare needs at least two tags")
+        # series name = <tag>_<kind>; a kind is comparable when ANY tag has it.
+        # Tags lacking it (PromptDA writes no conf series) get a captioned
+        # placeholder column, so e.g. compare_conf.gif survives a three-arm run
+        # instead of silently disappearing.
+        kinds = set.union(
+            *(
+                {p.removeprefix(t + "_") for p in series if p.startswith(t + "_")}
+                for t in tags
+            )
+        )
         if not kinds:
-            raise SystemExit(f"no shared series between {left_tag!r} and {right_tag!r}")
+            raise SystemExit(f"no series for any of {', '.join(map(repr, tags))}")
         for kind in sorted(kinds):
-            ls, rs = series[f"{left_tag}_{kind}"], series[f"{right_tag}_{kind}"]
-            n = min(len(ls), len(rs))
+            # strict: arms that have this series must agree on frame count;
+            # silently truncating to the shortest would hide a partial export
+            have = [t for t in tags if f"{t}_{kind}" in series]
+            seqs = [series[f"{t}_{kind}"] for t in have]
             frames = []
-            for lp, rp in zip(ls[:n], rs[:n]):
-                li, ri = Image.open(lp).convert("RGB"), Image.open(rp).convert("RGB")
-                if li.size != ri.size:
-                    ri = ri.resize(li.size)
-                canvas = Image.new("RGB", (li.width + ri.width + 4, li.height), "white")
-                canvas.paste(li, (0, 0))
-                canvas.paste(ri, (li.width + 4, 0))
+            missing_panels: dict[str, Image.Image] = {}
+            for paths in zip(*seqs, strict=True):
+                by_tag = {t: Image.open(p).convert("RGB") for t, p in zip(have, paths)}
+                size = by_tag[have[0]].size
+                cols = []
+                for t in tags:
+                    if t in by_tag:
+                        im = by_tag[t]
+                        # normalize followers to the first column's size
+                        cols.append(im if im.size == size else im.resize(size))
+                    else:
+                        if missing_panels.get(t) is None or (
+                            missing_panels[t].size != size
+                        ):
+                            missing_panels[t] = placeholder_panel(
+                                size, f"{t}: no {kind} output"
+                            )
+                        cols.append(missing_panels[t])
+                w = sum(im.width for im in cols) + 4 * (len(cols) - 1)
+                canvas = Image.new("RGB", (w, cols[0].height), "white")
+                x = 0
+                for im in cols:  # 4px white gutter between columns
+                    canvas.paste(im, (x, 0))
+                    x += im.width + 4
                 frames.append(canvas)
-            write_gif(frames, hm_dir / f"{args.pair_name}_{kind}.gif", args.fps)
+            write_gif(frames, hm_dir / f"{args.compare_name}_{kind}.gif", args.fps)
 
 
 if __name__ == "__main__":

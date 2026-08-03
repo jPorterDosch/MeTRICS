@@ -32,6 +32,11 @@
 # as a divergence, which doubles as the "did finetuning move the cameras?"
 # diagnostic). Run --base first.
 #
+# --promptda runs the vendored PromptDA (third_party/promptda) as a third arm
+# on the same frames and the same real sensor prompt (nearest-neighbor
+# infilled). PromptDA predicts no cameras or confidence, so it REQUIRES the
+# pose cache (run after --base) and writes no conf panels.
+#
 # Example (GPU):
 #   cd src
 #   python visualize_spot.py --weights ../checkpoints/hammer_sweep/b536d87d26e297e1 \
@@ -59,10 +64,13 @@ from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
 from visualize_depth import (
     _CONF_VMAX,
     _CONF_VMIN,
+    _PROMPTDA_CKPT_DEFAULT,
     _REL_VMAX,
     _export_heatmaps,
     _format_frame_timing,
+    _load_promptda,
     _per_frame_scene,
+    _run_promptda_inference,
     _run_streaming_inference,
     _stack_depth_conf,
     load_saved_args,
@@ -280,6 +288,17 @@ def main() -> None:
         default=None,
         help="base checkpoint override (as in visualize_depth)",
     )
+    ap.add_argument(
+        "--promptda",
+        action="store_true",
+        help="run vendored PromptDA as a third arm (files tagged promptda_*). "
+        "Needs the pose cache: run --base into this --out-dir first.",
+    )
+    ap.add_argument(
+        "--promptda-ckpt",
+        default=_PROMPTDA_CKPT_DEFAULT,
+        help="PromptDA checkpoint: local model.ckpt or HF repo id",
+    )
     ap.add_argument("--seq-dir", default="/oscar/data/jtompki1/cli277/new_spot_data/0")
     ap.add_argument("--start", type=int, default=0, help="first frame index")
     ap.add_argument("--num-views", type=int, default=32)
@@ -377,6 +396,9 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    if args.base and args.promptda:
+        raise SystemExit("--base and --promptda are mutually exclusive")
+
     # --rotate defaults to "none", on which the 4:3 crop is a silent no-op --
     # so without this the operator gets the OLD path while believing they got
     # the new one, and the geometry fingerprint below would happily accept it
@@ -412,14 +434,21 @@ def main() -> None:
     )
     accelerator = Accelerator()
     device = accelerator.device
-    if args.base:
+    pmodel = None
+    if args.promptda:
+        # the checkpoint is still loaded above: mcfg drives _prepare_batch, so
+        # PromptDA sees exactly the frames/prompt the other arms see
+        pmodel = _load_promptda(args.promptda_ckpt, device)
+        model = None
+    elif args.base:
         print(f"BASE model: loading pretrained weights {pretrained_path}")
         model, _ = build_model(cfg, mcfg, device, load_pretrained=True)
     else:
         model, _ = build_model(cfg, mcfg, device, load_pretrained=False)
         state_dict = {k.replace("module.", ""): v for k, v in ckpt["model"].items()}
         model.load_state_dict(state_dict, strict=True)
-    model.eval()
+    if model is not None:
+        model.eval()
 
     seq_dir = Path(args.seq_dir)
     views = load_spot_views(
@@ -444,20 +473,23 @@ def main() -> None:
 
     _prepare_batch(views, mcfg)  # rescales img; skips sparse sim (real sparse present)
     frame_times_ms = [] if args.timing else None
-    with torch.no_grad():
-        if frame_times_ms is None:
-            result = loss_of_one_batch(
-                views,
-                model,
-                None,
-                accelerator,
-                inference=True,
-                symmetrize_batch=False,
-                use_amp=True,
-            )
-        else:
-            result = _run_streaming_inference(model, views, frame_times_ms)
-    preds = result["pred"]
+    if args.promptda:
+        preds = _run_promptda_inference(pmodel, views, frame_times_ms)
+    else:
+        with torch.no_grad():
+            if frame_times_ms is None:
+                result = loss_of_one_batch(
+                    views,
+                    model,
+                    None,
+                    accelerator,
+                    inference=True,
+                    symmetrize_batch=False,
+                    use_amp=True,
+                )
+            else:
+                result = _run_streaming_inference(model, views, frame_times_ms)
+        preds = result["pred"]
     if frame_times_ms and not args.heatmaps:
         # _export_heatmaps is what normally reports these; without it the
         # measurement would be taken and silently dropped
@@ -465,15 +497,21 @@ def main() -> None:
     pred_depth = torch.stack([p["depth"].detach() for p in preds], dim=1)
     pred_depth = pred_depth.squeeze(-1).float().cpu()[0]  # [S,H,W]
     print(f"pred depth: range [{pred_depth.min():.2f}, {pred_depth.max():.2f}] m")
-    pred_conf = _stack_depth_conf(preds)[0]  # [S,H,W], the model's own uncertainty
-    print(
-        f"pred conf: range [{pred_conf.min():.2f}, {pred_conf.max():.2f}], "
-        f"mean {pred_conf.mean():.2f}"
-    )
+    if args.promptda:
+        pred_conf = None  # PromptDA has no confidence head
+    else:
+        pred_conf = _stack_depth_conf(preds)[0]  # [S,H,W], the model's uncertainty
+        print(
+            f"pred conf: range [{pred_conf.min():.2f}, {pred_conf.max():.2f}], "
+            f"mean {pred_conf.mean():.2f}"
+        )
 
     # ---- shared pose track (see header) ----
-    own_w2c, own_K = predicted_cameras(preds, (th, tw))
-    mode = "base" if args.base else "finetuned"
+    # PromptDA predicts no cameras: it can only attach to the cached base track
+    own_w2c, own_K = (
+        (None, None) if args.promptda else predicted_cameras(preds, (th, tw))
+    )
+    mode = "promptda" if args.promptda else ("base" if args.base else "finetuned")
     os.makedirs(args.out_dir, exist_ok=True)
     cache_path = os.path.join(args.out_dir, "pose_cache.npz")
     if args.base:
@@ -524,7 +562,10 @@ def main() -> None:
                     f"pose cache rotate={cached['rotate']} != {args.rotate}; frames must match"
                 )
         w2c, K = torch.from_numpy(cached["w2c"]), torch.from_numpy(cached["K"])
-        print(f"pose divergence vs cached base track: {pose_divergence(own_w2c, w2c)}")
+        if own_w2c is not None:
+            print(
+                f"pose divergence vs cached base track: {pose_divergence(own_w2c, w2c)}"
+            )
 
     c2w = to_c2w(w2c)
     imgs = torch.stack([v["img"][0].float().cpu() for v in views])  # [S,3,H,W] in [0,1]

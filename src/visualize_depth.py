@@ -20,6 +20,8 @@
 # --------------------------------------------------------
 import argparse
 import os
+import sys
+import time
 from pathlib import Path
 
 import matplotlib
@@ -29,6 +31,7 @@ import numpy as np
 import torch
 import trimesh
 from accelerate import Accelerator
+from huggingface_hub import hf_hub_download
 
 from dust3r.inference import loss_of_one_batch, sample_query_points  # noqa
 from eval.temporal_consistency.metrics import depth2point, point2depth
@@ -51,6 +54,18 @@ from streamvggt.depth_cond import (
     MetricCfg,
     TrainCondCfg,
 )
+
+# Third comparison arm: PromptDA (Prompt Depth Anything), vendored verbatim in
+# third_party/promptda (see its README). promptda is a namespace package (no
+# __init__.py), so the vendor DIR goes on sys.path, not the package itself --
+# which is why this import must sit below the path setup (hence the noqa).
+_PROMPTDA_REPO = os.environ.get(
+    "PROMPTDA_REPO",
+    str(Path(__file__).resolve().parent.parent / "third_party" / "promptda"),
+)
+if _PROMPTDA_REPO not in sys.path:
+    sys.path.insert(0, _PROMPTDA_REPO)
+from promptda.promptda import PromptDA  # noqa: E402
 
 # Checkpoint basenames finetune_depth.py writes, best -> worst preference when
 # --checkpoint is left at "auto". The pipeline no longer writes a separate
@@ -99,6 +114,98 @@ def _run_streaming_inference(model, views, frame_times_ms=None):
     with torch.cuda.amp.autocast(dtype=dtype, enabled=on_cuda), torch.no_grad():
         output = model.inference(views, query_pts, frame_times_ms=frame_times_ms)
     return {"views": output.views, "pred": output.ress}
+
+
+# PromptDA is frame-independent (no KV cache) and consumes the same [0,1] RGB
+# + sparse-depth prompt the other arms see.
+_PROMPTDA_CKPT_DEFAULT = os.environ.get(
+    "PROMPTDA_CKPT", "depth-anything/prompt-depth-anything-vitl"
+)
+
+
+def _load_promptda(ckpt: str, device) -> torch.nn.Module:
+    """Build the vendored PromptDA in eval mode.
+
+    The checkpoint is resolved here (local path, else HF hub download) and its
+    existence asserted BEFORE construction: PromptDA.load_checkpoint only warns
+    on a missing file and would silently run with random depth-head weights.
+    """
+    if os.path.exists(ckpt):
+        resolved = ckpt
+    else:
+        try:
+            resolved = hf_hub_download(
+                repo_id=ckpt, repo_type="model", filename="model.ckpt"
+            )
+        except Exception as exc:
+            raise SystemExit(
+                f"could not resolve PromptDA checkpoint {ckpt!r}: {exc}\n"
+                "pre-download on a login node with\n"
+                '  python -c "from huggingface_hub import hf_hub_download; '
+                f"hf_hub_download('{ckpt}', 'model.ckpt')\"\n"
+                "or pass --promptda-ckpt /abs/path/to/model.ckpt"
+            ) from exc
+    if not os.path.exists(resolved):
+        raise SystemExit(f"PromptDA checkpoint {resolved!r} does not exist")
+
+    print(f"PROMPTDA model: loading weights {resolved}")
+    return PromptDA(encoder="vitl", ckpt_path=resolved).to(device).eval()
+
+
+def _infill_sparse_depth(depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Nearest-neighbor infill of a sparse depth map ([H,W] meters, [H,W] bool).
+
+    PromptDA normalizes the prompt by its min/max over the WHOLE map, and the
+    fusion blocks bilinearly resample it, so sparse zeros both wreck the
+    normalization range and bleed into valid measurements. PromptDA's own
+    pipelines densify first with exactly this distance-transform gather."""
+    if not mask.any():
+        raise SystemExit(
+            "frame has 0 valid sparse-depth pixels; PromptDA has no prompt "
+            "to normalize against"
+        )
+    if mask.all():
+        return depth
+    from scipy.ndimage import distance_transform_edt
+
+    _, idx = distance_transform_edt(~mask, return_indices=True)
+    out = depth.copy()
+    out[~mask] = depth[idx[0][~mask], idx[1][~mask]]
+    return out
+
+
+def _run_promptda_inference(pmodel, views, frame_times_ms=None) -> list[dict]:
+    """Per-frame PromptDA over an [S]-list of prepared views. Returns preds
+    shaped like the other arms' (p["depth"] is [B,H,W,1]) so
+    _stack_depth_batch and the glb/heatmap exports work unchanged.
+
+    Timing is wall-clock around the WHOLE per-frame pipeline -- the CPU
+    nearest-neighbor infill, the host<->device copies, and the forward -- with
+    a CUDA sync on each side, so the frame_ms column stays like-for-like with
+    the streaming arms, whose timings cover their full per-frame inference.
+    """
+    device = views[0]["img"].device
+    preds = []
+    with torch.no_grad():
+        for view in views:
+            if frame_times_ms is not None:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
+            img = view["img"].float()  # [B,3,H,W] in [0,1]; norm is internal
+            sd = view["sparse_depth"].float().cpu().numpy()  # [B,H,W] meters
+            sm = view["sparse_depth_mask"].cpu().numpy().astype(bool)
+            prompt = np.stack(
+                [_infill_sparse_depth(sd[b], sm[b]) for b in range(sd.shape[0])]
+            )
+            prompt = torch.from_numpy(prompt).unsqueeze(1).to(device)  # [B,1,H,W]
+            depth = pmodel.predict(img, prompt)
+            if frame_times_ms is not None:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                frame_times_ms.append((time.perf_counter() - t0) * 1000.0)
+            preds.append({"depth": depth.permute(0, 2, 3, 1)})  # [B,H,W,1]
+    return preds
 
 
 def resolve_checkpoint(weights: str, which: str) -> Path:
@@ -744,6 +851,29 @@ def main() -> None:
         "run's config; pass explicitly if that relative path does not resolve here).",
     )
     ap.add_argument(
+        "--promptda",
+        action="store_true",
+        help="visualize PromptDA (Prompt Depth Anything) as a third arm. Runs the "
+        "vendored torch model on the same clips/prompts as the other arms; files "
+        "are tagged promptda_* so all three arms can share one --out-dir.",
+    )
+    ap.add_argument(
+        "--promptda-ckpt",
+        default=_PROMPTDA_CKPT_DEFAULT,
+        help="PromptDA checkpoint: local model.ckpt path or HF repo id "
+        f"(default {_PROMPTDA_CKPT_DEFAULT}; env PROMPTDA_CKPT). The vendored "
+        "package dir is env-overridable via PROMPTDA_REPO (import-time).",
+    )
+    ap.add_argument(
+        "--sparse-seed",
+        type=int,
+        default=0,
+        help="seed for the simulated sparse-prompt draw, applied per clip. "
+        "Keep it IDENTICAL across the arms you pair (the default is fine): it "
+        "is what makes all arms condition on the same sparse pattern, which "
+        "the frame-paired comparison in compare_heatmap_summaries.py assumes.",
+    )
+    ap.add_argument(
         "--out-dir",
         default=None,
         help="output dir (default: <weights-dir>/viz). GLBs land in <out-dir>/glb",
@@ -848,6 +978,9 @@ def main() -> None:
     ap.add_argument("--num-workers", type=int, default=4)
     args = ap.parse_args()
 
+    if args.base and args.promptda:
+        raise SystemExit("--base and --promptda are mutually exclusive")
+
     if not torch.cuda.is_available():
         raise SystemExit(
             "visualize_depth requires a CUDA device (loss_of_one_batch runs "
@@ -867,7 +1000,7 @@ def main() -> None:
         # S (bounded by sequence length / GPU memory).
         val_ds.num_views = args.num_views
 
-    mode = "base" if args.base else "finetuned"
+    mode = "promptda" if args.promptda else ("base" if args.base else "finetuned")
     if args.all_pixels:
         # distinct tag so a GT-masked and an all-pixels export can share one
         # --out-dir and sit side by side in the viewer's scene dropdown
@@ -915,7 +1048,14 @@ def main() -> None:
 
     # build_model applies LoRA + freezes (harmless for eval) so the module key
     # layout matches the saved state_dict.
-    if args.base:
+    pmodel = None
+    if args.promptda:
+        # The StreamVGGT checkpoint is still loaded above: its saved config
+        # rebuilds the val dataset, so PromptDA sees the exact clips/frames and
+        # simulated sparsity the other arms see.
+        pmodel = _load_promptda(args.promptda_ckpt, device)
+        model = None
+    elif args.base:
         # load_pretrained=True folds the base StreamVGGT weights in; no
         # finetuned state_dict is applied on top.
         print(f"BASE model: loading pretrained weights {pretrained_path}")
@@ -924,7 +1064,8 @@ def main() -> None:
         model, _ = build_model(cfg, mcfg, device, load_pretrained=False)
         state_dict = {k.replace("module.", ""): v for k, v in ckpt["model"].items()}
         model.load_state_dict(state_dict, strict=True)
-    model.eval()
+    if model is not None:
+        model.eval()
 
     # TEST-split datasets are sequential by construction, so every export here
     # is temporally ordered
@@ -936,6 +1077,7 @@ def main() -> None:
     os.makedirs(glb_dir, exist_ok=True)
 
     exported = 0
+    clip_idx = 0
     with torch.no_grad():
         for batch in loader:
             if exported >= args.num_clips:
@@ -945,27 +1087,44 @@ def main() -> None:
                     "expected a batch-1 loader for streaming inference; got "
                     f"batch size {batch[0]['img'].shape[0]}"
                 )
+            # Reseed IMMEDIATELY before the sparse-prompt draw, per clip: the
+            # simulated prompt comes from the global torch RNG, and the three
+            # arms run as separate processes that consume different amounts of
+            # RNG state before/around this point (model init, streaming path).
+            # Without this each arm conditions on a DIFFERENT random prompt and
+            # the frame-paired A/B in compare_heatmap_summaries measures prompt
+            # lottery, not the model. Seeded per clip (not once) so later clips
+            # stay paired even if an arm's inference consumes RNG state.
+            torch.manual_seed(args.sparse_seed + clip_idx)
+            clip_idx += 1
             _prepare_batch(batch, mcfg)
             # inference=True -> the causal per-frame KV-cache path (deployment
             # path), no criterion. result carries views + per-view preds.
             # Fresh list per clip: timings are per-clip, and reusing one would
             # concatenate clips into a single fake ramp.
             frame_times_ms = [] if args.timing else None
-            if frame_times_ms is None:
-                result = loss_of_one_batch(
-                    batch,
-                    model,
-                    None,
-                    accelerator,
-                    inference=True,
-                    symmetrize_batch=False,
-                    use_amp=True,
-                )
+            if args.promptda:
+                # frame-independent model; no streaming path, no confidence head
+                preds = _run_promptda_inference(pmodel, batch, frame_times_ms)
+                views = batch
+                confs, conf_maps = None, None
             else:
-                result = _run_streaming_inference(model, batch, frame_times_ms)
-            views, preds = result["views"], result["pred"]
-            confs = _clip_confidences(preds)
-            conf_maps = _stack_depth_conf(preds)  # [B,S,H,W], the heatmap source
+                if frame_times_ms is None:
+                    result = loss_of_one_batch(
+                        batch,
+                        model,
+                        None,
+                        accelerator,
+                        inference=True,
+                        symmetrize_batch=False,
+                        use_amp=True,
+                    )
+                else:
+                    result = _run_streaming_inference(model, batch, frame_times_ms)
+                views, preds = result["views"], result["pred"]
+                del result
+                confs = _clip_confidences(preds)
+                conf_maps = _stack_depth_conf(preds)  # [B,S,H,W], heatmap source
             # imgs is not in _stack_depth_batch; stack it the same way
             imgs = torch.stack([v["img"] for v in views], dim=1).float().cpu()
             pred, gt, valid, K, pose = _stack_depth_batch(views, preds)
@@ -994,19 +1153,23 @@ def main() -> None:
                         rel_vmax=args.rel_vmax,
                         tcons_vmax=args.tcons_vmax,
                         scale=args.hm_scale,
-                        conf=conf_maps[b],
+                        conf=None if conf_maps is None else conf_maps[b],
                         conf_vmin=args.conf_vmin,
                         conf_vmax=args.conf_vmax,
                         frame_times_ms=frame_times_ms,
                     )
                     print(f"  [{mode}] clip {exported}: {n_png} heatmap PNGs")
-                mean_c, min_c, max_c = confs[b]
-                print(
-                    f"  [{mode}] clip {exported}: {pred.shape[1]} frames | mean depth "
-                    f"confidence {mean_c:.4f} (min {min_c:.4f}, max {max_c:.4f})"
-                )
+                if confs is not None:
+                    mean_c, min_c, max_c = confs[b]
+                    print(
+                        f"  [{mode}] clip {exported}: {pred.shape[1]} frames | "
+                        f"mean depth confidence {mean_c:.4f} (min {min_c:.4f}, "
+                        f"max {max_c:.4f})"
+                    )
+                else:
+                    print(f"  [{mode}] clip {exported}: {pred.shape[1]} frames")
                 exported += 1
-            del result, batch
+            del preds, batch
 
     print(f"Wrote {exported} .glb file(s) to {glb_dir}")
 
