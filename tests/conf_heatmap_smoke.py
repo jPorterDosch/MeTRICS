@@ -4,7 +4,7 @@
 Exercises the whole confidence path end to end without a GPU or a checkpoint:
 
     _export_heatmaps(..., conf=...)   ->  {tag}_conf_NNN.png + CSV columns
-    heatmaps_to_gif.py --pair         ->  pair_conf.gif
+    heatmaps_to_gif.py --compare      ->  compare_conf.gif
     compare_heatmap_summaries.py      ->  conf / conf_corr rows
 
 It feeds SYNTHETIC data with a KNOWN answer, which is the point: the confidence
@@ -165,14 +165,14 @@ def run(hm_dir: Path) -> int:
     check("conf_mean" not in h0, f"old-schema CSV has no conf columns ({','.join(h0)})")
 
     # ---- 3. GIF assembly picks the new series up with no changes ----
-    print("\n[3] heatmaps_to_gif.py --pair")
+    print("\n[3] heatmaps_to_gif.py --compare")
     r = subprocess.run(
         [
             sys.executable,
             str(REPO / "src" / "heatmaps_to_gif.py"),
             "--hm-dir",
             str(hm_dir),
-            "--pair",
+            "--compare",
             "base_clip0",
             "finetuned_clip0",
         ],
@@ -184,13 +184,20 @@ def run(hm_dir: Path) -> int:
         (hm_dir / "finetuned_clip0_conf.gif").is_file(),
         "finetuned_clip0_conf.gif written",
     )
-    # base has no conf series, so pair_conf cannot exist -- and the shared
-    # series (depth/gterr/tcons) must still pair
+    # base has no conf series, so its conf column must be the captioned
+    # placeholder -- the GIF itself must still exist, one column per arm
     check(
-        not (hm_dir / "pair_conf.gif").is_file(),
-        "no pair_conf.gif when only one arm has conf (correctly skipped)",
+        (hm_dir / "compare_conf.gif").is_file(),
+        "compare_conf.gif written with a placeholder for the conf-less arm",
     )
-    check((hm_dir / "pair_depth.gif").is_file(), "pair_depth.gif still written")
+    from PIL import Image as _Image
+
+    _g = _Image.open(hm_dir / "compare_conf.gif")
+    check(
+        _g.size == (2 * W + 4, H),
+        f"compare_conf.gif has one column per arm ({_g.size})",
+    )
+    check((hm_dir / "compare_depth.gif").is_file(), "compare_depth.gif written")
 
     # ---- 4. compare, mixed schema then matched schema ----
     print("\n[4] compare_heatmap_summaries.py, MIXED schema (must not crash)")
@@ -201,7 +208,10 @@ def run(hm_dir: Path) -> int:
     ]
     r = subprocess.run(cmp_cmd, capture_output=True, text=True)
     check(r.returncode == 0, f"exit {r.returncode}\n{r.stderr[-800:]}")
-    check("only one arm" in r.stdout, "reports the one-sided conf series")
+    conf_row = next(
+        (ln for ln in r.stdout.splitlines() if ln.startswith("conf ")), ""
+    )
+    check("--" in conf_row, f"conf-less arm shown as '--' in the table: {conf_row!r}")
     check(
         "gterr" in r.stdout and "tcons" in r.stdout, "still compares the error series"
     )
@@ -242,13 +252,22 @@ def run(hm_dir: Path) -> int:
     check("conf " in r.stdout, "conf row present")
     check("conf_corr" in r.stdout, "conf_corr row present")
     check("diagnostic" in r.stdout, "conf is labelled a diagnostic, not a win/loss")
-    corr_line = next(
-        (ln for ln in r.stdout.splitlines() if ln.startswith("conf_corr")), ""
+    # the delta lives on the "    vs <baseline>:" line right after the
+    # conf_corr means row (format: "    vs base_clip0: -0.12345   <verdict>")
+    out_lines = r.stdout.splitlines()
+    corr_idx = next(
+        (i for i, ln in enumerate(out_lines) if ln.startswith("conf_corr")), None
     )
-    # columns: name, left mean, right mean, delta, rel, verdict
+    corr_delta_line = (
+        out_lines[corr_idx + 1]
+        if corr_idx is not None and corr_idx + 1 < len(out_lines)
+        else ""
+    )
     check(
-        bool(corr_line) and float(corr_line.split()[3]) < 0,
-        f"conf_corr delta is negative (finetuned better calibrated): {corr_line!r}",
+        corr_delta_line.strip().startswith("vs base_clip0:")
+        and float(corr_delta_line.split(":")[1].split()[0]) < 0,
+        f"conf_corr delta is negative (finetuned better calibrated): "
+        f"{corr_delta_line!r}",
     )
     r2 = subprocess.run(
         [
@@ -256,7 +275,7 @@ def run(hm_dir: Path) -> int:
             str(REPO / "src" / "heatmaps_to_gif.py"),
             "--hm-dir",
             str(both),
-            "--pair",
+            "--compare",
             "base_clip0",
             "finetuned_clip0",
         ],
@@ -265,7 +284,8 @@ def run(hm_dir: Path) -> int:
     )
     check(r2.returncode == 0, f"gif exit {r2.returncode}\n{r2.stderr[-500:]}")
     check(
-        (both / "pair_conf.gif").is_file(), "pair_conf.gif written for a matched pair"
+        (both / "compare_conf.gif").is_file(),
+        "compare_conf.gif written for a matched pair",
     )
 
     return failures

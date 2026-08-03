@@ -115,7 +115,7 @@ def parse_args():
         help="also write per-frame depth heatmaps (full/window, turbo) and "
         "relative-difference maps (inferno, saturating at 10%%) to "
         "<out-dir>/heatmaps, named for src/heatmaps_to_gif.py "
-        "(e.g. --pair full_clip0 window_clip0)",
+        "(e.g. --compare full_clip0 window_clip0)",
     )
     ap.add_argument(
         "--out-dir", default=os.path.join(ROOT, "viz", "kv_window_validation")
