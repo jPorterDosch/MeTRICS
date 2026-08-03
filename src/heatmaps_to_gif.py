@@ -3,8 +3,9 @@
 
 Groups files by everything before the trailing frame number -- e.g.
 base_clip0_depth_000.png .. _031.png -> base_clip0_depth.gif -- one GIF per
-(tag, series). With --pair, additionally writes side-by-side GIFs (left|right)
-for every series the two tags share: pair_depth.gif, pair_tcons.gif, ...
+(tag, series). With --pair, additionally writes side-by-side GIFs (columns in
+the order given, 2 or more tags) for every series ALL tags share:
+pair_depth.gif, pair_tcons.gif, ...
 
 Those pair names carry no clip index, so pairing a second clip into the same
 directory would overwrite the first clip's GIFs -- pass --pair-name when
@@ -13,7 +14,7 @@ looping over the clips of a --num-clips N export.
 CPU only, PIL only. Examples:
     python heatmaps_to_gif.py --hm-dir ../viz/token_lora_seq/heatmaps
     python heatmaps_to_gif.py --hm-dir ../viz/token_lora_seq/heatmaps \\
-        --pair base_clip0 finetuned_clip0 --fps 10
+        --pair base_clip0 finetuned_clip0 promptda_clip0 --fps 10
     python heatmaps_to_gif.py --hm-dir ../viz/perscene/heatmaps \\
         --pair base_clip3 finetuned_clip3 --pair-name pair_clip3
 """
@@ -65,10 +66,11 @@ def main() -> None:
     ap.add_argument("--fps", type=_positive_fps, default=10.0)
     ap.add_argument(
         "--pair",
-        nargs=2,
-        metavar=("LEFT_TAG", "RIGHT_TAG"),
-        help="also write side-by-side GIFs for series both tags share, e.g. "
-        "--pair base_clip0 finetuned_clip0",
+        nargs="+",
+        metavar="TAG",
+        help="also write side-by-side GIFs (one column per tag, left to right "
+        "in the order given) for series ALL tags share, e.g. "
+        "--pair base_clip0 finetuned_clip0 promptda_clip0",
     )
     ap.add_argument(
         "--pair-name",
@@ -93,30 +95,35 @@ def main() -> None:
         )
 
     if args.pair:
-        left_tag, right_tag = args.pair
-        # series name = <tag>_<kind>; match kinds across the two tags
-        kinds = {
-            p.removeprefix(left_tag + "_")
-            for p in series
-            if p.startswith(left_tag + "_")
-        } & {
-            p.removeprefix(right_tag + "_")
-            for p in series
-            if p.startswith(right_tag + "_")
-        }
+        tags = args.pair
+        if len(tags) < 2:
+            raise SystemExit("--pair needs at least two tags")
+        # series name = <tag>_<kind>; keep only kinds ALL tags share
+        kinds = set.intersection(
+            *(
+                {p.removeprefix(t + "_") for p in series if p.startswith(t + "_")}
+                for t in tags
+            )
+        )
         if not kinds:
-            raise SystemExit(f"no shared series between {left_tag!r} and {right_tag!r}")
+            raise SystemExit(f"no shared series between {', '.join(map(repr, tags))}")
         for kind in sorted(kinds):
-            ls, rs = series[f"{left_tag}_{kind}"], series[f"{right_tag}_{kind}"]
-            n = min(len(ls), len(rs))
+            seqs = [series[f"{t}_{kind}"] for t in tags]
+            n = min(len(s) for s in seqs)
             frames = []
-            for lp, rp in zip(ls[:n], rs[:n]):
-                li, ri = Image.open(lp).convert("RGB"), Image.open(rp).convert("RGB")
-                if li.size != ri.size:
-                    ri = ri.resize(li.size)
-                canvas = Image.new("RGB", (li.width + ri.width + 4, li.height), "white")
-                canvas.paste(li, (0, 0))
-                canvas.paste(ri, (li.width + 4, 0))
+            for paths in zip(*(s[:n] for s in seqs)):
+                imgs = [Image.open(p).convert("RGB") for p in paths]
+                # normalize followers to the first column's size (as before)
+                imgs = [
+                    im if im.size == imgs[0].size else im.resize(imgs[0].size)
+                    for im in imgs
+                ]
+                w = sum(im.width for im in imgs) + 4 * (len(imgs) - 1)
+                canvas = Image.new("RGB", (w, imgs[0].height), "white")
+                x = 0
+                for im in imgs:  # 4px white gutter between columns
+                    canvas.paste(im, (x, 0))
+                    x += im.width + 4
                 frames.append(canvas)
             write_gif(frames, hm_dir / f"{args.pair_name}_{kind}.gif", args.fps)
 
