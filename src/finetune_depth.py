@@ -726,6 +726,7 @@ def _prepare_batch(batch: list[dict], mcfg: MetricCfg) -> None:
         mode=mcfg.depth_cond.sim_mode,
         patch_size=mcfg.depth_cond.sim_patch_size,
         mask_ratio=mcfg.depth_cond.sim_mask_ratio,
+        freq_map_path=mcfg.depth_cond.sim_freq_map_path,
     )
 
 
