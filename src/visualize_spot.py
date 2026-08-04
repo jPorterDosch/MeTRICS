@@ -299,6 +299,12 @@ def main() -> None:
         default=_PROMPTDA_CKPT_DEFAULT,
         help="PromptDA checkpoint: local model.ckpt or HF repo id",
     )
+    ap.add_argument(
+        "--promptda-local-ckpt",
+        default=None,
+        help="optional fine-tuned PromptDA checkpoint (.safetensors or torch) "
+        "overlaid non-strictly on --promptda-ckpt",
+    )
     ap.add_argument("--seq-dir", default="/oscar/data/jtompki1/cli277/new_spot_data/0")
     ap.add_argument("--start", type=int, default=0, help="first frame index")
     ap.add_argument("--num-views", type=int, default=32)
@@ -356,6 +362,15 @@ def main() -> None:
         "NEAREST block replication: it enlarges without inventing structure and "
         "adds NO information, it only stops a poster pipeline from resampling "
         "for you.",
+    )
+    ap.add_argument(
+        "--depth-range-from-gt",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="one shared depth colour range from the SENSOR depth's robust "
+        "2-98%% for all arms' panels (off by default -- a scale-off arm goes "
+        "flat; see visualize_depth.py). On SPOT the range comes from the "
+        "sparse sensor pixels only, which is a thin basis for a shared range.",
     )
     ap.add_argument(
         "--rel-vmax",
@@ -438,7 +453,7 @@ def main() -> None:
     if args.promptda:
         # the checkpoint is still loaded above: mcfg drives _prepare_batch, so
         # PromptDA sees exactly the frames/prompt the other arms see
-        pmodel = _load_promptda(args.promptda_ckpt, device)
+        pmodel = _load_promptda(args.promptda_ckpt, device, args.promptda_local_ckpt)
         model = None
     elif args.base:
         print(f"BASE model: loading pretrained weights {pretrained_path}")
@@ -607,6 +622,10 @@ def main() -> None:
             conf_vmin=args.conf_vmin,
             conf_vmax=args.conf_vmax,
             frame_times_ms=frame_times_ms,
+            # on SPOT "gt" is the sensor's sparse depth -- dotted, mostly gray
+            gt_tag="gt_clip0",
+            depth_range_from_gt=args.depth_range_from_gt,
+            imgs=torch.stack([v["img"][0] for v in views]).float().cpu(),
         )
         print(f"wrote {n} heatmap PNGs")
 

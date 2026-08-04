@@ -25,31 +25,54 @@ def _make_scratch(in_shape, out_shape, groups=1, expand=False):
 
     if expand:
         out_shape1 = out_shape
-        out_shape2 = out_shape*2
-        out_shape3 = out_shape*4
+        out_shape2 = out_shape * 2
+        out_shape3 = out_shape * 4
         if len(in_shape) >= 4:
-            out_shape4 = out_shape*8
+            out_shape4 = out_shape * 8
 
     scratch.layer1_rn = nn.Conv2d(
-        in_shape[0], out_shape1, kernel_size=3, stride=1, padding=1, bias=False, groups=groups
+        in_shape[0],
+        out_shape1,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        bias=False,
+        groups=groups,
     )
     scratch.layer2_rn = nn.Conv2d(
-        in_shape[1], out_shape2, kernel_size=3, stride=1, padding=1, bias=False, groups=groups
+        in_shape[1],
+        out_shape2,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        bias=False,
+        groups=groups,
     )
     scratch.layer3_rn = nn.Conv2d(
-        in_shape[2], out_shape3, kernel_size=3, stride=1, padding=1, bias=False, groups=groups
+        in_shape[2],
+        out_shape3,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        bias=False,
+        groups=groups,
     )
     if len(in_shape) >= 4:
         scratch.layer4_rn = nn.Conv2d(
-            in_shape[3], out_shape4, kernel_size=3, stride=1, padding=1, bias=False, groups=groups
+            in_shape[3],
+            out_shape4,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+            groups=groups,
         )
 
     return scratch
 
 
 class ResidualConvUnit(nn.Module):
-    """Residual convolution module.
-    """
+    """Residual convolution module."""
 
     def __init__(self, features, activation, bn):
         """Init.
@@ -64,11 +87,23 @@ class ResidualConvUnit(nn.Module):
         self.groups = 1
 
         self.conv1 = nn.Conv2d(
-            features, features, kernel_size=3, stride=1, padding=1, bias=True, groups=self.groups
+            features,
+            features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=True,
+            groups=self.groups,
         )
 
         self.conv2 = nn.Conv2d(
-            features, features, kernel_size=3, stride=1, padding=1, bias=True, groups=self.groups
+            features,
+            features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=True,
+            groups=self.groups,
         )
 
         if self.bn == True:
@@ -106,10 +141,18 @@ class ResidualConvUnit(nn.Module):
 
 
 class FeatureFusionBlock(nn.Module):
-    """Feature fusion block.
-    """
+    """Feature fusion block."""
 
-    def __init__(self, features, activation, deconv=False, bn=False, expand=False, align_corners=True, size=None):
+    def __init__(
+        self,
+        features,
+        activation,
+        deconv=False,
+        bn=False,
+        expand=False,
+        align_corners=True,
+        size=None,
+    ):
         """Init.
 
         Args:
@@ -125,10 +168,17 @@ class FeatureFusionBlock(nn.Module):
         self.expand = expand
         out_features = features
         if self.expand == True:
-            out_features = features//2
+            out_features = features // 2
 
         self.out_conv = nn.Conv2d(
-            features, out_features, kernel_size=1, stride=1, padding=0, bias=True, groups=1)
+            features,
+            out_features,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+            groups=1,
+        )
 
         self.resConfUnit1 = ResidualConvUnit(features, activation, bn)
         self.resConfUnit2 = ResidualConvUnit(features, activation, bn)
@@ -168,19 +218,27 @@ class FeatureFusionBlock(nn.Module):
 
 
 class FeatureFusionControlBlock(FeatureFusionBlock):
-    """Feature fusion block.
-    """
+    """Feature fusion block."""
 
-    def __init__(self, features, activation, deconv=False, bn=False, expand=False, align_corners=True, size=None):
+    def __init__(
+        self,
+        features,
+        activation,
+        deconv=False,
+        bn=False,
+        expand=False,
+        align_corners=True,
+        size=None,
+    ):
         """Init.
 
         Args:
             features (int): number of features
         """
-        super.__init__(features, activation, deconv,
-                       bn, expand, align_corners, size)
+        super.__init__(features, activation, deconv, bn, expand, align_corners, size)
         self.copy_block = FeatureFusionBlock(
-            features, activation, deconv, bn, expand, align_corners, size)
+            features, activation, deconv, bn, expand, align_corners, size
+        )
 
     def forward(self, *xs, size=None):
         """Forward pass.
@@ -222,10 +280,18 @@ def zero_module(module):
 
 
 class FeatureFusionDepthBlock(nn.Module):
-    """Feature fusion block.
-    """
+    """Feature fusion block."""
 
-    def __init__(self, features, activation, deconv=False, bn=False, expand=False, align_corners=True, size=None):
+    def __init__(
+        self,
+        features,
+        activation,
+        deconv=False,
+        bn=False,
+        expand=False,
+        align_corners=True,
+        size=None,
+    ):
         """Init.
 
         Args:
@@ -241,24 +307,46 @@ class FeatureFusionDepthBlock(nn.Module):
         self.expand = expand
         out_features = features
         if self.expand == True:
-            out_features = features//2
+            out_features = features // 2
 
         self.out_conv = nn.Conv2d(
-            features, out_features, kernel_size=1, stride=1, padding=0, bias=True, groups=1)
+            features,
+            out_features,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+            groups=1,
+        )
 
         self.resConfUnit1 = ResidualConvUnit(features, activation, bn)
         self.resConfUnit2 = ResidualConvUnit(features, activation, bn)
         self.resConfUnit_depth = nn.Sequential(
-            nn.Conv2d(1, features, kernel_size=3, stride=1,
-                      padding=1, bias=True, groups=1),
+            nn.Conv2d(
+                1, features, kernel_size=3, stride=1, padding=1, bias=True, groups=1
+            ),
             activation,
-            nn.Conv2d(features, features, kernel_size=3,
-                      stride=1, padding=1, bias=True, groups=1),
+            nn.Conv2d(
+                features,
+                features,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=True,
+                groups=1,
+            ),
             activation,
             zero_module(
-                nn.Conv2d(features, features, kernel_size=3,
-                          stride=1, padding=1, bias=True, groups=1)
-            )
+                nn.Conv2d(
+                    features,
+                    features,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=True,
+                    groups=1,
+                )
+            ),
         )
         self.skip_add = nn.quantized.FloatFunctional()
         self.size = size
@@ -279,7 +367,8 @@ class FeatureFusionDepthBlock(nn.Module):
 
         if prompt_depth is not None:
             prompt_depth = F.interpolate(
-                prompt_depth, output.shape[2:], mode='bilinear', align_corners=False)
+                prompt_depth, output.shape[2:], mode="bilinear", align_corners=False
+            )
             res = self.resConfUnit_depth(prompt_depth)
             output = self.skip_add.add(output, res)
 

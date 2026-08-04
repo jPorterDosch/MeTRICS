@@ -166,17 +166,27 @@ SCANNET_SCALES=(--rel-vmax 0.5 --tcons-vmax 0.03 --conf-vmax 10)  # OOD, tcons ~
 SPOT_SCALES=(--rel-vmax 1.0    --tcons-vmax 0.15 --conf-vmax 10)  # sensor-deviation, runs high
 
 # arm tag order for the side-by-side GIFs and the summary table: baselines
-# first, OUR arm last (compare_heatmap_summaries treats the last tag as the
-# subject every other arm is measured against)
+# first (PromptDA, then base StreamVGGT), OUR arm last
+# (compare_heatmap_summaries treats the last tag as the subject every other
+# arm is measured against). ARM_LABELS are the GIF column subtitles, parallel
+# to ARM_TAGS.
 ARM_TAGS=(base_clip0 finetuned_clip0)
-[ "$PROMPTDA" = 1 ] && ARM_TAGS=(base_clip0 promptda_clip0 finetuned_clip0)
+ARM_LABELS=("StreamVGGT" "Ours")
+if [ "$PROMPTDA" = 1 ]; then
+    ARM_TAGS=(promptda_clip0 base_clip0 finetuned_clip0)
+    ARM_LABELS=("PromptDA" "StreamVGGT" "Ours")
+fi
 
 heatmap_gifs () {  # $1 = heatmaps dir
     # no `|| true`: heatmaps_to_gif fails loudly on mismatched arm frame
     # counts (a partial export), and under set -e that must abort the run
     if [ -d "$1" ]; then
+        # --prune non-depth: once the GIFs exist the per-frame gterr/tcons/
+        # conf/rgb PNGs are dead weight (hundreds per clip). The _depth frames
+        # stay -- those are the ones worth opening one at a time.
         python heatmaps_to_gif.py --hm-dir "$1" \
-            --compare "${ARM_TAGS[@]}" --fps 10
+            --compare "${ARM_TAGS[@]}" --labels "${ARM_LABELS[@]}" \
+            --gt-tag gt_clip0 --fps 10 --prune non-depth
     fi
 }
 

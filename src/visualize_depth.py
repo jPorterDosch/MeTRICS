@@ -32,6 +32,8 @@ import torch
 import trimesh
 from accelerate import Accelerator
 from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
+from scipy.ndimage import distance_transform_edt
 
 from dust3r.inference import loss_of_one_batch, sample_query_points  # noqa
 from eval.temporal_consistency.metrics import depth2point, point2depth
@@ -123,12 +125,59 @@ _PROMPTDA_CKPT_DEFAULT = os.environ.get(
 )
 
 
-def _load_promptda(ckpt: str, device) -> torch.nn.Module:
-    """Build the vendored PromptDA in eval mode.
+def load_local_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: str,
+    device: torch.device,
+    strict: bool = False,
+) -> None:
+    """Overlay a local fine-tuned checkpoint onto an already-built model.
 
-    The checkpoint is resolved here (local path, else HF hub download) and its
-    existence asserted BEFORE construction: PromptDA.load_checkpoint only warns
-    on a missing file and would silently run with random depth-head weights.
+    Ported from PromptDA's run_inference.py (`load_local_checkpoint`): accepts
+    .safetensors or a torch file, unwraps a "model_state"/"state_dict" wrapper,
+    strips DataParallel's "module." prefix, and loads non-strict so a partial
+    fine-tune (e.g. depth head only) applies cleanly.
+
+    Deviation from upstream, deliberate: upstream only WARNS when every key is
+    missing, which silently keeps the base weights (or random ones) and looks
+    like a successful load. That case is fatal here.
+    """
+    print(f"Attempting to load checkpoint from {checkpoint_path} with strict={strict}")
+    if checkpoint_path.endswith(".safetensors"):
+        model_sd = load_file(checkpoint_path, device=str(device))
+    else:
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        if "model_state" in ckpt:
+            model_sd = ckpt["model_state"]
+        elif "state_dict" in ckpt:
+            model_sd = ckpt["state_dict"]
+        else:
+            model_sd = ckpt  # assume a bare state_dict
+    model_sd = {k[7:] if k.startswith("module.") else k: v for k, v in model_sd.items()}
+
+    missing, unexpected = model.load_state_dict(model_sd, strict=strict)
+    if missing:
+        print(f"Missing keys in state_dict: {missing}")
+    if unexpected:
+        print(f"Unexpected keys in state_dict: {unexpected}")
+    if len(missing) == len(model.state_dict()):
+        raise SystemExit(
+            f"{checkpoint_path!r} shares no parameter names with PromptDA; "
+            "nothing was loaded"
+        )
+    print("Checkpoint loaded.")
+
+
+def _load_promptda(ckpt: str, device, local_ckpt: str | None = None) -> torch.nn.Module:
+    """Build the vendored PromptDA in eval mode, mirroring PromptDA's own
+    run_inference.py: `from_pretrained` for the base weights, then an optional
+    non-strict overlay of a local fine-tune.
+
+    The base checkpoint is resolved here (local path, else HF hub download) and
+    its existence asserted BEFORE construction: PromptDA.load_checkpoint only
+    warns on a missing file and would silently run with random depth-head
+    weights. Post-resolution, from_pretrained takes its local-path branch, so
+    the loaded weights are exactly what upstream loads.
     """
     if os.path.exists(ckpt):
         resolved = ckpt
@@ -149,7 +198,20 @@ def _load_promptda(ckpt: str, device) -> torch.nn.Module:
         raise SystemExit(f"PromptDA checkpoint {resolved!r} does not exist")
 
     print(f"PROMPTDA model: loading weights {resolved}")
-    return PromptDA(encoder="vitl", ckpt_path=resolved).to(device).eval()
+    model = PromptDA.from_pretrained(resolved).to(device)
+    if local_ckpt is not None:
+        if not os.path.exists(local_ckpt):
+            raise SystemExit(f"PromptDA local checkpoint {local_ckpt!r} does not exist")
+        load_local_checkpoint(model, local_ckpt, device, strict=False)
+    return model.eval()
+
+
+# Far cutoff for a prompt measurement, matching the ONNX export graph's
+# depth_max (streamvggt/export/wrapper.py) so both deployment paths call the
+# same pixels valid. Upstream PromptDA uses 1000 m; nothing in these datasets
+# reaches either bound (uint16-millimetre PNGs cap at 65.535 m, SPOT's float32
+# depth tops out near 6 m), so this only fires on garbage.
+_PROMPT_DEPTH_MAX_M = 100.0
 
 
 def _infill_sparse_depth(depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -158,7 +220,13 @@ def _infill_sparse_depth(depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
     PromptDA normalizes the prompt by its min/max over the WHOLE map, and the
     fusion blocks bilinearly resample it, so sparse zeros both wreck the
     normalization range and bleed into valid measurements. PromptDA's own
-    pipelines densify first with exactly this distance-transform gather."""
+    pipelines densify first with exactly this distance-transform gather.
+
+    Upstream derives validity as (d > 0) & (d < 1000) rather than from a sensor
+    mask; the far cutoff is folded in here (at _PROMPT_DEPTH_MAX_M, inclusive
+    like the export graph's) so one garbage far pixel cannot set the
+    normalization max for the whole frame."""
+    mask = mask & (depth <= _PROMPT_DEPTH_MAX_M)
     if not mask.any():
         raise SystemExit(
             "frame has 0 valid sparse-depth pixels; PromptDA has no prompt "
@@ -166,8 +234,6 @@ def _infill_sparse_depth(depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
         )
     if mask.all():
         return depth
-    from scipy.ndimage import distance_transform_edt
-
     _, idx = distance_transform_edt(~mask, return_indices=True)
     out = depth.copy()
     out[~mask] = depth[idx[0][~mask], idx[1][~mask]]
@@ -522,6 +588,7 @@ def _export_heatmaps(
     valid: torch.Tensor,
     K: torch.Tensor,
     pose: torch.Tensor,
+    imgs: torch.Tensor,
     rel_vmax: float = _REL_VMAX,
     tcons_vmax: float | None = None,
     scale: int = 1,
@@ -529,10 +596,14 @@ def _export_heatmaps(
     conf_vmin: float = _CONF_VMIN,
     conf_vmax: float = _CONF_VMAX,
     frame_times_ms: list[float] | None = None,
+    gt_tag: str | None = None,
+    depth_range_from_gt: bool = False,
 ) -> int:
     """2D heatmap companions to the GLB export, from the SAME predictions.
 
-    pred/gt/valid: [S,H,W] cpu; K: [S,3,3]; pose: [S,4,4] cam2world.
+    pred/gt/valid: [S,H,W] cpu; K: [S,3,3]; pose: [S,4,4] cam2world;
+    imgs: [S,3,H,W] in [0,1], the input frames (same convention
+    _clip_predictions takes).
     conf: optional [S,H,W] PREDICTED depth confidence from _stack_depth_conf
     (the model's own uncertainty head, not the 0/1 GLB mask); when omitted the
     conf panels/columns are skipped and the output is byte-identical to before.
@@ -551,11 +622,17 @@ def _export_heatmaps(
                               to a scalar), then |pred[i+1]-warped|/pred[i+1].
                               Needs NO ground-truth depth, only poses, so the
                               same code transfers to captures without GT.
+      {gt_tag}_depth_XXX.png  GT depth on its own range
+      {gt_tag}_rgb_XXX.png    the input frames -- both arm-independent, so
+                              every arm's run writes the same reference series
       {tag}_summary.png       per-frame mean curves of both error series, plus
                               mean confidence on a twin axis
       {tag}_summary.csv       the SAME per-frame numbers as text, plus the
-                              fraction of valid pixels clipped at rel_vmax and
-                              the confidence/error rank correlation.
+                              fraction of valid pixels clipped at rel_vmax, the
+                              fraction of predicted depth pinned to either end
+                              of the depth colour range (a flat panel is a
+                              scale-off arm, not a failed export), and the
+                              confidence/error rank correlation.
 
     frame_times_ms: optional per-frame inference milliseconds (see
     StreamVGGT.inference). Adds a frame_ms CSV column and a console line
@@ -607,16 +684,59 @@ def _export_heatmaps(
         _imsave(path, rgba)
         return float((rel[ok] >= vmax).mean()) if ok.any() else float("nan")
 
-    # --- predicted depth, one robust shared range across the clip ---
+    # --- depth colour range. depth_range_from_gt (default): ONE range for the
+    # GT panel and every arm's pred panels, taken from GT's robust 2-98% -- the
+    # panels then share absolute METRIC brightness, so a scale-off prediction
+    # LOOKS scale-off. GT is identical across arms, so separate invocations
+    # into one out dir land on the same range with no coordination. Off: each
+    # arm normalizes to its own prediction (flatters non-metric output). ---
     finite = np.isfinite(pred_np) & (pred_np > 0)
-    lo, hi = np.percentile(pred_np[finite], [2, 98]) if finite.any() else (0.0, 1.0)
+    gt_ok = valid_np & np.isfinite(gt_np) & (gt_np > 0)
+    glo, ghi = np.percentile(gt_np[gt_ok], [2, 98]) if gt_ok.any() else (0.0, 1.0)
+    if depth_range_from_gt and gt_ok.any():
+        lo, hi = glo, ghi
+    else:
+        lo, hi = np.percentile(pred_np[finite], [2, 98]) if finite.any() else (0.0, 1.0)
     turbo = matplotlib.colormaps["turbo"]
+    # Fraction of predicted pixels pinned to each end of the colour range. On a
+    # shared GT range an arm whose depth is scale-off lands entirely on one end
+    # -- a flat panel that reads as "broken export" unless the number says
+    # otherwise (an arm predicting ~0.35x GT clips 100% low).
+    depth_clip_lo, depth_clip_hi = [], []
     for i in range(S):
         x = np.clip((pred_np[i] - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
         rgba = turbo(x)
         rgba[~finite[i]] = (0.5, 0.5, 0.5, 1.0)
         _imsave(os.path.join(hm_dir, f"{tag}_depth_{i:03d}.png"), rgba)
+        ok = finite[i]
+        depth_clip_lo.append(
+            float((pred_np[i][ok] <= lo).mean()) if ok.any() else float("nan")
+        )
+        depth_clip_hi.append(
+            float((pred_np[i][ok] >= hi).mean()) if ok.any() else float("nan")
+        )
         written += 1
+
+    # --- FULL ground-truth depth and the input frames under gt_tag (the two
+    # reference columns in the compare GIFs). Arm-independent; GT depth always
+    # on GT's own range. Both are written together so a compare GIF always
+    # opens RGB -> GT depth before the arms. ---
+    if gt_tag is not None:
+        for i in range(S):
+            x = np.clip((gt_np[i] - glo) / max(ghi - glo, 1e-6), 0.0, 1.0)
+            rgba = turbo(x)
+            rgba[~gt_ok[i]] = (0.5, 0.5, 0.5, 1.0)
+            _imsave(os.path.join(hm_dir, f"{gt_tag}_depth_{i:03d}.png"), rgba)
+            written += 1
+        # imgs is [S,3,H,W] in [0,1] (post _prepare_batch), the convention
+        # _clip_predictions takes. Clipped, not rescaled: a rescale would
+        # silently "fix" an input that arrived on the wrong range.
+        if imgs.shape[0] != S:
+            raise ValueError(f"imgs has {imgs.shape[0]} frames, pred has {S}")
+        rgb_np = np.clip(imgs.numpy().transpose(0, 2, 3, 1), 0.0, 1.0)
+        for i in range(S):
+            _imsave(os.path.join(hm_dir, f"{gt_tag}_rgb_{i:03d}.png"), rgb_np[i])
+            written += 1
 
     # --- accuracy vs GT, and the confidence panel that shares its mask ---
     # One loop on purpose: conf_err_corr needs the per-pixel rel-error field and
@@ -698,9 +818,23 @@ def _export_heatmaps(
         w = csv.writer(fh)
         # meta = whole '#' rows, header = columns of one row; both are extended
         # under the same condition, so accumulate both and write once.
-        meta = [["# tag", tag], ["# rel_vmax", rel_vmax], ["# tcons_vmax", tcons_vmax]]
+        meta = [
+            ["# tag", tag],
+            ["# rel_vmax", rel_vmax],
+            ["# tcons_vmax", tcons_vmax],
+            # the depth panels' colour range and where it came from; paired panels
+            # are only comparable when these rows agree across arms
+            ["# depth_vmin_m", lo],
+            ["# depth_vmax_m", hi],
+            [
+                "# depth_range_source",
+                "gt" if (depth_range_from_gt and gt_ok.any()) else "pred",
+            ],
+        ]
         header = [
             "frame",
+            "depth_clipped_low_frac",
+            "depth_clipped_high_frac",
             "gterr_mean",
             "gterr_saturated_frac",
             "tcons_mean",
@@ -717,6 +851,8 @@ def _export_heatmaps(
             has_pair = i < S - 1
             row = [
                 i,
+                f"{depth_clip_lo[i]:.6f}",
+                f"{depth_clip_hi[i]:.6f}",
                 f"{gterr_means[i]:.6f}",
                 f"{gterr_sat[i]:.6f}",
                 f"{tcons_means[i]:.6f}" if has_pair else "",
@@ -751,6 +887,24 @@ def _export_heatmaps(
                 f"vmax={vmax} ({sat:.1%} of valid pixels clipped). The panels "
                 f"cannot show how large the value is -- raise {flag} and "
                 f"re-render before comparing them."
+            )
+    # A flat depth panel is the expected picture of a scale-off arm on the
+    # SHARED metric range, not a failed export -- say which, since the two look
+    # identical (a base StreamVGGT out of domain predicts ~0.35x GT and pins
+    # every pixel to the bottom of the colormap).
+    mean_clip_lo = float(np.nanmean(depth_clip_lo)) if depth_clip_lo else float("nan")
+    mean_clip_hi = float(np.nanmean(depth_clip_hi)) if depth_clip_hi else float("nan")
+    for end, frac, word in (
+        ("low", mean_clip_lo, "below"),
+        ("high", mean_clip_hi, "above"),
+    ):
+        if frac > 0.5:
+            print(
+                f"  WARNING [{tag}]: {frac:.1%} of predicted pixels sit {word} "
+                f"the depth colour range [{lo:.2f}, {hi:.2f}] m, so the panels "
+                f"are near-flat at the {end} end. This arm's depth is off-scale "
+                "for this scene; --no-depth-range-from-gt renders it on its own "
+                "range instead (which hides the scale error)."
             )
     if conf_np is not None:
         # The panels are pictures of a field whose scale is arbitrary; this
@@ -865,6 +1019,13 @@ def main() -> None:
         "package dir is env-overridable via PROMPTDA_REPO (import-time).",
     )
     ap.add_argument(
+        "--promptda-local-ckpt",
+        default=None,
+        help="optional fine-tuned PromptDA checkpoint (.safetensors or torch) "
+        "overlaid non-strictly on --promptda-ckpt, matching PromptDA's own "
+        "run_inference.py -m/--model.",
+    )
+    ap.add_argument(
         "--sparse-seed",
         type=int,
         default=0,
@@ -925,6 +1086,20 @@ def main() -> None:
         "written at the model's working resolution (518x392), ~1.7in at 300dpi. "
         "NEAREST block replication -- enlarges for print without inventing "
         "structure, and adds NO information.",
+    )
+    ap.add_argument(
+        "--depth-range-from-gt",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="colour the depth panels (GT and every arm) on ONE shared range "
+        "taken from GT's robust 2-98%% -- absolute metric brightness, so a "
+        "scale-off prediction looks scale-off. OFF by default: an arm whose "
+        "depth is scene-normalized rather than metric (base StreamVGGT out of "
+        "domain predicts ~0.35x GT on ScanNet) pins every pixel to one end of "
+        "the colormap and its panels go flat. The default per-arm "
+        "self-normalized panels show relative structure but hide metric scale "
+        "-- the summary CSV's depth_vmin_m/depth_vmax_m rows are where the "
+        "scale lives then.",
     )
     ap.add_argument(
         "--rel-vmax",
@@ -1053,7 +1228,7 @@ def main() -> None:
         # The StreamVGGT checkpoint is still loaded above: its saved config
         # rebuilds the val dataset, so PromptDA sees the exact clips/frames and
         # simulated sparsity the other arms see.
-        pmodel = _load_promptda(args.promptda_ckpt, device)
+        pmodel = _load_promptda(args.promptda_ckpt, device, args.promptda_local_ckpt)
         model = None
     elif args.base:
         # load_pretrained=True folds the base StreamVGGT weights in; no
@@ -1157,6 +1332,9 @@ def main() -> None:
                         conf_vmin=args.conf_vmin,
                         conf_vmax=args.conf_vmax,
                         frame_times_ms=frame_times_ms,
+                        gt_tag=f"gt_clip{exported}",
+                        depth_range_from_gt=args.depth_range_from_gt,
+                        imgs=imgs[b],
                     )
                     print(f"  [{mode}] clip {exported}: {n_png} heatmap PNGs")
                 if confs is not None:
