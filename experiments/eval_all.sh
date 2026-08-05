@@ -222,7 +222,16 @@ SPOT_SCALES=(--rel-vmax 1.0    --tcons-vmax 0.15 --conf-vmax 10)  # sensor-devia
 # (compare_heatmap_summaries treats the last tag as the subject every other
 # arm is measured against). ARM_LABELS are the GIF column subtitles, parallel
 # to ARM_TAGS.
+# first (PromptDA, then base StreamVGGT), OUR arm last
+# (compare_heatmap_summaries treats the last tag as the subject every other
+# arm is measured against). ARM_LABELS are the GIF column subtitles, parallel
+# to ARM_TAGS.
 ARM_TAGS=(base_clip0 finetuned_clip0)
+ARM_LABELS=("StreamVGGT" "Ours")
+if [ "$PROMPTDA" = 1 ]; then
+    ARM_TAGS=(promptda_clip0 base_clip0 finetuned_clip0)
+    ARM_LABELS=("PromptDA" "StreamVGGT" "Ours")
+fi
 ARM_LABELS=("StreamVGGT" "Ours")
 if [ "$PROMPTDA" = 1 ]; then
     ARM_TAGS=(promptda_clip0 base_clip0 finetuned_clip0)

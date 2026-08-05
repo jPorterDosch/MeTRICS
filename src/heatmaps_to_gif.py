@@ -13,6 +13,10 @@ With --gt-tag, every compare GIF opens with the arm-independent reference
 columns -- input RGB then GT depth, e.g.
 RGB -> GT depth -> PromptDA -> StreamVGGT -> Ours.
 
+With --gt-tag, every compare GIF opens with the arm-independent reference
+columns -- input RGB then GT depth, e.g.
+RGB -> GT depth -> PromptDA -> StreamVGGT -> Ours.
+
 Those compare names carry no clip index, so comparing a second clip into the
 same directory would overwrite the first clip's GIFs -- pass --compare-name
 when looping over the clips of a --num-clips N export.
@@ -268,6 +272,24 @@ def main() -> None:
         )
         if not kinds:
             raise SystemExit(f"no series for any of {', '.join(map(repr, tags))}")
+        # Arm-independent reference columns, leftmost, in this order: the input
+        # frames then GT depth. BOTH are required -- visualize_depth.py writes
+        # them together, so a missing one means a stale export (written before
+        # the _rgb series existed) or a half-finished one, and dropping the
+        # column silently would hide that.
+        refs: list[tuple[str, str, list[Path]]] = []
+        for kind, label in (("rgb", "RGB"), ("depth", "GT depth")):
+            paths = series.get(f"{args.gt_tag}_{kind}") if args.gt_tag else None
+            if args.gt_tag and paths is None:
+                raise SystemExit(
+                    f"--gt-tag {args.gt_tag}: no {args.gt_tag}_{kind} series in "
+                    f"{hm_dir}. Re-render the clip -- exports predating the "
+                    "reference RGB column have no _rgb frames."
+                )
+            if paths is not None:
+                refs.append((f"\0{kind}", label, paths))
+        col_labels = [lbl for _, lbl, _ in refs] + labels
+        ref_tags = [t for t, _, _ in refs]
         # Arm-independent reference columns, leftmost, in this order: the input
         # frames then GT depth. BOTH are required -- visualize_depth.py writes
         # them together, so a missing one means a stale export (written before
