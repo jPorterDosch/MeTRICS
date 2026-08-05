@@ -69,12 +69,13 @@ def empty_cache(
     head_dim: int = 64,
     device: torch.device = torch.device("cpu"),
     dtype: torch.dtype = torch.float32,
+    batch_size: int = 1,
 ) -> list[torch.Tensor]:
-    """48 zero-length cache tensors [1, heads, 0, n_tokens, head_dim] -- the
+    """batch_size * 48 zero-length cache tensors [batch_size, heads, 0, n_tokens, head_dim] -- the
     'no frames seen yet' state the consumer feeds at frame 0 (the graph
     concats with the empty tensor and selects the frame-0 token from the
-    zero cache length)."""
-    shape = (1, num_heads, 0, n_tokens, head_dim)
+    zero cache length). Each batch element has independent cache."""
+    shape = (batch_size, num_heads, 0, n_tokens, head_dim)
     return [
         torch.zeros(shape, device=device, dtype=dtype)
         for _ in range(2 * NUM_GLOBAL_BLOCKS)

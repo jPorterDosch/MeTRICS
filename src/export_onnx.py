@@ -1,14 +1,18 @@
 """Export StreamVGGT / MetricStreamVGGT streaming depth to ONNX.
 
-One ONNX call == one frame. The exported graph(s) take `rgb [1,3,H,W]` (in
-[0,1]) and `sparse_depth [1,1,H,W]` (sparse METRIC depth; the validity mask
+One ONNX call == one frame. The exported graph(s) take `rgb [B,3,H,W]` (in
+[0,1]) and `sparse_depth [B,1,H,W]` (sparse METRIC depth; the validity mask
 is derived in-graph as 0.01 m <= d <= 100 m) plus 48 KV-cache tensors
-[1,16,n_frames,P,64] with a dynamic frame axis, and return `depth` /
-`depth_conf` in the NETWORK orientation ([1,W,H] with --rotate, [1,H,W]
+[B,16,n_frames,P,64] with a dynamic frame axis, and return `depth` /
+`depth_conf` in the NETWORK orientation ([B,W,H] with --rotate, [B,H,W]
 otherwise -- rotated outputs are not rotated back) and the 48 updated cache
 tensors, already sliced to the last `--window` frames. See
 streamvggt/export/wrapper.py for the full I/O contract, the baked rotation,
 and the documented frame-0-eviction / scale-drift caveats.
+
+B is --batch-size, BAKED into the graph (only the frame axis is dynamic), and
+its elements are independent streams -- one per synchronized camera, each with
+its own 48 cache tensors. Default 1.
 
 Every variant exports the SAME 50 inputs / 50 outputs -- including the base
 arm, which ignores `sparse_depth`'s values but must still expose the input
@@ -117,6 +121,7 @@ def build_wrapper(args) -> StreamingDepthExport:
         image_hw=(args.height, args.width),
         window=args.window,
         rotate=args.rotate,
+        batch_size=args.batch_size,
     )
     if args.variant and wrapper.variant != args.variant:
         source = "the run's config" if args.weights else "--ckpt (base implied)"
@@ -126,7 +131,8 @@ def build_wrapper(args) -> StreamingDepthExport:
         )
     print(
         f"wrapper variant: {wrapper.variant} | net input HxW: {wrapper.net_hw} "
-        f"| window: {wrapper.window} | rotate: {wrapper.rotate}"
+        f"| window: {wrapper.window} | rotate: {wrapper.rotate} "
+        f"| batch: {wrapper.batch_size}"
     )
     return wrapper
 
@@ -134,25 +140,25 @@ def build_wrapper(args) -> StreamingDepthExport:
 # ---------------------------------------------------------------------------
 # dummy inputs
 # ---------------------------------------------------------------------------
-def dummy_frame(args, seed: int = 0):
+def dummy_frame(args, seed: int = 0, batch_size: int = 1):
     """rgb in [0,1]; sparse depth: ~5% of pixels carry 0.5-4.5 m readings,
     the rest are 0 (invalid under the in-graph 0.01-100 m mask)."""
     g = torch.Generator().manual_seed(seed)
-    rgb = torch.rand(1, 3, args.height, args.width, generator=g)
-    d = torch.rand(1, 1, args.height, args.width, generator=g) * 4.0 + 0.5
-    keep = (torch.rand(1, 1, args.height, args.width, generator=g) < 0.05).float()
+    rgb = torch.rand(batch_size, 3, args.height, args.width, generator=g)
+    d = torch.rand(batch_size, 1, args.height, args.width, generator=g) * 4.0 + 0.5
+    keep = (torch.rand(batch_size, 1, args.height, args.width, generator=g) < 0.05).float()
     return rgb, d * keep
 
 
 @torch.no_grad()
-def real_cache(wrapper: StreamingDepthExport, args, n_frames: int = 2):
+def real_cache(wrapper: StreamingDepthExport, args, n_frames: int = 2, batch_size: int = 1):
     """Roll the eager wrapper for n_frames to get a genuine cache -- traced
     shapes and values come from the real model, not hand-built zeros. n>=2 so
     slice_expand_and_flatten(...)[-1:] bakes the generic later-frame
     camera/register token, not frame 0's distinct one."""
     cache = None
     for i in range(n_frames):
-        rgb, d = dummy_frame(args, seed=i)
+        rgb, d = dummy_frame(args, seed=i, batch_size=batch_size)
         _, _, cache = wrapper._step(rgb, d, cache)
     return cache
 
@@ -161,8 +167,11 @@ def real_cache(wrapper: StreamingDepthExport, args, n_frames: int = 2):
 # export
 # ---------------------------------------------------------------------------
 def export_step(wrapper: StreamingDepthExport, args, path: str) -> str:
-    rgb, d = dummy_frame(args, seed=10)
-    cache = real_cache(wrapper, args, n_frames=2)
+    rgb, d = dummy_frame(args, seed=10, batch_size=wrapper.batch_size)
+    cache = real_cache(wrapper, args, n_frames=2, batch_size=wrapper.batch_size)
+    # only the frame axis is dynamic. B is BAKED (the position getter expands to
+    # it and the aggregator reshapes the per-frame token by it), so declaring dim
+    # 0 dynamic would advertise a flexibility the graph does not have.
     dyn = {n: {2: "n_frames"} for n in cache_input_names()}
     dyn.update({n: {2: "n_frames_out"} for n in cache_output_names()})
     print(f"exporting step graph -> {path} (opset {args.opset})")
@@ -179,6 +188,21 @@ def export_step(wrapper: StreamingDepthExport, args, path: str) -> str:
     )
     ort_session.cache_clear()  # never serve a session built from the old file
     return path
+
+
+def is_cuda_runtime_failure(exc: BaseException) -> bool:
+    """Did this validation failure come from the CUDA provider itself?
+
+    Matched on the message because ORT surfaces device faults as a generic
+    Fail/RuntimeException -- there is no typed CUDA error to catch. Deliberately
+    narrow: a shape mismatch or a pruned input must NOT be mistaken for a device
+    fault and retried on CPU, because those are real graph bugs that have to
+    stay fatal."""
+    text = str(exc).lower()
+    return any(
+        s in text
+        for s in ("cudaerror", "cuda error", "cuda failure", "cudnn", "cublas")
+    )
 
 
 def is_sdpa_failure(exc: Exception) -> bool:
@@ -336,11 +360,12 @@ def assert_graph_geometry(sess, wrapper: StreamingDepthExport, path: str) -> Non
     with and without the baked rotation and cannot tell them apart. At a
     SQUARE resolution nothing can -- a rotation mismatch is a silent
     transpose there, and only the parity diff exposes it."""
+    b = wrapper.batch_size
     want = {
-        "rgb": [1, 3, *wrapper.image_hw],
-        "sparse_depth": [1, 1, *wrapper.image_hw],
-        "depth": [1, *wrapper.net_hw],
-        "depth_conf": [1, *wrapper.net_hw],
+        "rgb": [b, 3, *wrapper.image_hw],
+        "sparse_depth": [b, 1, *wrapper.image_hw],
+        "depth": [b, *wrapper.net_hw],
+        "depth_conf": [b, *wrapper.net_hw],
     }
     got = {v.name: v.shape for v in (*sess.get_inputs(), *sess.get_outputs())}
     bad = []
@@ -391,7 +416,7 @@ def probe_frame0(step_path: str, wrapper: StreamingDepthExport, args) -> float:
     K/V rows of the camera/register tokens land in the cache verbatim, so a
     baked later-frame token shows up there at full magnitude even when the
     depth output barely depends on it."""
-    rgb, d = dummy_frame(args, seed=20)
+    rgb, d = dummy_frame(args, seed=20, batch_size=wrapper.batch_size)
     ref_depth, _, ref_cache = wrapper._step(rgb, d, None)
     sess = ort_session(step_path)
     # contract first: a pruned input or a geometry mismatch would otherwise
@@ -452,7 +477,7 @@ def validate_rollout(
     ort_cache = None
     worst = 0.0
     for i in range(n_frames):
-        rgb, d = dummy_frame(args, seed=100 + i)
+        rgb, d = dummy_frame(args, seed=100 + i, batch_size=wrapper.batch_size)
         ref_depth, ref_conf, eager_cache = wrapper._step(rgb, d, eager_cache)
         feed = {"rgb": _np(rgb), "sparse_depth": _np(d)}
         cache = (
@@ -614,7 +639,7 @@ def check_fp16_numerics(fp16_path: str, wrapper: StreamingDepthExport, args) -> 
     rather than leave a graph that looks exportable lying next to the good
     one. The reported diff is informational -- fp16 legitimately differs from
     fp32 by ~1e-1, which is why the parity test takes a --threshold."""
-    rgb, d = dummy_frame(args, seed=30)
+    rgb, d = dummy_frame(args, seed=30, batch_size=wrapper.batch_size)
     ref_depth, _, _ = wrapper._step(rgb, d, None)
     sess = ort_session(fp16_path)
     assert_graph_io(sess, fp16_path)
@@ -764,6 +789,13 @@ def parse_args():
     )
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="batch size for the exported graph (baked into the graph; "
+        "each batch element has independent KV-cache tensors for separate streams)",
+    )
+    ap.add_argument(
         "--out",
         required=True,
         help="output prefix; writes <out>_step.onnx (one graph serves every "
@@ -815,11 +847,46 @@ def main():
         wrapper.set_fused_attention(False)
         export_step(wrapper, args, step_path)
 
-    probe_frame0(step_path, wrapper, args)
-    validate_rollout(step_path, wrapper, args)
+    validate(step_path, wrapper, args)
     if args.fp16:
         try_fp16([step_path], wrapper, args)
     print("done:", step_path)
+
+
+def validate(step_path: str, wrapper: StreamingDepthExport, args) -> None:
+    """Frame-0 probe + rollout, on CUDA if asked, falling back to CPU if the
+    DEVICE (not the graph) is what failed.
+
+    Observed at --batch-size 2: the probe dies with cudaErrorIllegalAddress on
+    a Transpose, while a standalone process runs the identical feed on the
+    identical graph on CUDA without complaint -- the fault needs this process,
+    which has just traced a 1B model and still holds the 5 GB eager copy the
+    probe compares against. Losing the export to that is the worst outcome: the
+    graph is fine and re-tracing costs minutes.
+
+    The fallback is LOUD, and it is a fallback rather than a default because
+    'validated on GPU' silently meaning 'validated on CPU' is the exact failure
+    set_providers() exists to refuse. A graph-level failure (shape, pruned
+    input, mis-tokened frame 0) does not reach here -- is_cuda_runtime_failure
+    keeps those fatal."""
+    try:
+        probe_frame0(step_path, wrapper, args)
+        validate_rollout(step_path, wrapper, args)
+    except (Exception, SystemExit) as e:
+        if not args.cuda or not is_cuda_runtime_failure(e):
+            raise
+        print(
+            f"\nWARNING: CUDA validation FAILED [{type(e).__name__}] {e}\n"
+            "         The provider faulted, not the graph -- retrying every "
+            "check on CPU.\n"
+            "         The graph is then validated on CPU ONLY: nothing here "
+            "has exercised\n"
+            "         the deployment device, which is what --cuda was for.\n"
+        )
+        set_providers("CPUExecutionProvider")
+        probe_frame0(step_path, wrapper, args)
+        validate_rollout(step_path, wrapper, args)
+        print("CPU fallback validation PASSED (deployment device unverified)")
 
 
 if __name__ == "__main__":

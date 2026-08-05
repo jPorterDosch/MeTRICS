@@ -6,8 +6,16 @@ then the depth head) while replacing everything the ONNX exporter cannot
 carry: list-of-dict I/O, HF ModelOutput, autocast contexts, and python-side
 cache management. Camera / point / track heads are dropped -- depth only.
 
+Batch: B is BAKED at construction (batch_size=), like the resolution -- the
+RoPE position getter expands to it and the aggregator reshapes the per-frame
+camera/register token by it, neither of which survives as a dynamic axis. The
+elements are INDEPENDENT streams: attention never crosses dim 0 and each
+element carries its own 48 cache tensors, so B=2 is two synchronized cameras
+sharing one graph, not one joint scene (pinned by check_batch_independence in
+tests/export_onnx_parity.py).
+
 I/O contract (all variants share it; ONE graph serves every frame):
-  inputs : rgb   [1, 3, H, W]  float32 in [0, 1] -- NOT the [-1, 1] ImgNorm
+  inputs : rgb   [B, 3, H, W]  float32 in [0, 1] -- NOT the [-1, 1] ImgNorm
                                tensor the datasets and visualize_spot.py's
                                load_spot_views build. That is the dataset
                                format; finetune_depth._prepare_batch rescales
@@ -16,7 +24,7 @@ I/O contract (all variants share it; ONE graph serves every frame):
                                mean/std itself (its docstring: "images ... in
                                range [0, 1]"). Feed pixel/255, not pixel/255
                                * 2 - 1.
-           sparse_depth [1, 1, H, W]  float32 sparse METRIC depth (metres);
+           sparse_depth [B, 1, H, W]  float32 sparse METRIC depth (metres);
                                invalid pixels are anything outside
                                [depth_min, depth_max] -- the validity mask is
                                derived IN-GRAPH as (d >= depth_min) &
@@ -29,7 +37,7 @@ I/O contract (all variants share it; ONE graph serves every frame):
                                ignores its VALUES but still exposes the input
                                (see StreamingDepthExport._zero_from -- an
                                untied input is pruned by the tracer).
-           past_k_00..past_v_23: 48 cache tensors [1, 16, n_frames, P, 64],
+           past_k_00..past_v_23: 48 cache tensors [B, 16, n_frames, P, 64],
                                dynamic dim 2. Frame 0 feeds n_frames == 0
                                (see StreamingDepthExport.empty_cache). The
                                aggregator's frame-0 vs later-frame camera/
@@ -40,14 +48,14 @@ I/O contract (all variants share it; ONE graph serves every frame):
                                asserted per-export by export_onnx.probe_frame0
                                and pinned by the divergent-token smoke model
                                in tests/export_onnx_parity.py.
-  outputs: depth [1, H', W'], depth_conf [1, H', W'] where (H', W') is the
+  outputs: depth [B, H', W'], depth_conf [B, H', W'] where (H', W') is the
            NETWORK orientation -- (W, H) with rotate=True, (H, W) otherwise
            (rotated outputs are not rotated back) -- plus new_k_00..new_v_23
            (cache carried to the next call, already window-sliced).
 
 Rotation: with rotate=True the graph rotates rgb+depth 90 degrees clockwise
 before the network; the depth/conf outputs REMAIN in that rotated
-orientation ([1, W, H] for [H, W] inputs) -- the consumer wants the rotated
+orientation ([B, W, H] for [H, W] inputs) -- the consumer wants the rotated
 maps, so no inverse rotation is applied. Implemented as transpose+flip
 (torch.rot90 has no ONNX symbolic in the TorchScript exporter).
 
@@ -134,9 +142,12 @@ class _ConstantPositions:
     there, while eager (the parity reference) is where a second wrapper at a
     different resolution could silently reuse the wrong grid."""
 
-    def __init__(self, positions: torch.Tensor, hw: tuple[int, int]) -> None:
+    def __init__(
+        self, positions: torch.Tensor, hw: tuple[int, int], batch: int = 1
+    ) -> None:
         self.positions = positions  # [1, h*w, 2], int64
         self.hw = hw
+        self.batch = int(batch)  # baked B*S, for the traced call (see __call__)
 
     def __call__(self, batch, h, w, device) -> torch.Tensor:
         if isinstance(h, int) and isinstance(w, int) and (h, w) != self.hw:
@@ -146,11 +157,14 @@ class _ConstantPositions:
                 "resolutions; rebuild the wrapper for this resolution"
             )
         pos = self.positions.to(device)
-        # PositionGetter hands back a batch-expanded clone. `batch` can arrive
-        # as a traced Tensor (which expand would choke on) and the export is
-        # always B*S == 1, so only expand for a real python int > 1.
-        if isinstance(batch, int) and batch > 1:
-            pos = pos.expand(batch, -1, -1)
+        # PositionGetter hands back a batch-expanded clone. Under tracing
+        # `batch` arrives as a Tensor, which expand cannot take -- fall back to
+        # the batch baked at construction (the export fixes B, same as it fixes
+        # the resolution). Skipping the expand instead leaves pos at [1, P, 2]
+        # while the tokens are [B*S, P, C], which only survives at B*S == 1.
+        n = batch if isinstance(batch, int) else self.batch
+        if n > 1:
+            pos = pos.expand(n, -1, -1)
         return pos.clone()
 
 
@@ -258,6 +272,7 @@ class StreamingDepthExport(nn.Module):
         rotate: bool = False,
         depth_min: float = 0.01,
         depth_max: float = 100.0,
+        batch_size: int = 1,
     ) -> None:
         super().__init__()
         if isinstance(model, MetricStreamVGGT):
@@ -282,6 +297,14 @@ class StreamingDepthExport(nn.Module):
         self.rotate = bool(rotate)
         self.depth_min = float(depth_min)
         self.depth_max = float(depth_max)
+        # Baked into the graph, like the resolution: the position getter and the
+        # aggregator's per-frame token reshape both need a concrete B under
+        # tracing. Streams are independent -- attention never crosses the batch
+        # axis and each element carries its own 48 cache tensors -- so B=2 is
+        # two separate streams, not a joint one.
+        self.batch_size = int(batch_size)
+        if self.batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
 
         # network-facing dims are POST-rotation; image_hw is what the GRAPH
         # takes (pre-rotation), which is what a consumer must feed
@@ -324,7 +347,7 @@ class StreamingDepthExport(nn.Module):
             ph, pw = self.net_hw[0] // ps, self.net_hw[1] // ps
             pos = torch.cartesian_prod(torch.arange(ph), torch.arange(pw))
             self.aggregator.position_getter = _ConstantPositions(
-                pos.view(1, ph * pw, 2), (ph, pw)
+                pos.view(1, ph * pw, 2), (ph, pw), batch=self.batch_size
             )
         # DINOv2 patch embed only: bake its interpolated positional encoding
         # (see _ConstantPosEncoding -- the antialiased bicubic resize has no
@@ -367,11 +390,17 @@ class StreamingDepthExport(nn.Module):
             embed = vit.interpolate_pos_encoding(probe, h, w).detach()
         vit.interpolate_pos_encoding = _ConstantPosEncoding(embed, (h, w))
 
-    def empty_cache(self) -> list[torch.Tensor]:
-        """48 zero-length cache tensors matching THIS model's geometry."""
+    def empty_cache(self, batch_size: int | None = None) -> list[torch.Tensor]:
+        """48 zero-length cache tensors matching THIS model's geometry, batched
+        to the wrapper's baked B (one independent stream per batch element)."""
         from .cache import empty_cache
 
-        return empty_cache(self.n_tokens, self.num_heads, self.head_dim)
+        return empty_cache(
+            self.n_tokens,
+            self.num_heads,
+            self.head_dim,
+            batch_size=self.batch_size if batch_size is None else batch_size,
+        )
 
     @property
     def variant(self) -> str:
@@ -428,7 +457,7 @@ class StreamingDepthExport(nn.Module):
             rgb = rotate_cw(rgb)
             depth = rotate_cw(depth)
 
-        images = rgb.unsqueeze(1)  # [1, 1, 3, H', W']
+        images = rgb.unsqueeze(1)  # [B, 1, 3, H', W']
         feats, residuals = self._conditioning(depth)
         if self.conditioner is None:
             images = images + self._zero_from(depth, images.dtype)
@@ -454,8 +483,8 @@ class StreamingDepthExport(nn.Module):
             patch_start_idx=patch_start_idx,
             depth_residuals=residuals,
         )
-        depth_pred = depth_pred[:, 0, :, :, 0]  # [1, H', W']
-        conf = conf[:, 0]  # [1, H', W']
+        depth_pred = depth_pred[:, 0, :, :, 0]  # [B, H', W']
+        conf = conf[:, 0]  # [B, H', W']
 
         out_cache: list[torch.Tensor] = []
         for k, v in new_pkv:

@@ -638,7 +638,61 @@ def run_export_smoke(args) -> None:
             "frame-0 token selection stayed dynamic)"
         )
     check_no_inverse_rotation(model, args.seed)
+    check_batch_independence(model, args.seed)
     print("export smoke PASSED")
+
+
+@torch.no_grad()
+def check_batch_independence(model, seed: int, batch: int = 2) -> None:
+    """A batched graph must be N INDEPENDENT streams, not one joint one.
+
+    Batching is only a deployment win if element i's depth depends on element
+    i's frames and nothing else -- two synchronized cameras share a graph, not
+    a scene. Nothing in the architecture should couple them (attention never
+    crosses dim 0, and each element carries its own 48 cache tensors), but the
+    cached path selects the per-frame camera/register token by slicing a
+    B*S-flattened tensor, which silently took ONE row for the whole batch
+    until it was unflattened first -- wrong-but-plausible at B>1 rather than
+    loud, and invisible to any check that feeds every element the same frame.
+
+    So: roll B distinct streams through one batched wrapper, roll each one
+    through a B=1 wrapper alone, and require they agree. Distinct inputs per
+    element are the point -- identical ones would pass under any amount of
+    cross-talk."""
+    h, w = SMOKE_HW
+    frames = [
+        [dummy_frame(h, w, seed=seed + 100 * b + i) for i in range(3)]
+        for b in range(batch)
+    ]
+
+    batched = StreamingDepthExport(model, image_hw=(h, w), window=3, batch_size=batch)
+    cache = None
+    batched_out = []
+    for i in range(3):
+        rgb = torch.cat([frames[b][i][0] for b in range(batch)], dim=0)
+        d = torch.cat([frames[b][i][1] for b in range(batch)], dim=0)
+        depth, _, cache = batched._step(rgb, d, cache)
+        batched_out.append(depth)
+
+    # the B=1 wrapper rebakes the shared model's position getter for batch 1,
+    # so the solo rollouts must run AFTER the batched one
+    worst = 0.0
+    for b in range(batch):
+        solo = StreamingDepthExport(model, image_hw=(h, w), window=3, batch_size=1)
+        cache = None
+        for i in range(3):
+            rgb, d = frames[b][i]
+            depth, _, cache = solo._step(rgb, d, cache)
+            worst = max(worst, float((depth[0] - batched_out[i][b]).abs().max()))
+    if worst >= 1e-5:
+        raise AssertionError(
+            f"batched stream != solo stream (max|diff| {worst:.3e}): batch "
+            "element outputs depend on the other elements' frames"
+        )
+    print(
+        f"[export-smoke] batch independence: B={batch} matches {batch} solo "
+        f"rollouts (max|diff| {worst:.2e}) -- streams do not interact"
+    )
 
 
 @torch.no_grad()
@@ -737,11 +791,11 @@ def run_cpu_unit(args) -> None:
 # ---------------------------------------------------------------------------
 # full parity mode
 # ---------------------------------------------------------------------------
-def dummy_frame(h: int, w: int, seed: int):
+def dummy_frame(h: int, w: int, seed: int, batch: int = 1):
     g = torch.Generator().manual_seed(seed)
-    rgb = torch.rand(1, 3, h, w, generator=g)
-    d = torch.rand(1, 1, h, w, generator=g) * 4.0 + 0.5
-    keep = (torch.rand(1, 1, h, w, generator=g) < 0.05).float()
+    rgb = torch.rand(batch, 3, h, w, generator=g)
+    d = torch.rand(batch, 1, h, w, generator=g) * 4.0 + 0.5
+    keep = (torch.rand(batch, 1, h, w, generator=g) < 0.05).float()
     return rgb, d * keep
 
 
