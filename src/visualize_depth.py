@@ -35,8 +35,6 @@ from accelerate import Accelerator
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from scipy.ndimage import distance_transform_edt
-from safetensors.torch import load_file
-from scipy.ndimage import distance_transform_edt
 
 from dust3r.inference import loss_of_one_batch, sample_query_points  # noqa
 from eval.temporal_consistency.metrics import depth2point, point2depth
@@ -677,7 +675,6 @@ def _export_heatmaps(
     valid: torch.Tensor,
     K: torch.Tensor,
     pose: torch.Tensor,
-    imgs: torch.Tensor,
     imgs: torch.Tensor,
     rel_vmax: float = _REL_VMAX,
     tcons_vmax: float | None = None,

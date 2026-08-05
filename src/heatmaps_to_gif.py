@@ -13,10 +13,6 @@ With --gt-tag, every compare GIF opens with the arm-independent reference
 columns -- input RGB then GT depth, e.g.
 RGB -> GT depth -> PromptDA -> StreamVGGT -> Ours.
 
-With --gt-tag, every compare GIF opens with the arm-independent reference
-columns -- input RGB then GT depth, e.g.
-RGB -> GT depth -> PromptDA -> StreamVGGT -> Ours.
-
 Those compare names carry no clip index, so comparing a second clip into the
 same directory would overwrite the first clip's GIFs -- pass --compare-name
 when looping over the clips of a --num-clips N export.

@@ -146,12 +146,16 @@ def dummy_frame(args, seed: int = 0, batch_size: int = 1):
     g = torch.Generator().manual_seed(seed)
     rgb = torch.rand(batch_size, 3, args.height, args.width, generator=g)
     d = torch.rand(batch_size, 1, args.height, args.width, generator=g) * 4.0 + 0.5
-    keep = (torch.rand(batch_size, 1, args.height, args.width, generator=g) < 0.05).float()
+    keep = (
+        torch.rand(batch_size, 1, args.height, args.width, generator=g) < 0.05
+    ).float()
     return rgb, d * keep
 
 
 @torch.no_grad()
-def real_cache(wrapper: StreamingDepthExport, args, n_frames: int = 2, batch_size: int = 1):
+def real_cache(
+    wrapper: StreamingDepthExport, args, n_frames: int = 2, batch_size: int = 1
+):
     """Roll the eager wrapper for n_frames to get a genuine cache -- traced
     shapes and values come from the real model, not hand-built zeros. n>=2 so
     slice_expand_and_flatten(...)[-1:] bakes the generic later-frame

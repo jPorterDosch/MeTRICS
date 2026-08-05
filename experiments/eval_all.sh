@@ -129,9 +129,9 @@ PROMPTDA="${PROMPTDA:-1}"
 PROMPTDA_CKPT="${PROMPTDA_CKPT:-depth-anything/prompt-depth-anything-vitl}"
 PROMPTDA_ARGS=(--promptda --promptda-ckpt "$PROMPTDA_CKPT")
 
-# SPARSITY=1 adds the prompt-sparsity axis: a second pass of the PromptDA and
-# finetuned arms on a dense 192x256 ARKit-density prompt, and the 2x2
-# sparsity_*.gif built from it. Doubles the viz passes on hammer/scannet; SPOT
+# SPARSITY=1 adds the prompt-sparsity axis: two more passes of the PromptDA and
+# finetuned arms -- one at MID_DENSITY, one on a dense 192x256 ARKit-density
+# prompt -- and the 2x3 sparsity_*.gif built from them. hammer/scannet; SPOT
 # is excluded (its real sensor prompt has no dense GT to downsample). Off by
 # default -- it is a demo/figure artifact, not part of the standard eval.
 SPARSITY="${SPARSITY:-0}"
