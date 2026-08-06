@@ -48,6 +48,21 @@
 # compare_*.gif (compare_depth.gif, compare_conf.gif, ...) with one column per
 # arm, all arms at once.
 #
+# Two extra strips are built for the demo site, each isolating ONE axis, since
+# a single all-arms panel conflates them:
+#   temporal_*.gif   RGB | GT depth | StreamVGGT | Ours. PromptDA is left out
+#                    on purpose -- it is single-frame, so it does not belong in
+#                    a temporal-consistency comparison.
+#   sparsity_*.gif   a 2x3 grid, PromptDA on top and Ours below, sweeping the
+#                    prompt across 5% (the training density) -> 40% (SPOT's
+#                    real sensor) -> dense 192x256 ARKit. No reference columns.
+#                    Needs SPARSITY=1, which adds TWO viz passes per arm.
+#                    hammer/scannet only (SPOT's real sensor prompt has no
+#                    dense GT behind it).
+#
+# Per-frame PNGs are kept for the WHOLE run and pruned in one pass at the end
+# (PRUNE), so every strip can be assembled from them first.
+#
 # Every stage writes a summary CSV; the run ends with ONE table per stage over
 # all arms (ours last = the subject each baseline is measured against) via
 # tests/compare_heatmap_summaries.py. The CSV is the
@@ -114,6 +129,43 @@ PROMPTDA="${PROMPTDA:-1}"
 PROMPTDA_CKPT="${PROMPTDA_CKPT:-depth-anything/prompt-depth-anything-vitl}"
 PROMPTDA_ARGS=(--promptda --promptda-ckpt "$PROMPTDA_CKPT")
 
+# SPARSITY=1 adds the prompt-sparsity axis: two more passes of the PromptDA and
+# finetuned arms -- one at MID_DENSITY, one on a dense 192x256 ARKit-density
+# prompt -- and the 2x3 sparsity_*.gif built from them. hammer/scannet; SPOT
+# is excluded (its real sensor prompt has no dense GT to downsample). Off by
+# default -- it is a demo/figure artifact, not part of the standard eval.
+SPARSITY="${SPARSITY:-0}"
+# Middle point of the sparsity axis, as the FRACTION of patches kept. 0.40 is
+# SPOT's real sensor: 33.6% measured on the static window, 45.7% on the dynamic
+# one. Picking a real sensor's density rather than a round number is what lets
+# the middle column be labelled as a deployment case instead of an arbitrary
+# sweep point. The left column is the run's own training density (5%), the
+# right is the dense ARKit prompt.
+MID_DENSITY="${MID_DENSITY:-0.40}"
+# Column labels are NOT hardcoded: each is read back from the '# prompt_density'
+# row visualize_depth writes into that arm's summary CSV, which records the
+# ACHIEVED density (measurements per pixel), always a little under the target
+# since a pixel counts only where a visible patch meets valid GT. Labelling a
+# demo figure from the artifact instead of from an assumption is the whole
+# point -- the sparse column's density comes from the checkpoint's own
+# sim_mask_ratio, which differs between runs.
+density_label () {  # $1 = heatmaps dir, $2 = tag, $3 = fallback label
+    local csv="$1/${2}_summary.csv" pct
+    # tr -d '\r': python's csv writer terminates rows with CRLF, and the stray
+    # CR makes bc fail ("illegal character: ^M") -- silently, into a 0% label
+    pct=$(grep -m1 '^# prompt_density' "$csv" 2>/dev/null | cut -d, -f2 | tr -d '\r')
+    if [ -n "$pct" ]; then
+        printf '%.0f%%' "$(echo "$pct * 100" | bc -l)"
+    else
+        printf '%s' "$3"
+    fi
+}
+# PRUNE deletes the per-frame gterr/tcons/conf/rgb PNGs once every GIF exists.
+# Deferred to ONE pass at the end of the run (see the cleanup block): the demo
+# strips are assembled after all stages export, and pruning is one-way. Set
+# PRUNE=none to keep every frame PNG (they are hundreds per clip).
+PRUNE="${PRUNE:-non-depth}"
+
 if [ $# -lt 1 ]; then
     sed -n '12,40p' "$0" >&2
     exit 1
@@ -170,7 +222,16 @@ SPOT_SCALES=(--rel-vmax 1.0    --tcons-vmax 0.15 --conf-vmax 10)  # sensor-devia
 # (compare_heatmap_summaries treats the last tag as the subject every other
 # arm is measured against). ARM_LABELS are the GIF column subtitles, parallel
 # to ARM_TAGS.
+# first (PromptDA, then base StreamVGGT), OUR arm last
+# (compare_heatmap_summaries treats the last tag as the subject every other
+# arm is measured against). ARM_LABELS are the GIF column subtitles, parallel
+# to ARM_TAGS.
 ARM_TAGS=(base_clip0 finetuned_clip0)
+ARM_LABELS=("StreamVGGT" "Ours")
+if [ "$PROMPTDA" = 1 ]; then
+    ARM_TAGS=(promptda_clip0 base_clip0 finetuned_clip0)
+    ARM_LABELS=("PromptDA" "StreamVGGT" "Ours")
+fi
 ARM_LABELS=("StreamVGGT" "Ours")
 if [ "$PROMPTDA" = 1 ]; then
     ARM_TAGS=(promptda_clip0 base_clip0 finetuned_clip0)
@@ -181,12 +242,50 @@ heatmap_gifs () {  # $1 = heatmaps dir
     # no `|| true`: heatmaps_to_gif fails loudly on mismatched arm frame
     # counts (a partial export), and under set -e that must abort the run
     if [ -d "$1" ]; then
-        # --prune non-depth: once the GIFs exist the per-frame gterr/tcons/
-        # conf/rgb PNGs are dead weight (hundreds per clip). The _depth frames
-        # stay -- those are the ones worth opening one at a time.
+        # --prune none here ON PURPOSE. Cleanup is deferred to one pass at the
+        # very end of the run (see PRUNE below), because the demo strips are
+        # built after every stage has exported and a pruned directory cannot
+        # produce them -- the compare GIFs need the frame PNGs, and pruning is
+        # one-way.
         python heatmaps_to_gif.py --hm-dir "$1" \
             --compare "${ARM_TAGS[@]}" --labels "${ARM_LABELS[@]}" \
-            --gt-tag gt_clip0 --fps 10 --prune non-depth
+            --gt-tag gt_clip0 --fps 10 --prune none
+
+        # Demo strip 1 -- the TEMPORAL axis: RGB | GT depth | StreamVGGT |
+        # Ours, PromptDA deliberately absent. PromptDA is a single-frame model,
+        # so putting it in a temporal-consistency panel compares things that
+        # are not comparable. Written alongside the full compare_*.gif, under
+        # its own --compare-name so the two do not collide.
+        python heatmaps_to_gif.py --hm-dir "$1" \
+            --compare base_clip0 finetuned_clip0 \
+            --labels "StreamVGGT" "Ours" \
+            --gt-tag gt_clip0 --fps 10 --prune none --compare-name temporal
+    fi
+}
+
+sparsity_gifs () {  # $1 = heatmaps dir
+    # Demo strip 2 -- the SPARSITY axis as a 2x3 grid, PromptDA on the top row
+    # and Ours on the bottom, both sweeping training-sparse -> SPOT-real ->
+    # ARKit-dense. No RGB/GT columns (no --gt-tag): the grid IS the point and
+    # reference panels dilute it. Only built when the extra passes ran.
+    if [ -d "$1" ] && [ "$SPARSITY" = 1 ]; then
+        # every label read back from the run that produced the column
+        local sp mid dense
+        sp="$(density_label "$1" finetuned_clip0 "sparse")"
+        mid="$(density_label "$1" finetuned_mid_clip0 "mid")"
+        # NOT a density: this column is complete after upsampling, so "100%"
+        # would read as full-resolution measurements. The information it
+        # actually carries is the 192x256 grid it was built on -- that is the
+        # story of the column, and it is PromptDA's training resolution.
+        dense="dense 192x256"
+        echo "sparsity axis: $sp -> $mid -> $dense" \
+             "(achieved densities; $(density_label "$1" finetuned_dense_clip0 "?") after upsampling)"
+        python heatmaps_to_gif.py --hm-dir "$1" \
+            --compare promptda_clip0 promptda_mid_clip0 promptda_dense_clip0 \
+                      finetuned_clip0 finetuned_mid_clip0 finetuned_dense_clip0 \
+            --labels "PromptDA ($sp)" "PromptDA ($mid)" "PromptDA ($dense)" \
+                     "Ours ($sp)" "Ours ($mid)" "Ours ($dense)" \
+            --grid-rows 2 --fps 10 --prune none --compare-name sparsity
     fi
 }
 
@@ -205,7 +304,38 @@ viz_pair () {  # $1 = out dir, $2 = scales array name, rest = extra flags
         "${PROMPTDA_ARGS[@]}" \
         --num-clips 1 --num-views "$NUM_VIEWS" --heatmaps "${scales[@]}" \
         "${TIMING_ARGS[@]}" --out-dir "$out" "$@"
+
+    # SPARSITY=1: the same two arms again on the DENSE 192x256 ARKit-density
+    # prompt -- the density PromptDA was trained for (arXiv 2412.14015 §3.3).
+    # --tag-suffix _dense keeps these from overwriting the sparse pass in the
+    # same dir. Both arms read the identical prompt, so the pairing is fair at
+    # each density; what changes between the columns is only how much depth the
+    # models were given. NOTE the dense column is out of OUR model's training
+    # distribution (it trains at sim_mask_ratio 0.95), so it is a measurement,
+    # not a result we control.
+    if [ "$SPARSITY" = 1 ]; then
+        # MIDDLE column: a normal partial patch mask at SPOT's real density.
+        # Only the density differs from the sparse pass -- same masking
+        # machinery, same all-but-density statistics -- which is what makes a
+        # jump between this column and the dense one attributable to the prompt
+        # going fully dense rather than to the amount of depth.
+        for arm in ours promptda; do
+            [ "$arm" = promptda ] && [ "$PROMPTDA" != 1 ] && continue
+            extra=()
+            [ "$arm" = promptda ] && extra=("${PROMPTDA_ARGS[@]}")
+            python visualize_depth.py "${CKPT_ARGS[@]}" "${extra[@]}" \
+                --prompt-density "$MID_DENSITY" --tag-suffix _mid \
+                --num-clips 1 --num-views "$NUM_VIEWS" --heatmaps "${scales[@]}" \
+                "${TIMING_ARGS[@]}" --out-dir "$out" "$@"
+            python visualize_depth.py "${CKPT_ARGS[@]}" "${extra[@]}" \
+                --prompt arkit --tag-suffix _dense \
+                --num-clips 1 --num-views "$NUM_VIEWS" --heatmaps "${scales[@]}" \
+                "${TIMING_ARGS[@]}" --out-dir "$out" "$@"
+        done
+    fi
+
     heatmap_gifs "$out/heatmaps"
+    sparsity_gifs "$out/heatmaps"
 }
 
 spot_pair () {  # $1 = out dir, $2 = --start
@@ -279,5 +409,19 @@ if [ ${#HMDIRS[@]} -gt 0 ]; then
 else
     echo "(no heatmap dirs -- ablation-only run; see $OUT_ROOT/ablation.txt)"
 fi
+
+# ---- deferred cleanup, once, after EVERY stage and strip is on disk --------
+# Frame PNGs stayed put through the whole run so any later cross-stage or
+# cross-density strip could be built from them. Now that nothing else will read
+# them, drop the redundant ones. heatmaps_to_gif only deletes a series whose
+# GIF actually exists, so a stage that failed its GIF step keeps its frames.
+if [ "$PRUNE" != "none" ] && [ ${#HMDIRS[@]} -gt 0 ]; then
+    echo ""
+    echo "---------- cleanup (--prune $PRUNE) ----------"
+    for hm in "${HMDIRS[@]}"; do
+        python heatmaps_to_gif.py --hm-dir "$hm" --prune "$PRUNE" --prune-only
+    done
+fi
+
 echo ""
 echo "artifacts: $OUT_ROOT"

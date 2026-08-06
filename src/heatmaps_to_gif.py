@@ -30,6 +30,7 @@ CPU only, PIL only. Examples:
 """
 
 import argparse
+import math
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -107,6 +108,62 @@ def write_gif(frames: list[Image.Image], out: Path, fps: float) -> None:
     print(f"  {out.name}: {len(frames)} frames @ {fps:g} fps")
 
 
+def compose_grid(
+    panels: list[Image.Image], labels: list[str], rows: int = 1
+) -> Image.Image:
+    """Lay captioned panels out in `rows` rows, filling left to right.
+
+    rows=1 is the classic single strip. Above ~4 columns a strip gets too wide
+    to read on a page, so e.g. 6 panels at rows=2 become a 2x3 grid. Panels are
+    assumed pre-normalized to one size (the caller resizes followers to the
+    first column); a short final row is left-aligned rather than stretched.
+    """
+    if rows < 1:
+        raise ValueError(f"rows must be >= 1, got {rows}")
+    per_row = math.ceil(len(panels) / rows)
+    chunks = [panels[i : i + per_row] for i in range(0, len(panels), per_row)]
+    lchunks = [labels[i : i + per_row] for i in range(0, len(labels), per_row)]
+
+    bar_h = max(16, panels[0].height // 14)
+    cell_h = panels[0].height + bar_h
+    width = max(sum(p.width for p in ch) + 4 * (len(ch) - 1) for ch in chunks)
+    height = cell_h * len(chunks) + 4 * (len(chunks) - 1)  # 4px gutters
+
+    canvas = Image.new("RGB", (width, height), "white")
+    y = 0
+    for ch, lch in zip(chunks, lchunks, strict=True):
+        x = 0
+        for im, label in zip(ch, lch, strict=True):
+            canvas.paste(caption_bar(im.width, bar_h, label), (x, y))
+            canvas.paste(im, (x, y + bar_h))
+            x += im.width + 4
+        y += cell_h + 4
+    return canvas
+
+
+def prune_frames(series: dict[str, list[Path]], mode: str) -> int:
+    """DELETE per-frame PNGs whose GIF now exists. Returns the count removed.
+
+    Only ever runs over series whose animation is already on disk: a frame PNG
+    is redundant only once the thing that replaced it exists. That check is
+    also what makes the deferred (--prune-only) pass safe -- a series whose GIF
+    step failed keeps its frames.
+    """
+    removed = 0
+    for prefix, paths in series.items():
+        hm_dir = paths[0].parent
+        if not (hm_dir / f"{prefix}.gif").is_file():
+            continue
+        if mode == "non-depth" and prefix.endswith("_depth"):
+            continue
+        for p in paths:
+            p.unlink()
+            removed += 1
+    kept = "kept _depth frames" if mode == "non-depth" else "kept no frames"
+    print(f"pruned {removed} frame PNGs ({kept})")
+    return removed
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hm-dir", required=True, help="the heatmaps/ directory")
@@ -146,6 +203,21 @@ def main() -> None:
         "so re-render the clip if you need different labels or fps.",
     )
     ap.add_argument(
+        "--grid-rows",
+        type=int,
+        default=1,
+        help="wrap the --compare panels into this many rows instead of one "
+        "strip (e.g. 6 tags at --grid-rows 2 gives a 2x3 grid). Reference "
+        "columns from --gt-tag count as panels and are placed first.",
+    )
+    ap.add_argument(
+        "--prune-only",
+        action="store_true",
+        help="do the --prune deletion and NOTHING else -- write no GIFs. For "
+        "deferring cleanup to the end of a multi-stage run, so every frame PNG "
+        "stays available to later cross-stage compare GIFs. Needs --prune.",
+    )
+    ap.add_argument(
         "--compare-name",
         default="compare",
         help="filename stem for the --compare GIFs (default 'compare', giving "
@@ -156,6 +228,19 @@ def main() -> None:
 
     hm_dir = Path(args.hm_dir)
     series = collect_series(hm_dir)
+
+    # Before the empty-directory check on purpose: a caller sweeping every
+    # heatmaps dir at the end of a run hits directories a failed stage left
+    # empty, and there "nothing to delete" is the answer, not a failure that
+    # aborts the cleanup of every other directory.
+    if args.prune_only:
+        if args.prune == "none":
+            raise SystemExit("--prune-only needs --prune non-depth|all")
+        if args.compare:
+            raise SystemExit("--prune-only writes no GIFs, so --compare is unused")
+        prune_frames(series, args.prune)
+        return
+
     if not series:
         raise SystemExit(f"no *_NNN.png series found in {hm_dir}")
 
@@ -241,31 +326,11 @@ def main() -> None:
                                 size, f"{t}: no {kind} output"
                             )
                         cols.append(missing_panels[t])
-                w = sum(im.width for im in cols) + 4 * (len(cols) - 1)
-                bar_h = max(16, cols[0].height // 14)
-                canvas = Image.new("RGB", (w, cols[0].height + bar_h), "white")
-                x = 0
-                for im, label in zip(cols, col_labels, strict=True):  # 4px gutter
-                    canvas.paste(caption_bar(im.width, bar_h, label), (x, 0))
-                    canvas.paste(im, (x, bar_h))
-                    x += im.width + 4
-                frames.append(canvas)
+                frames.append(compose_grid(cols, col_labels, args.grid_rows))
             write_gif(frames, hm_dir / f"{args.compare_name}_{kind}.gif", args.fps)
 
     if args.prune != "none":
-        # Runs LAST, and only over series whose GIF is now on disk: a frame PNG
-        # is only redundant once the animation that replaced it exists.
-        removed = 0
-        for prefix, paths in series.items():
-            if not (hm_dir / f"{prefix}.gif").is_file():
-                continue
-            if args.prune == "non-depth" and prefix.endswith("_depth"):
-                continue
-            for p in paths:
-                p.unlink()
-                removed += 1
-        kept = "kept _depth frames" if args.prune == "non-depth" else "kept no frames"
-        print(f"pruned {removed} frame PNGs from {hm_dir} ({kept})")
+        prune_frames(series, args.prune)
 
 
 if __name__ == "__main__":

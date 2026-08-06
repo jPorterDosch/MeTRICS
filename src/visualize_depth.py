@@ -29,6 +29,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless: heatmap export must work on compute nodes
 import numpy as np
 import torch
+import torch.nn.functional as F
 import trimesh
 from accelerate import Accelerator
 from huggingface_hub import hf_hub_download
@@ -238,6 +239,92 @@ def _infill_sparse_depth(depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
     out = depth.copy()
     out[~mask] = depth[idx[0][~mask], idx[1][~mask]]
     return out
+
+
+# iPhone ARKit LiDAR's native depth resolution, and the resolution PromptDA
+# downsamples its training prompt to ("exactly the depth resolution of iPhone
+# ARKit Depth", Prompt Depth Anything, arXiv 2412.14015 §3.3). (height, width).
+_ARKIT_HW = (192, 256)
+
+
+def arkit_prompt(depth: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, float]:
+    """Dense GT depth [H,W] + validity -> a 192x256 ARKit-density prompt.
+
+    Returns (prompt [192,256] meters, coverage), coverage being the fraction of
+    the low-res grid backed by real GT before hole filling. ARKit depth is
+    complete, so a low coverage means this frame is a poor stand-in for it.
+
+    Area-average over VALID pixels only: a plain resize averages GT holes in as
+    zeros and drags every cell near an occlusion boundary toward 0. Cells with
+    no support at all are then nearest-neighbor filled, because a prompt has no
+    "invalid" value -- both PromptDA and the conditioner read every prompt pixel
+    as a measurement (same reason _infill_sparse_depth densifies).
+
+    This is the DENSE end of the prompt-sparsity axis. 192x256 rather than the
+    frame's native resolution on purpose: it is the density PromptDA was
+    designed and trained for, so the comparison sits on its design point instead
+    of somewhere denser than anything either model saw in training.
+    """
+    h, w = _ARKIT_HW
+    d = torch.from_numpy(np.where(valid, depth, 0.0).astype(np.float32))[None, None]
+    v = torch.from_numpy(valid.astype(np.float32))[None, None]
+    num = F.adaptive_avg_pool2d(d, (h, w))[0, 0].numpy()
+    den = F.adaptive_avg_pool2d(v, (h, w))[0, 0].numpy()
+    ok = den > 1e-6
+    if not ok.any():
+        raise SystemExit("frame has no valid GT depth; cannot build an ARKit prompt")
+    out = np.zeros_like(num)
+    out[ok] = num[ok] / den[ok]
+    if (~ok).any():
+        _, idx = distance_transform_edt(~ok, return_indices=True)
+        out[~ok] = out[idx[0][~ok], idx[1][~ok]]
+    return out, float(ok.mean())
+
+
+def attach_arkit_prompt(views: list[dict]) -> float:
+    """Replace each view's simulated sparse prompt with an ARKit-density one,
+    in place, and return the mean low-res GT coverage.
+
+    Built at 192x256 then upsampled back to the frame's resolution, so every arm
+    still receives a normal full-resolution [B,H,W] prompt and mask -- only the
+    information content changes. Nearest upsampling on purpose: bilinear would
+    invent gradients across depth discontinuities that the sensor never
+    measured.
+
+    Call AFTER _prepare_batch: it overwrites what simulate_sparse_depth built.
+    The mask comes out all-True, which is the point -- an ARKit-class sensor
+    returns a complete frame.
+    """
+    coverages = []
+    for view in views:
+        if "depthmap" not in view:
+            raise SystemExit(
+                "--prompt arkit needs the dataset's dense GT under 'depthmap'; "
+                "this view has none (SPOT has only its real sparse sensor)"
+            )
+        depth = view["depthmap"]
+        if depth.dim() == 4:  # [B,H,W,1]
+            depth = depth[..., 0]
+        B, H, W = depth.shape
+        valid = depth > 0
+        if "valid_mask" in view:
+            valid = valid & view["valid_mask"].to(dtype=torch.bool, device=depth.device)
+
+        low = []
+        for b in range(B):
+            prompt, cov = arkit_prompt(
+                depth[b].detach().float().cpu().numpy(),
+                valid[b].detach().cpu().numpy(),
+            )
+            coverages.append(cov)
+            low.append(torch.from_numpy(prompt))
+        up = F.interpolate(torch.stack(low)[:, None], size=(H, W), mode="nearest")[
+            :, 0
+        ].to(device=depth.device, dtype=depth.dtype)
+
+        view["sparse_depth"] = up
+        view["sparse_depth_mask"] = torch.ones_like(up, dtype=torch.bool)
+    return float(np.mean(coverages)) if coverages else 0.0
 
 
 def _run_promptda_inference(pmodel, views, frame_times_ms=None) -> list[dict]:
@@ -598,6 +685,7 @@ def _export_heatmaps(
     frame_times_ms: list[float] | None = None,
     gt_tag: str | None = None,
     depth_range_from_gt: bool = False,
+    prompt_density: float | None = None,
 ) -> int:
     """2D heatmap companions to the GLB export, from the SAME predictions.
 
@@ -831,6 +919,12 @@ def _export_heatmaps(
                 "gt" if (depth_range_from_gt and gt_ok.any()) else "pred",
             ],
         ]
+        if prompt_density is not None:
+            # ACHIEVED prompt density (fraction of pixels carrying a
+            # measurement), not the requested one. This is what labels the
+            # sparsity-axis columns -- deriving the label from the artifact
+            # keeps a figure from claiming a density the run did not have.
+            meta.append(["# prompt_density", f"{prompt_density:.4f}"])
         header = [
             "frame",
             "depth_clipped_low_frac",
@@ -1035,6 +1129,36 @@ def main() -> None:
         "the frame-paired comparison in compare_heatmap_summaries.py assumes.",
     )
     ap.add_argument(
+        "--prompt",
+        choices=("sim", "arkit"),
+        default="sim",
+        help="what conditioning prompt every arm receives. 'sim' (default): "
+        "the run's own simulated patch-masked sparsity. 'arkit': a DENSE "
+        "192x256 prompt built from GT and upsampled back, i.e. the iPhone "
+        "LiDAR density PromptDA was trained for -- the dense end of the "
+        "prompt-sparsity axis. Both arms get the identical prompt either way, "
+        "so the pairing stays fair. Needs dense GT, so not available on SPOT.",
+    )
+    ap.add_argument(
+        "--prompt-density",
+        type=float,
+        default=None,
+        help="--prompt sim only: override the run's simulated prompt density, "
+        "as the FRACTION of patches kept (0.05 = the 95%%-masked training "
+        "setting, 0.40 ~= SPOT's real sensor). Sets sim_mask_ratio to 1-this. "
+        "Still a normal partial patch mask, unlike --prompt arkit -- which is "
+        "what makes it a clean intermediate point on the sparsity axis: only "
+        "the density moves, the mask machinery does not.",
+    )
+    ap.add_argument(
+        "--tag-suffix",
+        default="",
+        help="appended to this run's series tag (e.g. '_dense' -> "
+        "finetuned_dense_clip0). Required when two runs of the same arm share "
+        "one --out-dir, e.g. a sparse and a dense prompt: without it the "
+        "second overwrites the first's PNGs and CSV.",
+    )
+    ap.add_argument(
         "--out-dir",
         default=None,
         help="output dir (default: <weights-dir>/viz). GLBs land in <out-dir>/glb",
@@ -1168,6 +1292,22 @@ def main() -> None:
 
     raw = load_saved_args(ckpt)
     mcfg = rebuild_metric_cfg(raw)
+    if args.prompt_density is not None:
+        if args.prompt == "arkit":
+            raise SystemExit(
+                "--prompt-density applies to --prompt sim; arkit is dense by "
+                "definition (it IS the dense end of the axis)"
+            )
+        if not 0.0 < args.prompt_density <= 1.0:
+            raise SystemExit(
+                f"--prompt-density must be in (0, 1]; got {args.prompt_density}"
+            )
+        mcfg.depth_cond.sim_mask_ratio = 1.0 - args.prompt_density
+        print(
+            f"prompt density: keeping {args.prompt_density:.0%} of patches "
+            f"(sim_mask_ratio {mcfg.depth_cond.sim_mask_ratio:.3f}, "
+            f"run default {rebuild_metric_cfg(raw).depth_cond.sim_mask_ratio:.3f})"
+        )
     val_ds = rebuild_val_dataset(raw, args.data_root, args.dataset)
     if args.num_views is not None:
         # more frames per scene -> longer sequences to scrub. num_views is
@@ -1176,6 +1316,9 @@ def main() -> None:
         val_ds.num_views = args.num_views
 
     mode = "promptda" if args.promptda else ("base" if args.base else "finetuned")
+    # e.g. finetuned_dense -> finetuned_dense_clip0, so a sparse and a dense
+    # prompt run can share one --out-dir and one compare GIF
+    mode += args.tag_suffix
     if args.all_pixels:
         # distinct tag so a GT-masked and an all-pixels export can share one
         # --out-dir and sit side by side in the viewer's scene dropdown
@@ -1273,6 +1416,24 @@ def main() -> None:
             torch.manual_seed(args.sparse_seed + clip_idx)
             clip_idx += 1
             _prepare_batch(batch, mcfg)
+            if args.prompt == "arkit":
+                # overwrites the simulated sparse prompt _prepare_batch just
+                # built; every arm reads sparse_depth, so all of them move to
+                # the dense prompt together
+                cov = attach_arkit_prompt(batch)
+                print(
+                    f"  prompt: ARKit-density 192x256 (GT coverage {cov:.2%}), "
+                    "upsampled to frame resolution"
+                )
+            # ACHIEVED density, which sits below any --prompt-density target:
+            # a pixel counts only where a visible patch meets valid GT. This is
+            # the number to label the sparsity-axis column with, not the target.
+            got = float(
+                torch.stack([v["sparse_depth_mask"].float().mean() for v in batch])
+                .mean()
+                .item()
+            )
+            print(f"  prompt: {got:.2%} of pixels carry a measurement")
             # inference=True -> the causal per-frame KV-cache path (deployment
             # path), no criterion. result carries views + per-view preds.
             # Fresh list per clip: timings are per-clip, and reusing one would
@@ -1335,6 +1496,7 @@ def main() -> None:
                         gt_tag=f"gt_clip{exported}",
                         depth_range_from_gt=args.depth_range_from_gt,
                         imgs=imgs[b],
+                        prompt_density=got,
                     )
                     print(f"  [{mode}] clip {exported}: {n_png} heatmap PNGs")
                 if confs is not None:
