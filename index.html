@@ -7,7 +7,7 @@
     <title>MeTRICS — Supplementary Comparisons</title>
     <style>
         body {
-            max-width: 1000px;
+            max-width: 1400px;
             margin: auto;
             padding: 1.5rem 1rem 4rem;
             font-family: -apple-system, system-ui, sans-serif;
@@ -31,65 +31,79 @@
             margin: 2.5rem 0 1rem;
         }
 
-        .pair {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 1rem;
+        h2 .tag {
+            font-size: .8rem;
+            font-weight: 400;
+            color: #9db;
+            margin-left: .5rem;
         }
 
-        .box {
-            flex: 1 1 320px;
+        .narrow {
+            max-width: 1000px;
+        }
+
+        .panel {
             background: #16294f;
             border-radius: 10px;
             padding: .75rem;
         }
 
-        .box .label {
-            font-weight: 600;
-            margin-bottom: .5rem;
-            color: #7fd;
-        }
-
-        .box img {
+        .panel img {
             width: 100%;
             display: block;
             border-radius: 6px;
-        }
-
-        .single img {
-            width: 100%;
-            border-radius: 8px;
         }
     </style>
 </head>
 
 <body>
-
     <h1>MeTRICS — Live Comparisons</h1>
     <p class="sub">Metric Temporally-consistent Reconstruction In Causal Streaming</p>
 
-    <h2>1. Flickering between frames</h2>
-    <div class="single">
-        <img src="gifs/flickering.gif" alt="Flickering between frames">
-    </div>
-
-    <h2>2. Depth map — StreamVGGT vs. Ours</h2>
-    <div class="single">
-        <img src="gifs/depth_comparison.gif" alt="Depth map, StreamVGGT vs Ours">
-    </div>
-
-    <h2>3. 3D map — StreamVGGT vs. Ours</h2>
-    <div class="pair">
-        <div class="box">
-            <div class="label">StreamVGGT</div>
-            <img src="gifs/3dmap_streamvggt.gif" alt="3D map, StreamVGGT">
-        </div>
-        <div class="box">
-            <div class="label">Ours (MeTRICS)</div>
-            <img src="gifs/3dmap_ours.gif" alt="3D map, Ours">
+    <div class="narrow">
+        <h2>1. Flickering between frames</h2>
+        <div class="panel">
+            <img src="gifs/flickering.gif" alt="Flickering between frames">
         </div>
     </div>
 
+    <h2>2. HAMMER <span class="tag">GT RGB | GT depth | StreamVGGT | Ours</span></h2>
+    <div class="panel">
+        <img src="gifs/hammer_comparison.gif" loading="lazy" alt="HAMMER: GT RGB, GT depth, StreamVGGT, Ours">
+    </div>
+
+    <h2>3. ScanNet <span class="tag">GT RGB | GT depth | StreamVGGT | Ours</span></h2>
+    <div class="panel">
+        <img src="gifs/scannet_comparison.gif" loading="lazy" alt="ScanNet: GT RGB, GT depth, StreamVGGT, Ours">
+    </div>
+
+    <h2>4. Spot — static scene <span class="tag">GT RGB | GT depth | StreamVGGT | Ours</span></h2>
+    <div class="panel">
+        <img src="gifs/compare_spot_static.gif" loading="lazy"
+            alt="Spot static scene: GT RGB, GT depth,, StreamVGGT, Ours">
+    </div>
+
+    <h2>5. Spot — dynamic scene <span class="tag">GT RGB | GT depth | StreamVGGT | Ours</span></h2>
+    <div class="panel">
+        <img src="gifs/compare_spot_dynamic.gif" loading="lazy"
+            alt="Spot dynamic scene: GT RGB, GT depth, StreamVGGT, Ours">
+    </div>
+
+    <h2>6. Depth completion — HAMMER
+        <span class="tag">PromptDA | Ours &nbsp;·&nbsp; 5% | 40% | dense depth</span>
+    </h2>
+    <div class="panel">
+        <img src="gifs/hammer_promptda_comp.gif" loading="lazy"
+            alt="HAMMER depth completion: PromptDA and Ours at 5%, 40%, and dense depth">
+    </div>
+
+    <h2>7. Depth completion — ScanNet
+        <span class="tag">PromptDA | Ours &nbsp;·&nbsp; 5% | 40% | dense depth</span>
+    </h2>
+    <div class="panel">
+        <img src="gifs/scannet_prompda_comp.gif" loading="lazy"
+            alt="ScanNet depth completion: PromptDA and Ours at 5%, 40%, and dense depth">
+    </div>
 </body>
 
 </html>
