@@ -12,14 +12,16 @@ Two modes:
     on) at a non-square resolution, each checked for the 50-in / 50-out graph
     I/O contract, the declared geometry, the frame-0 probe, a 6-frame ORT
     rollout, and the output orientation -- plus one fp16 conversion that must
-    still produce finite output.
+    still produce finite output, and a third export at B=2 whose graph must
+    keep the two streams independent (check_batch_independence).
 
-    Budget 12-17 min on ONE core (two runs on a shared login-node core
-    measured 735 s and 1030 s; the two torch.onnx.export calls were 349/357 s
-    and 425/434 s respectively -- the spread is machine contention, not the
-    code). Everything that is not an export is small: the five unit checks
-    finish in under 4 s, and the probes / rollouts / orientation checks are
-    seconds. The export IS the cost: the model is tiny
+    Budget 18-26 min on ONE core (two runs on a shared login-node core
+    measured 735 s and 1030 s when the smoke ran TWO exports; the
+    torch.onnx.export calls were 349/357 s and 425/434 s respectively -- the
+    spread is machine contention, not the code -- and the B=2 export adds a
+    third of the same order). Everything that is not an export is small: the
+    five unit checks finish in under 4 s, and the probes / rollouts /
+    orientation checks are seconds. The export IS the cost: the model is tiny
     in width only, keeping the real 24-block layout the cache contract
     asserts, so the traced graph is large and torch's shape inference /
     constant folding dominate. Two avoidable multipliers are already handled
@@ -170,6 +172,15 @@ def parse_args():
     )
     ap.add_argument("--height", type=int, default=392)
     ap.add_argument("--width", type=int, default=518)
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="MUST match the export-time --batch-size. B is baked into the "
+        "graph (it is not a dynamic axis), so a graph exported at 2 can only "
+        "be parity-checked at 2; verified against the graph's declared input "
+        "shapes by assert_graph_geometry",
+    )
     ap.add_argument(
         "--rotate",
         action="store_true",
@@ -658,7 +669,14 @@ def check_batch_independence(model, seed: int, batch: int = 2) -> None:
     So: roll B distinct streams through one batched wrapper, roll each one
     through a B=1 wrapper alone, and require they agree. Distinct inputs per
     element are the point -- identical ones would pass under any amount of
-    cross-talk."""
+    cross-talk.
+
+    Run against the EXPORTED graph as well as the eager wrapper, which costs a
+    third export. Eager alone cannot cover this: `_ConstantPositions.__call__`
+    takes a real python int there and never reads the baked `self.batch`, and
+    the aggregator's B*S unflatten sees concrete shapes -- exactly the two
+    places B>1 breaks, both traced-only. The frame-0 probe rides along for the
+    same reason (zero-length caches at B=2 are their own contract)."""
     h, w = SMOKE_HW
     frames = [
         [dummy_frame(h, w, seed=seed + 100 * b + i) for i in range(3)]
@@ -674,9 +692,35 @@ def check_batch_independence(model, seed: int, batch: int = 2) -> None:
         depth, _, cache = batched._step(rgb, d, cache)
         batched_out.append(depth)
 
+    # export BEFORE the solo wrappers below rebake the shared model's position
+    # getter for batch 1 -- the traced graph must carry the B=batch bake
+    ns = SimpleNamespace(height=h, width=w, window=3, opset=17)
+    with tempfile.TemporaryDirectory() as td:
+        step = export_step(batched, ns, os.path.join(td, "tiny_batch_step.onnx"))
+        probe_frame0(step, batched, ns)
+        sess = ort_session(step)
+        ort_cache, graph_out = None, []
+        for i in range(3):
+            rgb = torch.cat([frames[b][i][0] for b in range(batch)], dim=0)
+            d = torch.cat([frames[b][i][1] for b in range(batch)], dim=0)
+            feed = {"rgb": rgb.numpy(), "sparse_depth": d.numpy()}
+            feed.update(
+                dict(
+                    zip(
+                        cache_input_names(),
+                        ort_cache
+                        if ort_cache is not None
+                        else [t.numpy() for t in batched.empty_cache()],
+                    )
+                )
+            )
+            out = run_by_name(sess, feed)
+            ort_cache = [out[n] for n in cache_output_names()]
+            graph_out.append(out["depth"])
+
     # the B=1 wrapper rebakes the shared model's position getter for batch 1,
     # so the solo rollouts must run AFTER the batched one
-    worst = 0.0
+    worst, worst_graph = 0.0, 0.0
     for b in range(batch):
         solo = StreamingDepthExport(model, image_hw=(h, w), window=3, batch_size=1)
         cache = None
@@ -684,14 +728,27 @@ def check_batch_independence(model, seed: int, batch: int = 2) -> None:
             rgb, d = frames[b][i]
             depth, _, cache = solo._step(rgb, d, cache)
             worst = max(worst, float((depth[0] - batched_out[i][b]).abs().max()))
+            worst_graph = max(
+                worst_graph, float(np.abs(graph_out[i][b] - depth[0].numpy()).max())
+            )
     if worst >= 1e-5:
         raise AssertionError(
             f"batched stream != solo stream (max|diff| {worst:.3e}): batch "
             "element outputs depend on the other elements' frames"
         )
+    # 1e-3, the frame-0 probe's gate: this is a per-element identity, not an
+    # exporter-fidelity diff, so a graph that mixes elements fails by orders of
+    # magnitude and a loose gate costs no coverage
+    if worst_graph >= 1e-3:
+        raise AssertionError(
+            f"EXPORTED graph at B={batch} != solo eager streams (max|diff| "
+            f"{worst_graph:.3e}): the traced batch path (baked RoPE positions "
+            "or the B*S token unflatten) does not keep the streams independent"
+        )
     print(
         f"[export-smoke] batch independence: B={batch} matches {batch} solo "
-        f"rollouts (max|diff| {worst:.2e}) -- streams do not interact"
+        f"rollouts, eager max|diff| {worst:.2e}, exported graph "
+        f"{worst_graph:.2e} -- streams do not interact"
     )
 
 
@@ -885,6 +942,7 @@ def run_parity(args) -> None:
         image_hw=(args.height, args.width),
         window=args.window,
         rotate=args.rotate,
+        batch_size=args.batch_size,
     )
     # --rotate / --height / --width are export-time constants baked into the
     # graph; this is where a mismatch with the flags given here is caught
@@ -892,6 +950,11 @@ def run_parity(args) -> None:
 
     frames = None
     if args.spot_dir:
+        if args.batch_size != 1:
+            raise SystemExit(
+                "--spot-dir yields one stream, so it cannot feed a "
+                f"--batch-size {args.batch_size} graph; use random frames"
+            )
         frames = spot_frames(args)
         got_hw = tuple(frames[0][0].shape[-2:])
         if got_hw != (args.height, args.width):
@@ -909,7 +972,9 @@ def run_parity(args) -> None:
         if frames is not None:
             rgb, d = frames[i]
         else:
-            rgb, d = dummy_frame(args.height, args.width, args.seed * 1000 + i)
+            rgb, d = dummy_frame(
+                args.height, args.width, args.seed * 1000 + i, batch=args.batch_size
+            )
         ref_depth, ref_conf, eager_cache = wrapper._step(rgb, d, eager_cache)
         feed = {"rgb": rgb.numpy(), "sparse_depth": d.numpy()}
         cache = (
@@ -962,10 +1027,13 @@ def run_parity(args) -> None:
             # apart. The middle panel (rgb rotated the way the graph rotates
             # it) is the one to compare the depth against -- it is what tells
             # clockwise from counter-clockwise.
+            # element 0 only: the panel exists to eyeball ORIENTATION, which is
+            # baked and therefore identical across batch elements, and _to_pil
+            # takes a single frame
             dump_depth(
                 os.path.join(args.dump_dir, f"frame_{i:03d}_graph.png"),
-                out["depth"],
-                rgb=rgb.numpy(),
+                out["depth"][:1],
+                rgb=rgb.numpy()[:1],
                 rotate=args.rotate,
             )
         print(

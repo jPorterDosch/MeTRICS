@@ -271,6 +271,20 @@ def set_providers(*names: str, tf32: bool = False) -> None:
     ort_session.cache_clear()
 
 
+def _providers_snapshot() -> tuple:
+    return (_PROVIDERS, _PROVIDER_OPTIONS)
+
+
+def _restore_providers(snapshot: tuple) -> None:
+    """Undo a set_providers() call. The provider choice is module state, so a
+    temporary switch (the CPU validation fallback) otherwise leaks into every
+    later check -- including check_fp16_numerics, whose whole job is to delete
+    an fp16 graph that dies on the DEPLOYMENT device."""
+    global _PROVIDERS, _PROVIDER_OPTIONS
+    _PROVIDERS, _PROVIDER_OPTIONS = snapshot
+    ort_session.cache_clear()
+
+
 @functools.lru_cache(maxsize=1)
 def ort_session(path: str):
     """Cached because building a session over this graph is expensive (~20 s
@@ -782,6 +796,18 @@ def parse_args():
         "provider silently falls back to CPU (ort_session catches it)",
     )
     ap.add_argument(
+        "--allow-cpu-fallback",
+        action="store_true",
+        help="with --cuda: when the post-export checks die of what LOOKS like "
+        "a device fault, retry them on CPU instead of failing. OFF by default "
+        "-- the matcher is a message substring, so a real graph bug reported "
+        "by the CUDA provider can carry the same text, and downgrading that to "
+        "a warning ships a graph that faults on the deployment GPU. Pass this "
+        "only for a fault you have already diagnosed as the device (see "
+        "experiments/export_onnx_5338.sh), and read the result as 'validated "
+        "on CPU only'",
+    )
+    ap.add_argument(
         "--tf32",
         action="store_true",
         help="let the CUDA provider use TF32 for fp32 matmuls (its own "
@@ -858,26 +884,36 @@ def main():
 
 
 def validate(step_path: str, wrapper: StreamingDepthExport, args) -> None:
-    """Frame-0 probe + rollout, on CUDA if asked, falling back to CPU if the
-    DEVICE (not the graph) is what failed.
+    """Frame-0 probe + rollout, on CUDA if asked. Any failure is FATAL unless
+    --allow-cpu-fallback, which retries the checks on CPU when the failure
+    looks like the DEVICE rather than the graph.
 
     Observed at --batch-size 2: the probe dies with cudaErrorIllegalAddress on
     a Transpose, while a standalone process runs the identical feed on the
     identical graph on CUDA without complaint -- the fault needs this process,
     which has just traced a 1B model and still holds the 5 GB eager copy the
-    probe compares against. Losing the export to that is the worst outcome: the
-    graph is fine and re-tracing costs minutes.
+    probe compares against.
 
-    The fallback is LOUD, and it is a fallback rather than a default because
-    'validated on GPU' silently meaning 'validated on CPU' is the exact failure
-    set_providers() exists to refuse. A graph-level failure (shape, pruned
-    input, mis-tokened frame 0) does not reach here -- is_cuda_runtime_failure
-    keeps those fatal."""
+    Opt-in, not automatic, because is_cuda_runtime_failure matches on message
+    text and the CUDA provider reports real graph bugs (a shape rule, a pruned
+    input, a mis-tokened frame 0) with the same substrings. Falling back on
+    those turns 'the graph is broken' into a warning and an exit 0, which is
+    worse than losing the export: re-tracing costs minutes, a graph that faults
+    on the deployment GPU costs a deployment. Diagnose the fault first, then
+    pass the flag."""
     try:
         probe_frame0(step_path, wrapper, args)
         validate_rollout(step_path, wrapper, args)
     except (Exception, SystemExit) as e:
         if not args.cuda or not is_cuda_runtime_failure(e):
+            raise
+        if not args.allow_cpu_fallback:
+            print(
+                "\nNOTE: this failure matches the CUDA device-fault pattern. If "
+                "you have\n      established it is the DEVICE and not the graph, "
+                "--allow-cpu-fallback\n      retries these checks on CPU; the "
+                "artifacts are then GPU-unvalidated.\n"
+            )
             raise
         print(
             f"\nWARNING: CUDA validation FAILED [{type(e).__name__}] {e}\n"
@@ -887,10 +923,17 @@ def validate(step_path: str, wrapper: StreamingDepthExport, args) -> None:
             "has exercised\n"
             "         the deployment device, which is what --cuda was for.\n"
         )
-        set_providers("CPUExecutionProvider")
-        probe_frame0(step_path, wrapper, args)
-        validate_rollout(step_path, wrapper, args)
-        print("CPU fallback validation PASSED (deployment device unverified)")
+        saved = _providers_snapshot()
+        try:
+            set_providers("CPUExecutionProvider")
+            probe_frame0(step_path, wrapper, args)
+            validate_rollout(step_path, wrapper, args)
+            print("CPU fallback validation PASSED (deployment device unverified)")
+        finally:
+            # the fallback is scoped to THIS validation: --fp16's numerics check
+            # runs after it, and on CPU it proves nothing about the graph that
+            # ships to the GPU
+            _restore_providers(saved)
 
 
 if __name__ == "__main__":

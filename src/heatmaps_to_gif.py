@@ -228,9 +228,11 @@ def main() -> None:
 
     hm_dir = Path(args.hm_dir)
     series = collect_series(hm_dir)
-    if not series:
-        raise SystemExit(f"no *_NNN.png series found in {hm_dir}")
 
+    # Before the empty-directory check on purpose: a caller sweeping every
+    # heatmaps dir at the end of a run hits directories a failed stage left
+    # empty, and there "nothing to delete" is the answer, not a failure that
+    # aborts the cleanup of every other directory.
     if args.prune_only:
         if args.prune == "none":
             raise SystemExit("--prune-only needs --prune non-depth|all")
@@ -238,6 +240,9 @@ def main() -> None:
             raise SystemExit("--prune-only writes no GIFs, so --compare is unused")
         prune_frames(series, args.prune)
         return
+
+    if not series:
+        raise SystemExit(f"no *_NNN.png series found in {hm_dir}")
 
     print(f"{len(series)} series in {hm_dir}:")
     for prefix, paths in series.items():
@@ -268,23 +273,6 @@ def main() -> None:
         )
         if not kinds:
             raise SystemExit(f"no series for any of {', '.join(map(repr, tags))}")
-        # Arm-independent reference columns, leftmost, in this order: the input
-        # frames then GT depth. BOTH are required -- visualize_depth.py writes
-        # them together, so a missing one means a stale export (written before
-        # the _rgb series existed) or a half-finished one, and dropping the
-        # column silently would hide that.
-        refs: list[tuple[str, str, list[Path]]] = []
-        for kind, label in (("rgb", "RGB"), ("depth", "GT depth")):
-            paths = series.get(f"{args.gt_tag}_{kind}") if args.gt_tag else None
-            if args.gt_tag and paths is None:
-                raise SystemExit(
-                    f"--gt-tag {args.gt_tag}: no {args.gt_tag}_{kind} series in "
-                    f"{hm_dir}. Re-render the clip."
-                )
-            if paths is not None:
-                refs.append((f"\0{kind}", label, paths))
-        col_labels = [lbl for _, lbl, _ in refs] + labels
-        ref_tags = [t for t, _, _ in refs]
         # Arm-independent reference columns, leftmost, in this order: the input
         # frames then GT depth. BOTH are required -- visualize_depth.py writes
         # them together, so a missing one means a stale export (written before
