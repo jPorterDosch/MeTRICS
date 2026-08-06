@@ -279,8 +279,7 @@ def main() -> None:
             if args.gt_tag and paths is None:
                 raise SystemExit(
                     f"--gt-tag {args.gt_tag}: no {args.gt_tag}_{kind} series in "
-                    f"{hm_dir}. Re-render the clip -- exports predating the "
-                    "reference RGB column have no _rgb frames."
+                    f"{hm_dir}. Re-render the clip."
                 )
             if paths is not None:
                 refs.append((f"\0{kind}", label, paths))

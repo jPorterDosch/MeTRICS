@@ -14,6 +14,9 @@ element carries its own 48 cache tensors, so B=2 is two synchronized cameras
 sharing one graph, not one joint scene (pinned by check_batch_independence in
 tests/export_onnx_parity.py).
 
+TODO: extend the attention to cross-dim-0, similar to base VGGT. This would have
+    higher inference overhead, so is deferred until we can retrain on ViT-S.
+
 I/O contract (all variants share it; ONE graph serves every frame):
   inputs : rgb   [B, 3, H, W]  float32 in [0, 1] -- NOT the [-1, 1] ImgNorm
                                tensor the datasets and visualize_spot.py's
