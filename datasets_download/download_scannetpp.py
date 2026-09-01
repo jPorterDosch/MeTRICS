@@ -133,15 +133,17 @@ def check_remote_file_exists(url):
 
 
 def download_scannetpp_gs(cfg, scene_ids):
-    '''
+    """
     Download ScanNet++GS data
-    '''
+    """
 
-    print('Downloading ScanNet++GS data...')
+    print("Downloading ScanNet++GS data...")
     for scene_id in tqdm(scene_ids, desc="scenes"):
-        src_path = Path('scannetpp_gs') / scene_id / 'ckpts' / 'point_cloud_30000.ply'
+        src_path = Path("scannetpp_gs") / scene_id / "ckpts" / "point_cloud_30000.ply"
         tgt_path = Path(cfg.scannetpp_gs_dir) / f"{scene_id}/point_cloud_30000.ply"
-        if not check_download_file(cfg, cfg.scannetpp_gs_url, src_path, tgt_path, cfg.dry_run):
+        if not check_download_file(
+            cfg, cfg.scannetpp_gs_url, src_path, tgt_path, cfg.dry_run
+        ):
             break
 
 
@@ -152,13 +154,17 @@ def urlretrieve_multi_trials(url, filename, max_trials=5):
     for i in range(max_trials):
         try:
             urlretrieve(url, filename)
-            time.sleep(0.2)     # wait a bit to prevent being rejected for frequent access to the server
+            time.sleep(
+                0.2
+            )  # wait a bit to prevent being rejected for frequent access to the server
             return True
 
         except urllib.error.ContentTooShortError as e:
             # Failed to download the file completely. Delete the file and retry.
             # Delete filename
-            print("ERROR: Content too short. It is likely that the download was incomplete due to network issues. Retrying...")
+            print(
+                "ERROR: Content too short. It is likely that the download was incomplete due to network issues. Retrying..."
+            )
             if i < max_trials - 1:
                 if Path(filename).exists():
                     os.remove(filename)
@@ -178,7 +184,8 @@ def urlretrieve_multi_trials(url, filename, max_trials=5):
                     server_msg = ""
                 print_error_box(
                     "Download failed — invalid or expired token",
-                    server_msg or "It could be that an invalid or expired token is used.",
+                    server_msg
+                    or "It could be that an invalid or expired token is used.",
                 )
                 # Stop cleanly: SystemExit prints no traceback, so the message
                 # above stays visible instead of being buried under a stack trace.
@@ -187,8 +194,7 @@ def urlretrieve_multi_trials(url, filename, max_trials=5):
             elif e.code == 404:
                 print_error_box(
                     "Download failed — file not found (404)",
-                    f"{url}\n\n"
-                    "This asset may not be available for this scene/split.",
+                    f"{url}\n\nThis asset may not be available for this scene/split.",
                     accent=_Ansi.YELLOW,
                 )
                 raise SystemExit(1)
@@ -213,8 +219,10 @@ def urlretrieve_multi_trials(url, filename, max_trials=5):
                 # the same second. Back off and retry rather than abort
                 # the whole download for a single bad request.
                 if i < max_trials - 1:
-                    delay = (0.5 * (2 ** i))   # 0.5s, 1s, 2s, 4s, 8s
-                    print(f"WARN: HTTP {e.code} on {url} — retry {i+1}/{max_trials-1} in {delay:.1f}s")
+                    delay = 0.5 * (2**i)  # 0.5s, 1s, 2s, 4s, 8s
+                    print(
+                        f"WARN: HTTP {e.code} on {url} — retry {i + 1}/{max_trials - 1} in {delay:.1f}s"
+                    )
                     if Path(filename).exists():
                         os.remove(filename)
                     time.sleep(delay)
@@ -324,7 +332,9 @@ def main(args):
     if cfg.get("token", "<YOUR_TOKEN_HERE>") == "<YOUR_TOKEN_HERE>":
         cfg.token = input("Please enter your download token: ").strip()
         if cfg.token == "":
-            print("No token provided, exiting. Please apply for a token from ScanNet++ official website.")
+            print(
+                "No token provided, exiting. Please apply for a token from ScanNet++ official website."
+            )
             return 1
     else:
         # NOT the token itself: this runs under sbatch, whose stdout lands in a
@@ -335,7 +345,9 @@ def main(args):
         print(f"Using token from config file: {shown} ({len(tok)} chars)")
 
     if cfg.get("data_root", "<DOWNLOAD_LOCATION_HERE>") == "<DOWNLOAD_LOCATION_HERE>":
-        cfg.data_root = input("Please enter your download location: (default: ./scannetpp_data)").strip()
+        cfg.data_root = input(
+            "Please enter your download location: (default: ./scannetpp_data)"
+        ).strip()
         if cfg.data_root == "":
             cfg.data_root = "./scannetpp_data"
     print(f"Downloading to: {cfg.data_root}")
@@ -345,10 +357,11 @@ def main(args):
         "WARNING: Downloading the full ScanNet++ dataset with default splits and assets "
         "will require approximately 1.5TB of disk space.\n"
         "If you have already customized splits or assets in your config file, the required space may differ.\n"
-        "Do you want to proceed with the download? (y/n)\n > ", end=""
+        "Do you want to proceed with the download? (y/n)\n > ",
+        end="",
     )
     ans = input().strip().lower()
-    if ans != 'y':
+    if ans != "y":
         print("Exiting.")
         return 1
 
@@ -364,7 +377,9 @@ def main(args):
 
     # download meta files
     for path in cfg.meta_files:
-        if not check_download_file(cfg, cfg.root_url, path, data_root / path, cfg.dry_run):
+        if not check_download_file(
+            cfg, cfg.root_url, path, data_root / path, cfg.dry_run
+        ):
             missing.append(str(data_root / path))
 
     if cfg.metadata_only:
@@ -424,7 +439,9 @@ def main(args):
     if isinstance(keep_zipped, bool):
         keep_zipped = list(cfg.zipped_assets) if keep_zipped else []
     unknown = set(keep_zipped) - set(cfg.zipped_assets)
-    assert not unknown, f"keep_zipped names assets the server does not zip: {sorted(unknown)}"
+    assert not unknown, (
+        f"keep_zipped names assets the server does not zip: {sorted(unknown)}"
+    )
 
     print("Downloading assets:", download_assets)
     print("Keeping zipped:", keep_zipped)
@@ -436,7 +453,9 @@ def main(args):
         # path relative to root url
         src_scene = ScannetppScene_Release(scene_id, data_root="data")
         # to here
-        tgt_scene = ScannetppScene_Release(scene_id, data_root=Path(cfg.data_root) / "data")
+        tgt_scene = ScannetppScene_Release(
+            scene_id, data_root=Path(cfg.data_root) / "data"
+        )
 
         # get the split for this scene
         #
@@ -476,7 +495,9 @@ def main(args):
                 if asset in keep_zipped:
                     if zip_is_complete(tgt_download_path):
                         if cfg.verbose:
-                            print("Archive exists, skipping download: ", tgt_download_path)
+                            print(
+                                "Archive exists, skipping download: ", tgt_download_path
+                            )
                         continue
                     if tgt_download_path.is_file() and not cfg.dry_run:
                         # Present but unreadable -- a pre-.part-rename download,
@@ -492,7 +513,9 @@ def main(args):
 
                 src_download_path = getattr(src_scene, asset).with_suffix(".zip")
 
-                if not check_download_file(cfg, cfg.root_url, src_download_path, tgt_download_path, cfg.dry_run):
+                if not check_download_file(
+                    cfg, cfg.root_url, src_download_path, tgt_download_path, cfg.dry_run
+                ):
                     missing.append(str(tgt_download_path))
                     # Abort the downloading process
                     download_has_error = True
@@ -512,7 +535,9 @@ def main(args):
                 #  download single file
                 src_path = getattr(src_scene, asset)
                 tgt_path = getattr(tgt_scene, asset)
-                if not check_download_file(cfg, cfg.root_url, src_path, tgt_path, cfg.dry_run):
+                if not check_download_file(
+                    cfg, cfg.root_url, src_path, tgt_path, cfg.dry_run
+                ):
                     missing.append(str(tgt_path))
                     download_has_error = True
                     break

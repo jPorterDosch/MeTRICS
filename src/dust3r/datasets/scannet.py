@@ -1,7 +1,6 @@
 import os.path as osp
 import cv2
 import numpy as np
-import itertools
 import os
 import sys
 

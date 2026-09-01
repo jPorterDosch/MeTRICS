@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 class ScannetppScene_Release:
     def __init__(
         self,
@@ -43,120 +44,121 @@ class ScannetppScene_Release:
     ##########################################################
     @property
     def scans_dir(self):
-        '''
+        """
         dir containing all scan-related data
-        '''
+        """
         return self.data_root / self._scene_id / self.scan_folder_name
 
     @property
     def pc_dir(self):
-        '''
+        """
         dir containing 1mm point cloud
-        '''
+        """
         return self.scans_dir
 
     @property
     def scan_pc_path(self):
-        '''
+        """
         path to point cloud
-        '''
-        return self.pc_dir / 'pc_aligned.ply'
+        """
+        return self.pc_dir / "pc_aligned.ply"
 
     @property
     def scan_pc_mask_path(self):
-        '''
+        """
         path to the point cloud mask
-        '''
-        return self.pc_dir / 'pc_aligned_mask.txt'
+        """
+        return self.pc_dir / "pc_aligned_mask.txt"
 
     @property
     def scan_transformed_poses_path(self):
-        '''
+        """
         path containing all scanner poses transformed to aligned coordinates
         in a single file
-        '''
-        return self.pc_dir / 'scanner_poses.json'
+        """
+        return self.pc_dir / "scanner_poses.json"
 
     @property
     def mesh_dir(self):
-        '''
+        """
         dir containing all the meshes and related data
         put meshes in the same dir as 1mm PCs
-        '''
+        """
         return self.scans_dir
 
     @property
     def scan_mesh_path(self):
-        '''
+        """
         path to the mesh
-        '''
-        return self.mesh_dir / 'mesh_aligned_0.05.ply'
+        """
+        return self.mesh_dir / "mesh_aligned_0.05.ply"
 
     @property
     def scan_mesh_mask_path(self):
-        '''
+        """
         path to the mesh mask
-        '''
-        return self.mesh_dir / 'mesh_aligned_0.05_mask.txt'
+        """
+        return self.mesh_dir / "mesh_aligned_0.05_mask.txt"
 
     @property
     def scan_mesh_segs_path(self):
-        return self.mesh_dir / f'segments.json'
+        return self.mesh_dir / "segments.json"
 
     @property
     def scan_anno_json_path(self):
-        return self.mesh_dir / f'segments_anno.json'
+        return self.mesh_dir / "segments_anno.json"
 
     @property
     def scan_sem_mesh_path(self):
-        return self.mesh_dir / f'mesh_aligned_0.05_semantic.ply'
+        return self.mesh_dir / "mesh_aligned_0.05_semantic.ply"
 
     ##########################################################
     # Panocam assets
     ##########################################################
     @property
     def pano_dir(self):
-        return self.data_root / self._scene_id / 'panocam'
+        return self.data_root / self._scene_id / "panocam"
 
     @property
     def pano_rgb_dir(self):
-        return self.pano_dir / 'images'
+        return self.pano_dir / "images"
 
     @property
     def pano_anon_mask_dir(self):
-        return self.pano_dir / 'anon_mask'
+        return self.pano_dir / "anon_mask"
 
     @property
     def pano_depth_dir(self):
-        return self.pano_dir / 'depth'
+        return self.pano_dir / "depth"
 
     @property
     def pano_azim_dir(self):
-        return self.pano_dir / 'azim'
+        return self.pano_dir / "azim"
 
     @property
     def pano_elev_dir(self):
-        return self.pano_dir / 'elev'
+        return self.pano_dir / "elev"
 
     @property
     def pano_resized_rgb_dir(self):
-        return self.pano_dir / 'resized_images'
+        return self.pano_dir / "resized_images"
 
     @property
     def pano_resized_depth_dir(self):
-        return self.pano_dir / 'resized_depth'
+        return self.pano_dir / "resized_depth"
 
     @property
     def pano_resized_mask_dir(self):
-        return self.pano_dir / 'resized_anon_mask'
+        return self.pano_dir / "resized_anon_mask"
 
     @property
     def pano_resized_azim_dir(self):
-        return self.pano_dir / 'resized_azim'
+        return self.pano_dir / "resized_azim"
 
     @property
     def pano_resized_elev_dir(self):
-        return self.pano_dir / 'resized_elev'
+        return self.pano_dir / "resized_elev"
+
     ##########################################################
     # DSLR assets
     ##########################################################
@@ -166,43 +168,43 @@ class ScannetppScene_Release:
 
     @property
     def dslr_resized_dir(self):
-        return self.dslr_dir / 'resized_images'
+        return self.dslr_dir / "resized_images"
 
     @property
     def dslr_resized_mask_dir(self):
-        return self.dslr_dir / 'resized_anon_masks'
+        return self.dslr_dir / "resized_anon_masks"
 
     @property
     def dslr_original_dir(self):
-        return self.dslr_dir / 'original_images'
+        return self.dslr_dir / "original_images"
 
     @property
     def dslr_original_mask_dir(self):
-        return self.dslr_dir / 'original_anon_masks'
+        return self.dslr_dir / "original_anon_masks"
 
     @property
     def dslr_resized_undistorted_dir(self):
-        return self.dslr_dir / 'resized_undistorted_images'
+        return self.dslr_dir / "resized_undistorted_images"
 
     @property
     def dslr_resized_undistorted_mask_dir(self):
-        return self.dslr_dir / 'resized_undistorted_masks'
+        return self.dslr_dir / "resized_undistorted_masks"
 
     @property
     def dslr_colmap_dir(self):
-        return self.dslr_dir / 'colmap'
+        return self.dslr_dir / "colmap"
 
     @property
     def dslr_nerfstudio_transform_path(self):
-        return self.dslr_dir / 'nerfstudio' / 'transforms.json'
+        return self.dslr_dir / "nerfstudio" / "transforms.json"
 
     @property
     def dslr_nerfstudio_transform_undistorted_path(self):
-        return self.dslr_dir / 'nerfstudio' / 'transforms_undistorted.json'
+        return self.dslr_dir / "nerfstudio" / "transforms_undistorted.json"
 
     @property
     def dslr_train_test_lists_path(self):
-        return self.dslr_dir / 'train_test_lists.json'
+        return self.dslr_dir / "train_test_lists.json"
 
     ##########################################################
     # iPhone assets
@@ -213,40 +215,40 @@ class ScannetppScene_Release:
 
     @property
     def iphone_video_path(self):
-        return self.iphone_data_dir / 'rgb.mkv'
+        return self.iphone_data_dir / "rgb.mkv"
 
     @property
     def iphone_rgb_dir(self):
-        return self.iphone_data_dir / 'rgb'
+        return self.iphone_data_dir / "rgb"
 
     @property
     def iphone_video_mask_path(self):
-        return self.iphone_data_dir / 'rgb_mask.mkv'
+        return self.iphone_data_dir / "rgb_mask.mkv"
 
     @property
     def iphone_video_mask_dir(self):
-        return self.iphone_data_dir / 'rgb_masks'
+        return self.iphone_data_dir / "rgb_masks"
 
     @property
     def iphone_depth_path(self):
-        return self.iphone_data_dir / 'depth.bin'
+        return self.iphone_data_dir / "depth.bin"
 
     @property
     def iphone_depth_dir(self):
-        return self.iphone_data_dir / 'depth'
+        return self.iphone_data_dir / "depth"
 
     @property
     def iphone_pose_intrinsic_imu_path(self):
-        return self.iphone_data_dir / 'pose_intrinsic_imu.json'
+        return self.iphone_data_dir / "pose_intrinsic_imu.json"
 
     @property
     def iphone_colmap_dir(self):
-        return self.iphone_data_dir / 'colmap'
+        return self.iphone_data_dir / "colmap"
 
     @property
     def iphone_nerfstudio_transform_path(self):
-        return self.iphone_data_dir / 'nerfstudio' / 'transforms.json'
+        return self.iphone_data_dir / "nerfstudio" / "transforms.json"
 
     @property
     def iphone_exif_path(self):
-        return self.iphone_data_dir / 'exif.json'
+        return self.iphone_data_dir / "exif.json"

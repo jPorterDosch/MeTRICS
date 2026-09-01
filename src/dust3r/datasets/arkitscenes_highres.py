@@ -1,13 +1,10 @@
 import os.path as osp
 import os
 import sys
-import itertools
 
 sys.path.append(osp.join(osp.dirname(__file__), "..", ".."))
 import cv2
 import numpy as np
-import h5py
-import math
 from dust3r.datasets.base.base_multiview_dataset import BaseMultiViewDataset
 from dust3r.utils.image import imread_cv2
 from dust3r.utils.zipio import frames_root

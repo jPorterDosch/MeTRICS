@@ -1,7 +1,6 @@
 import os.path as osp
 import os
 import sys
-import itertools
 
 sys.path.append(osp.join(osp.dirname(__file__), "..", ".."))
 import cv2
