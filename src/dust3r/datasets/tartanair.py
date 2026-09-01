@@ -10,6 +10,7 @@ sys.path.append(osp.join(osp.dirname(__file__), "..", ".."))
 
 from dust3r.datasets.base.base_multiview_dataset import BaseMultiViewDataset
 from dust3r.utils.image import imread_cv2
+from dust3r.utils.zipio import frames_root, listdir as zlistdir, np_load
 
 
 class TartanAir_Multi(BaseMultiViewDataset):
@@ -51,8 +52,14 @@ class TartanAir_Multi(BaseMultiViewDataset):
                     ]
                 )
                 for seq_dir in seq_dirs:
+                    # frames are flat at the trajectory root in both layouts:
+                    # loose files in seq_dir, or members of seq_dir/frames.zip
                     basenames = sorted(
-                        [f[:-8] for f in os.listdir(seq_dir) if f.endswith(".png")]
+                        [
+                            f[:-8]
+                            for f in zlistdir(frames_root(seq_dir))
+                            if f.endswith(".png")
+                        ]
                     )
                     num_imgs = len(basenames)
                     cut_off = (
@@ -110,13 +117,15 @@ class TartanAir_Multi(BaseMultiViewDataset):
 
         for v, view_idx in enumerate(image_idxs):
             scene_id = self.sceneids[view_idx]
-            scene_dir = self.scenes[scene_id]
+            # frames live either loose in the trajectory dir (extracted layout)
+            # or in its frames.zip (inode-safe layout)
+            scene_dir = frames_root(self.scenes[scene_id])
             basename = self.images[view_idx]
 
             img = basename + "_rgb.png"
             image = imread_cv2(osp.join(scene_dir, img))
-            depthmap = np.load(osp.join(scene_dir, basename + "_depth.npy"))
-            camera_params = np.load(osp.join(scene_dir, basename + "_cam.npz"))
+            depthmap = np_load(osp.join(scene_dir, basename + "_depth.npy"))
+            camera_params = np_load(osp.join(scene_dir, basename + "_cam.npz"))
 
             intrinsics = camera_params["camera_intrinsics"]
             camera_pose = camera_params["camera_pose"]

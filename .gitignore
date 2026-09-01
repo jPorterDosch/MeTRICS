@@ -19,3 +19,13 @@ outputs/
 .vscode/
 .idea/
 .DS_Store
+
+# ScanNet++ personal download token (per-user credential, tied to a signed ToU)
+datasets_download/.scannetpp_token
+
+# ScanNet's own downloader. TUM mails download-scannet.py out only after a
+# signed Terms of Use is approved (it is not in github.com/ScanNet/ScanNet), so
+# committing it here would redistribute an access-controlled file. Request the
+# dataset yourself and drop the script in as datasets_download/download_scannet.py
+# -- download_scannet.sh checks for it and tells you this if it is missing.
+datasets_download/download_scannet.py

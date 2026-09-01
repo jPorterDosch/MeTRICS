@@ -17,12 +17,25 @@ trimesh
 wandb
 pyglet<2
 viser
-gradio
 lpips
 hydra-core
 tyro>=1.0,<2
 h5py
 accelerate
+# ArKitScenes download (datasets_download/download_arkit_scenes.py reads the
+# raw_train_val_splits.csv and the per-dataset metadata with pandas)
+pandas
+# ScanNet .sens extraction (datasets_preprocess/scannet_sensor.py)
+imageio
+pypng
+# TartanAir download (datasets_download/download_tartanair.py, from
+# github.com/castacks/tartanair_tools) reads the AirLab S3 mirror
+boto3
+colorama
+# ScanNet++ download (datasets_download/download_scannetpp.py) reads its
+# tokenised config as YAML and wraps it in a Munch for attribute access
+PyYAML
+munch
 scikit-learn
 gsplat
 evo
@@ -35,7 +48,7 @@ onnx==1.16.1
 # landed last in charge. If both are already present, `pip uninstall` BOTH
 # before reinstalling this one -- removing either alone guts the survivor.
 # --cuda additionally needs CUDA 12 + cuDNN 9 on the library path (torch
-# bundles cuDNN 8; on Oscar: module load cudnn/9.8.0.87-12-y7fu).
+# bundles cuDNN 8; on ISAAC: module load cuda/12.2.0-binary cudnn/9.10.2-binary).
 onnxruntime-gpu==1.22.0
 # onnxconverter-common is needed ONLY for --fp16 (best-effort) and is
 # deliberately NOT listed as a requirement: it pins protobuf==3.20.2, which

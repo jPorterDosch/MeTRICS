@@ -9,6 +9,7 @@ import numpy as np
 
 from dust3r.datasets.base.base_multiview_dataset import BaseMultiViewDataset
 from dust3r.utils.image import imread_cv2
+from dust3r.utils.zipio import frames_root
 
 
 def stratified_sampling(indices, num_samples, rng=None):
@@ -189,7 +190,12 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
         views = []
         for v, view_idx in enumerate(image_idxs):
             scene_id = self.sceneids[view_idx]
-            scene_dir = osp.join(self.ROOT, self.split, self.scenes[scene_id])
+            # frames live either in the scene dir (extracted layout) or in its
+            # frames.zip (inode-safe layout); the metadata npz reads above are
+            # unaffected (always real files in the scene dir)
+            scene_dir = frames_root(
+                osp.join(self.ROOT, self.split, self.scenes[scene_id])
+            )
 
             intrinsics = self.intrinsics[view_idx]
             camera_pose = self.trajectories[view_idx]

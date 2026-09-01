@@ -1,3 +1,4 @@
+import io
 import os
 import struct
 
@@ -169,3 +170,67 @@ class SensorData:
         self.save_mat_to_file(
             self.extrinsic_depth, os.path.join(output_path, "extrinsic_depth.txt")
         )
+
+    # ------------------------------------------------------------------
+    # Zip (inode-safe) variants of the four exporters above.
+    #
+    # Each *_bytes helper encodes exactly what its export_* counterpart
+    # writes to disk -- byte-for-byte, verified against the loose-file
+    # output -- so the two layouts are interchangeable and a tree extracted
+    # either way feeds preprocess_scannet.py identically. The member names
+    # mirror the on-disk relative paths (color/0.jpg, depth/0.png,
+    # pose/0.txt, intrinsic/intrinsic_depth.txt, ...).
+    # ------------------------------------------------------------------
+
+    def _depth_png_bytes(self, frame_index, image_size=None):
+        depth_data = self.frames[frame_index].decompress_depth(
+            self.depth_compression_type
+        )
+        depth = np.frombuffer(depth_data, dtype=np.uint16).reshape(
+            self.depth_height, self.depth_width
+        )
+        if image_size is not None:
+            depth = cv2.resize(
+                depth, (image_size[1], image_size[0]), interpolation=cv2.INTER_NEAREST
+            )
+        buf = io.BytesIO()
+        writer = png.Writer(width=depth.shape[1], height=depth.shape[0], bitdepth=16)
+        writer.write(buf, depth.reshape(-1, depth.shape[1]).tolist())
+        return buf.getvalue()
+
+    def _color_jpg_bytes(self, frame_index, image_size=None):
+        color = self.frames[frame_index].decompress_color(self.color_compression_type)
+        if image_size is not None:
+            color = cv2.resize(
+                color, (image_size[1], image_size[0]), interpolation=cv2.INTER_NEAREST
+            )
+        buf = io.BytesIO()
+        # same PIL JPEG encoder and default parameters imageio.imwrite() picks
+        # from a '.jpg' extension, so the bytes match the loose-file export
+        imageio.imwrite(buf, color, format="JPEG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _mat_bytes(matrix):
+        """Same text np.savetxt(fmt='%f') row-by-row produces on disk."""
+        buf = io.StringIO()
+        for line in matrix:
+            np.savetxt(buf, line[np.newaxis], fmt="%f")
+        return buf.getvalue().encode("utf-8")
+
+    def export_all_to_zip(self, writer, image_size=None, frame_skip=1):
+        """Write color/depth/pose/intrinsic for every frame into one open
+        SceneZipWriter, replacing the four export_* directory writes."""
+        for f in range(0, len(self.frames), frame_skip):
+            writer.writestr(f"color/{f}.jpg", self._color_jpg_bytes(f, image_size))
+            writer.writestr(f"depth/{f}.png", self._depth_png_bytes(f, image_size))
+            writer.writestr(
+                f"pose/{f}.txt", self._mat_bytes(self.frames[f].camera_to_world)
+            )
+        for name, mat in (
+            ("intrinsic_color", self.intrinsic_color),
+            ("extrinsic_color", self.extrinsic_color),
+            ("intrinsic_depth", self.intrinsic_depth),
+            ("extrinsic_depth", self.extrinsic_depth),
+        ):
+            writer.writestr(f"intrinsic/{name}.txt", self._mat_bytes(mat))

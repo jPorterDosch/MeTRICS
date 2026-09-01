@@ -8,6 +8,7 @@ from tqdm import tqdm
 from .base.base_multiview_dataset import BaseMultiViewDataset, EmptyDatasetError
 from .types import Split
 from .utils.image import imread_cv2
+from .utils.zipio import frames_root, np_load
 
 # preserves the original DUSt3R ScanNet stride cap; override via the constructor
 # or the DatasetConfig CLI rather than editing this constant.
@@ -124,7 +125,10 @@ class ScanNet_Multi(BaseMultiViewDataset):
         views = []
         for v, view_idx in enumerate(image_idxs):
             scene_id = self.sceneids[view_idx]
-            scene_dir = osp.join(self.scene_root, self.scenes[scene_id])
+            # frames live either in the scene dir (extracted layout) or in its
+            # frames.zip (inode-safe layout); the metadata npz read above is
+            # unaffected (always a real file in the scene dir)
+            scene_dir = frames_root(osp.join(self.scene_root, self.scenes[scene_id]))
             rgb_dir = osp.join(scene_dir, "color")
             depth_dir = osp.join(scene_dir, "depth")
             cam_dir = osp.join(scene_dir, "cam")
@@ -140,7 +144,7 @@ class ScanNet_Multi(BaseMultiViewDataset):
             depthmap = depthmap.astype(np.float32) / 1000
             depthmap[~np.isfinite(depthmap)] = 0  # invalid
 
-            cam = np.load(osp.join(cam_dir, basename + ".npz"))
+            cam = np_load(osp.join(cam_dir, basename + ".npz"))
             camera_pose = cam["pose"]
             intrinsics = cam["intrinsics"]
             rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
