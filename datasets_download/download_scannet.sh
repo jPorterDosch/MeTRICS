@@ -46,7 +46,26 @@
 # successful run.
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolving this script's own directory has to survive both invocation paths.
+# Under sbatch, Slurm COPIES the script to /var/spool/.../slurm_script and runs
+# it from there, so BASH_SOURCE points at the spool dir and every path built
+# from it is wrong -- that is why sourcing env.sh failed with "No such file or
+# directory". `scontrol show job` still knows the path the job was submitted
+# with, so ask Slurm inside a job and fall back to BASH_SOURCE outside one.
+# (sbatch --test-only does NOT run the body, so it cannot catch a bug here.)
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    _self="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
+             | sed -n 's/^ *Command=\([^ ]*\).*/\1/p')"
+    if [ -z "$_self" ] || [ ! -f "$_self" ]; then
+        echo "could not resolve this script's path from scontrol; set" \
+             "METRICS_REPO or run it with bash instead of sbatch" >&2
+        exit 1
+    fi
+    SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
+    unset _self
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 source "$SCRIPT_DIR/env.sh"
 
 # TUM mails download-scannet.py out only after a signed ToU is approved, so it
