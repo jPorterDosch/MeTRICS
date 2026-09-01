@@ -26,9 +26,10 @@
 # hence 6 cpus. Requires outbound HTTP to kaldir.vc.cit.tum.de.
 #
 # Resumable: --skip_existing skips scenes already on disk, so re-run after the
-# 48h walltime; expect more than one submission. Note it skips on *filename*,
-# not size, so a .sens truncated by a killed job is NOT re-fetched -- delete a
-# suspect scene dir before re-running. verify_scannet.py at the end catches it.
+# 48h walltime; expect more than one submission. It skips on *filename*, not
+# size, so a .sens truncated by a killed job is NOT re-fetched on its own --
+# verify_scannet.py at the end walks each file's frame index and names the
+# incomplete scenes; delete those scene dirs and re-run.
 #
 # Running this constitutes agreeing to the ScanNet Terms of Use:
 # http://kaldir.vc.cit.tum.de/scannet/ScanNet_TOS.pdf
@@ -71,7 +72,12 @@ yes '' | "$METRICS_PY" "$SCRIPT_DIR/download_scannet.py" \
 # scans_test/, but every downstream stage expects scans_train/ + scans_test/
 # (preprocess_scannet.py:67 hardcodes that pair). Bridge with a symlink rather
 # than moving ~1 TB of data.
-if [ -d "$SCANNET_DIR/scans" ] && [ ! -e "$SCANNET_DIR/scans_train" ]; then
+# -e follows symlinks, so a DANGLING scans_train (left by a run where scans
+# was removed or SCANNET_DIR moved) tests as absent while `ln -s` still
+# fails with "File exists" -- under set -e that would kill the job after a
+# multi-hour download and before verify ever runs. -L catches that case.
+if [ -d "$SCANNET_DIR/scans" ] && [ ! -e "$SCANNET_DIR/scans_train" ] \
+   && [ ! -L "$SCANNET_DIR/scans_train" ]; then
     ln -s scans "$SCANNET_DIR/scans_train"
     echo "linked $SCANNET_DIR/scans_train -> scans"
 fi

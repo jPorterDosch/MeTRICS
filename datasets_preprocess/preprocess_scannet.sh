@@ -38,9 +38,10 @@ cd "$METRICS_REPO"
     --output_dir "$OUT"
 
 # Max interval 150 is the default, hardcoded here for readability.
-# Outside Slurm SLURM_CPUS_PER_TASK is unset; fall back to the core count.
+# Outside Slurm SLURM_CPUS_PER_TASK is unset. Fall back to 8, NOT nproc: the
+# header offers a login-node run, where nproc reports the whole shared node.
 "$METRICS_PY" datasets_preprocess/generate_set_scannet.py \
     --root "$OUT" \
     --splits scans_test scans_train \
     --max_interval 150 \
-    --num_workers "${SLURM_CPUS_PER_TASK:-$(nproc)}"
+    --num_workers "${SLURM_CPUS_PER_TASK:-8}"

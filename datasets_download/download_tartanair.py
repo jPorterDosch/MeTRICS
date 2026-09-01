@@ -7,6 +7,7 @@
 from os import system
 import os
 import argparse
+import sys
 from os.path import isdir, isfile, join
 from colorama import Fore, Style
 from itertools import islice
@@ -480,6 +481,12 @@ if __name__ == "__main__":
 
     # download_from_cloudflare_r2(s3, downloadlist, outdir, bucket_name)
     res, downloadfilelist = downloader.download(downloadlist, outdir)
+    # Upstream discards `res`, so a run where individual files FAILed still
+    # exited 0 -- and download() appends target names to the list even on the
+    # error path, so a later --unzip would try to unzip files never written.
+    if not res:
+        print_error("One or more files failed to download; see FAIL lines above.")
+        sys.exit(1)
 
     if args.unzip:
         unzip_files(downloadfilelist, outdir)

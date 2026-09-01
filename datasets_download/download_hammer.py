@@ -287,7 +287,14 @@ class SequenceZipRouter:
     def abort(self):
         """Discard every in-flight archive; finalized ones are untouched."""
         for writer in self.writers.values():
-            writer.__exit__(RuntimeError, RuntimeError("aborted"), None)
+            # One writer failing to clean up must not strand the rest. abort()
+            # is called from an `except BaseException:` handler, so a raise here
+            # would also replace the original error (the network failure you
+            # actually want to see) with a cleanup error.
+            try:
+                writer.__exit__(RuntimeError, RuntimeError("aborted"), None)
+            except Exception as exc:
+                print(f"warning: could not discard {writer.tmp_path}: {exc}")
         self.writers.clear()
 
 

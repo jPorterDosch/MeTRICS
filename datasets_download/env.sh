@@ -37,12 +37,23 @@ METRICS_PY="${METRICS_PY:-$HOME/.pyenv/versions/3.11.13/envs/metrics/bin/python}
 # If that interpreter is missing, fall back to PATH rather than dying: the
 # scripts call "$METRICS_PY" directly, so leaving it pointing at a nonexistent
 # file would fail with a bare "No such file or directory" some lines later.
-# Resolving it here means a call site never has to care which case it got.
+#
+# But NOT to a pyenv shim. A shim re-resolves through pyenv's version files at
+# run time and lands on the base interpreter, which has none of pandas / boto3 /
+# munch / pypng -- exactly the silent-wrong-packages failure the paragraph above
+# warns about. Falling back to one would turn a loud "no such file" into an
+# unattended 2 TB job that dies at import time, or worse, half-works. If the
+# only python on PATH is a shim, stop and make the operator fix METRICS_PY.
 if [ ! -x "$METRICS_PY" ]; then
     _metrics_fallback="$(command -v python3 || command -v python || true)"
+    case "$_metrics_fallback" in
+        */pyenv/shims/*|*/shims/python|*/shims/python3) _metrics_fallback="" ;;
+    esac
     if [ -z "$_metrics_fallback" ]; then
-        echo "env.sh: error: METRICS_PY=$METRICS_PY is not executable and no" \
-             "python/python3 is on PATH. Set METRICS_PY to a real interpreter." >&2
+        echo "env.sh: error: METRICS_PY=$METRICS_PY is not executable, and the" \
+             "only python on PATH is a pyenv shim (or none at all). Point" \
+             "METRICS_PY at a real interpreter, e.g." \
+             "METRICS_PY=~/.pyenv/versions/3.11.13/envs/metrics/bin/python" >&2
         return 1 2>/dev/null || exit 1
     fi
     echo "env.sh: warning: METRICS_PY=$METRICS_PY is not executable;" \
@@ -52,9 +63,16 @@ if [ ! -x "$METRICS_PY" ]; then
 fi
 export METRICS_PY
 
-# Also put it first on PATH, so a bare `python` in any child process (a
-# setup.py, a nested tool) agrees with "$METRICS_PY". Idempotent.
-export PATH="$(dirname "$METRICS_PY"):$PATH"
+# Put it first on PATH so a bare `python` in any child process agrees with
+# "$METRICS_PY". Genuinely idempotent: prepending unconditionally would stack
+# duplicates on a re-source and, worse, push this dir ahead of anything a later
+# `module load` added.
+_metrics_bindir="$(dirname "$METRICS_PY")"
+case ":$PATH:" in
+    *":$_metrics_bindir:"*) ;;
+    *) export PATH="$_metrics_bindir:$PATH" ;;
+esac
+unset _metrics_bindir
 
 # NOTE: there are deliberately no Slurm account/partition variables here.
 # #SBATCH directives are parsed by Slurm before the job's shell ever runs, so a

@@ -16,7 +16,6 @@ Usage:
         --max_interval 150 --num_workers 8
 """
 
-import os
 import os.path as osp
 import argparse
 import numpy as np

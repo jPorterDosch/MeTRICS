@@ -144,7 +144,10 @@ def download_scannetpp_gs(cfg, scene_ids):
         if not check_download_file(
             cfg, cfg.scannetpp_gs_url, src_path, tgt_path, cfg.dry_run
         ):
-            break
+            # tell the caller this run is incomplete; it used to return None
+            # either way, so main() reported success after 1 of N scenes
+            return False
+    return True
 
 
 def urlretrieve_multi_trials(url, filename, max_trials=5):
@@ -410,7 +413,13 @@ def main(args):
 
     # we know the scene ids, check for 3rd party datasets
     if cfg.get("scannetpp_gs_dir"):
-        download_scannetpp_gs(cfg, scene_ids)
+        # download_scannetpp_gs breaks out of its loop on the first failure and
+        # records nothing in `missing`, so it can return after fetching 1 of N
+        # scenes. Report that as a failure rather than a clean exit.
+        ok = download_scannetpp_gs(cfg, scene_ids)
+        if ok is False:
+            print("ScanNet++GS download did not complete.", file=sys.stderr)
+            return 1
         print(f"Downloaded ScanNet++GS data to {cfg.scannetpp_gs_dir}, done.")
         return 0
 

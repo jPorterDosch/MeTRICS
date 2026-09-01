@@ -216,5 +216,13 @@ class SceneZipWriter:
         if exc_type is None:
             os.replace(self.tmp_path, self.final_path)
         else:
-            os.remove(self.tmp_path)
+            # Never let cleanup raise: this runs while an exception is already
+            # propagating, and an unguarded remove (tmp already gone after a
+            # retry, or EIO/ENOSPC on Lustre -- exactly when you are aborting)
+            # would replace the real BadZipFile/OSError with a bare
+            # FileNotFoundError from inside __exit__.
+            try:
+                os.remove(self.tmp_path)
+            except OSError:
+                pass
         return False

@@ -120,6 +120,12 @@ def main():
             if osp.isdir(scene_dir) and osp.isfile(sens):
                 jobs.append((split, scene, scene_dir, sens))
 
+    # A shard id at or above the shard count selects nothing (i % n < n
+    # always), which would silently extract zero scenes and exit 0.
+    assert 0 <= args.shard < args.num_shards, (
+        f"--shard {args.shard} is out of range for --num-shards "
+        f"{args.num_shards}; shard must be in [0, {args.num_shards})"
+    )
     jobs = [j for i, j in enumerate(jobs) if i % args.num_shards == args.shard]
     print(
         f"[shard {args.shard}/{args.num_shards}] {len(jobs)} scenes assigned",
