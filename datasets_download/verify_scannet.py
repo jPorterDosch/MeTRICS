@@ -80,17 +80,22 @@ def sens_integrity(path):
                 return "OK", f"{num_frames} frames, no IMU block"
             raw = f.read(8)
             if len(raw) < 8:
-                return "TRUNCATED", f"ends inside the IMU count after {num_frames} frames"
+                return (
+                    "TRUNCATED",
+                    f"ends inside the IMU count after {num_frames} frames",
+                )
             imu = struct.unpack("Q", raw)[0]
             expect = pos + 8 + imu * IMU_FRAME_BYTES
             if expect == size:
                 return "OK", f"{num_frames} frames + {imu} IMU"
             if expect > size:
                 return "TRUNCATED", (
-                    f"IMU block declares {imu} frames "
-                    f"({expect - size} bytes past EOF)"
+                    f"IMU block declares {imu} frames ({expect - size} bytes past EOF)"
                 )
-            return "TRAILING", f"{size - expect} bytes after {num_frames} frames + {imu} IMU"
+            return (
+                "TRAILING",
+                f"{size - expect} bytes after {num_frames} frames + {imu} IMU",
+            )
     except (OSError, struct.error) as e:
         return "CORRUPT", str(e)
 

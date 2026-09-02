@@ -284,10 +284,16 @@ def main():
     check(
         "warns naming the scene",
         NO_SPLIT_SCENE in err.getvalue(),
-        err.getvalue().strip().splitlines()[-1][:70] if err.getvalue() else "no warning",
+        err.getvalue().strip().splitlines()[-1][:70]
+        if err.getvalue()
+        else "no warning",
     )
     # the in-split scenes must still have landed
-    landed = [d for d in os.listdir(osp.join(sr, "data"))] if osp.isdir(osp.join(sr, "data")) else []
+    landed = (
+        [d for d in os.listdir(osp.join(sr, "data"))]
+        if osp.isdir(osp.join(sr, "data"))
+        else []
+    )
     check(
         "in-split scenes still downloaded",
         all(s in landed for s in SCENES),
