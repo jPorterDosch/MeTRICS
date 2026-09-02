@@ -400,7 +400,16 @@ def main(args):
 
     # get the list of scenes to be downloaded
     if cfg.get("download_scenes"):
-        scene_ids = cfg.download_scenes
+        # str() is load-bearing. Scene IDs are opaque 10-char hex-ish strings,
+        # but the ~1% that happen to be all digits (5656608266, 6464461276,
+        # 7977624358) are parsed by YAML as ints. That breaks them twice over:
+        # `scene_id in split_lists[split]` compares int against a list of str
+        # and is always False, so the scene looks absent from every split; and
+        # `data_root / scene_id` then raises
+        # "unsupported operand type(s) for /: 'PosixPath' and 'int'".
+        # The .yml quotes these three as well; this is the belt to that braces,
+        # since the scene list is meant to be user-edited.
+        scene_ids = [str(s) for s in cfg.download_scenes]
     elif cfg.get("download_splits"):
         scene_ids = []
         for split in cfg.download_splits:
@@ -485,10 +494,15 @@ def main(args):
         # A scene in no split is NOT fatal. `split` feeds exactly one lookup,
         # exclude_assets.get(split, []), so split=None means "exclude nothing"
         # -- every asset is attempted, and one that genuinely does not exist
-        # still fails loudly through `missing`. Three scenes in DUSt3R's list
-        # (5656608266, 6464461276, 7977624358) are absent from every published
-        # split yet serve all seven assets, so aborting here threw away a
-        # 228-scene run over a value that changes nothing for this config.
+        # still fails loudly through `missing`. Aborting here instead would
+        # throw away the whole 228-scene run over a value that changes nothing
+        # for this config.
+        #
+        # The three scenes that first tripped this (5656608266, 6464461276,
+        # 7977624358) were NOT actually splitless -- all three are in
+        # nvs_sem_train.txt. They are the all-digit scene IDs, which YAML
+        # parsed as ints, so the `in` test compared int against str. That is
+        # fixed at the source above; this stays as the defensive path.
         if split is None and scene_id not in _warned_no_split:
             _warned_no_split.add(scene_id)
             print(

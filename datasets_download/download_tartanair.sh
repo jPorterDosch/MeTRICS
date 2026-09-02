@@ -74,8 +74,8 @@ cd "$SCRIPT_DIR"
 # individually deflated, so per-frame random access is cheap). Unzipping would
 # turn 144 inodes into millions and blow the per-user inode quota outright.
 # Transient network failures must not throw away hours of work. The first
-# real run died after 7h37m on "[Errno 104] Connection reset by peer" with
-# 662 GB already on disk, and the upstream downloader has no retry of its own.
+# real run died after 1h54m on "Read timeout on endpoint URL" with 134 of 144
+# archives down, and boto3's own retries do not cover a stalled body read.
 # Each attempt resumes (already-complete files are skipped), so retrying the
 # whole command is cheap and idempotent. If every attempt fails the verify
 # step below still runs and reports exactly which files are missing.
