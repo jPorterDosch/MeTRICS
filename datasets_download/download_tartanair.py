@@ -162,8 +162,21 @@ class AirLabDownloader(object):
             )
 
         endpoint_url = "https://airlab-cloud.andrew.cmu.edu:8080/swift/v1/AUTH_ac8533a83cff4d48bc8c608ad222d330"
+        # Retries and generous timeouts are not optional here: a 48 h run over
+        # 144 multi-GB zips WILL hit transient read timeouts on the AirLab
+        # endpoint (the first attempt lost 3 flow_flow.zip files that way, each
+        # tens of GB). botocore's default is 4 tries with a short read timeout;
+        # "adaptive" adds client-side rate limiting when the endpoint pushes
+        # back, which is the failure mode observed on the largest objects.
         self.client = boto3.client(
-            "s3", endpoint_url=endpoint_url, config=Config(signature_version=UNSIGNED)
+            "s3",
+            endpoint_url=endpoint_url,
+            config=Config(
+                signature_version=UNSIGNED,
+                retries={"max_attempts": 10, "mode": "adaptive"},
+                connect_timeout=30,
+                read_timeout=300,
+            ),
         )
         self.bucket_name = bucket_name
 

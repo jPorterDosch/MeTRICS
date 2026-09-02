@@ -73,10 +73,32 @@ cd "$SCRIPT_DIR"
 # NO --unzip: the 144 zips are read in place by the preprocessing (members are
 # individually deflated, so per-frame random access is cheap). Unzipping would
 # turn 144 inodes into millions and blow the per-user inode quota outright.
-"$METRICS_PY" "$SCRIPT_DIR/download_tartanair.py" \
-    --output-dir "$TARTANAIR_DIR" \
-    --rgb --depth --flow \
-    --only-left
+# Transient network failures must not throw away hours of work. The first
+# real run died after 7h37m on "[Errno 104] Connection reset by peer" with
+# 662 GB already on disk, and the upstream downloader has no retry of its own.
+# Each attempt resumes (already-complete files are skipped), so retrying the
+# whole command is cheap and idempotent. If every attempt fails the verify
+# step below still runs and reports exactly which files are missing.
+ATTEMPTS="${ATTEMPTS:-5}"
+RETRY_WAIT="${RETRY_WAIT:-120}"
+
+for attempt in $(seq 1 "$ATTEMPTS"); do
+    if "$METRICS_PY" "$SCRIPT_DIR/download_tartanair.py" \
+        --output-dir "$TARTANAIR_DIR" \
+        --rgb --depth --flow \
+        --only-left
+    then
+        break
+    fi
+    if [ "$attempt" -lt "$ATTEMPTS" ]; then
+        echo "download_tartanair: attempt $attempt/$ATTEMPTS failed;" \
+             "resuming in ${RETRY_WAIT}s" >&2
+        sleep "$RETRY_WAIT"
+    else
+        echo "download_tartanair: still failing after $ATTEMPTS attempts;" \
+             "verify_tartanair.py will list what is missing" >&2
+    fi
+done
 
 # belt and braces on top of the downloader's own .part+rename: check size and
 # central directory before anything downstream trusts these archives.

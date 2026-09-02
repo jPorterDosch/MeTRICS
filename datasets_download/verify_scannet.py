@@ -22,6 +22,7 @@ and no stubs remain.
 """
 
 import argparse
+import concurrent.futures as _cf
 import os
 import os.path as osp
 import struct
@@ -32,6 +33,9 @@ BASE = "http://kaldir.vc.cit.tum.de/scannet/"
 
 
 SENS_VERSION = 4
+# uint64 count, then this many bytes per IMU frame (measured exactly
+# against real ScanNet v2 files; every sampled file divides evenly)
+IMU_FRAME_BYTES = 128
 
 
 def sens_integrity(path):
@@ -66,10 +70,27 @@ def sens_integrity(path):
                 dsz = struct.unpack("Q", meta[-8:])[0]
                 if f.seek(csz + dsz, 1) > size:
                     return "TRUNCATED", f"frame {i} of {num_frames} runs past EOF"
+            # A complete .sens ends with an IMU block that scannet_sensor.py
+            # never reads and the format docs barely mention: a uint64 frame
+            # count followed by exactly 128 bytes per IMU frame. Every real
+            # file has one, so treating the region as trailing garbage would
+            # condemn the entire download.
             pos = f.tell()
-            if pos != size:
-                return "TRAILING", f"{size - pos} bytes after {num_frames} frames"
-            return "OK", f"{num_frames} frames"
+            if pos == size:
+                return "OK", f"{num_frames} frames, no IMU block"
+            raw = f.read(8)
+            if len(raw) < 8:
+                return "TRUNCATED", f"ends inside the IMU count after {num_frames} frames"
+            imu = struct.unpack("Q", raw)[0]
+            expect = pos + 8 + imu * IMU_FRAME_BYTES
+            if expect == size:
+                return "OK", f"{num_frames} frames + {imu} IMU"
+            if expect > size:
+                return "TRUNCATED", (
+                    f"IMU block declares {imu} frames "
+                    f"({expect - size} bytes past EOF)"
+                )
+            return "TRAILING", f"{size - expect} bytes after {num_frames} frames + {imu} IMU"
     except (OSError, struct.error) as e:
         return "CORRUPT", str(e)
 
@@ -86,6 +107,12 @@ def main():
         "--offline",
         action="store_true",
         help="skip the release-list fetch; only check what is on disk",
+    )
+    ap.add_argument(
+        "--jobs",
+        type=int,
+        default=32,
+        help="parallel .sens integrity walks (I/O bound; default 32)",
     )
     args = ap.parse_args()
 
@@ -108,14 +135,22 @@ def main():
                 continue
 
         missing, bad = [], []
+        present = []
         for s in sorted(expected):
             p = osp.join(d, s, f"{s}.sens")
-            if not osp.isfile(p):
-                missing.append(s)
-                continue
-            status, detail = sens_integrity(p)
-            if status != "OK":
-                bad.append(f"{s} [{status}: {detail}]")
+            (present.append((s, p)) if osp.isfile(p) else missing.append(s))
+        # The walk is pure I/O latency, not CPU: ~4.6 s per cold file on Lustre
+        # (0.05 s once cached), almost all of it waiting on ~2 round trips per
+        # frame. Serial, 1513 scenes is over two hours; threads overlap the
+        # waits and the GIL is released for every read, so this scales close to
+        # linearly. Threads, not processes -- there is nothing to pickle.
+        if present:
+            with _cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+                for (s, _), (status, detail) in zip(
+                    present, ex.map(lambda sp: sens_integrity(sp[1]), present)
+                ):
+                    if status != "OK":
+                        bad.append(f"{s} [{status}: {detail}]")
         stubs = [
             osp.join(r, f)
             for r, _, fs in os.walk(d)

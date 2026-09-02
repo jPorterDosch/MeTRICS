@@ -82,10 +82,33 @@ fi
 
 mkdir -p "$SCANNET_DIR"
 
-yes '' | "$METRICS_PY" "$SCRIPT_DIR/download_scannet.py" \
-    -o "$SCANNET_DIR" \
-    --type .sens \
-    --skip_existing
+# Transient network failures must not throw away hours of work. The first
+# real run died after 7h37m on "[Errno 104] Connection reset by peer" with
+# 730 GB already on disk, and the upstream downloader has no retry of its own.
+# Each attempt resumes (already-complete files are skipped), so retrying the
+# whole command is cheap and idempotent. If every attempt fails the verify
+# step below still runs and reports exactly which files are missing.
+ATTEMPTS="${ATTEMPTS:-5}"
+RETRY_WAIT="${RETRY_WAIT:-120}"
+
+for attempt in $(seq 1 "$ATTEMPTS"); do
+    # no pipefail, so the pipeline's status is the downloader's, not `yes`'s
+    if yes '' | "$METRICS_PY" "$SCRIPT_DIR/download_scannet.py" \
+        -o "$SCANNET_DIR" \
+        --type .sens \
+        --skip_existing
+    then
+        break
+    fi
+    if [ "$attempt" -lt "$ATTEMPTS" ]; then
+        echo "download_scannet: attempt $attempt/$ATTEMPTS failed;" \
+             "resuming in ${RETRY_WAIT}s" >&2
+        sleep "$RETRY_WAIT"
+    else
+        echo "download_scannet: still failing after $ATTEMPTS attempts;" \
+             "verify_scannet.py will list what is missing" >&2
+    fi
+done
 
 # The downloader writes the train split to scans/ and the test split to
 # scans_test/, but every downstream stage expects scans_train/ + scans_test/

@@ -328,6 +328,9 @@ def check_download_file(cfg, url_template, remote_path, local_path, dry_run):
         return download_file(url, local_path, verbose=cfg.verbose, make_parent=True)
 
 
+_warned_no_split = set()
+
+
 def main(args):
     print_banner(args.config_file)
     cfg = load_yaml_munch(args.config_file)
@@ -479,10 +482,20 @@ def main(args):
             if scene_id in split_lists[candidate]:
                 split = candidate
                 break
-        assert split is not None, (
-            f"Scene {scene_id} is not in any split listed in `splits`. It was "
-            f"likely removed from the release; drop it from download_scenes."
-        )
+        # A scene in no split is NOT fatal. `split` feeds exactly one lookup,
+        # exclude_assets.get(split, []), so split=None means "exclude nothing"
+        # -- every asset is attempted, and one that genuinely does not exist
+        # still fails loudly through `missing`. Three scenes in DUSt3R's list
+        # (5656608266, 6464461276, 7977624358) are absent from every published
+        # split yet serve all seven assets, so aborting here threw away a
+        # 228-scene run over a value that changes nothing for this config.
+        if split is None and scene_id not in _warned_no_split:
+            _warned_no_split.add(scene_id)
+            print(
+                f"note: scene {scene_id} is in none of {list(cfg.splits)}; "
+                f"applying no asset exclusions for it",
+                file=sys.stderr,
+            )
 
         for asset in tqdm(download_assets, desc="assets", leave=False):
             # some assets not present in test splits

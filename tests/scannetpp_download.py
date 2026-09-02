@@ -20,6 +20,9 @@ DL = osp.join(osp.dirname(osp.abspath(__file__)), "..", "datasets_download")
 sys.path.insert(0, DL)
 
 SCENES = ["aaaa111111", "bbbb222222"]
+# in no split list, but the server serves all its assets -- mirrors the real
+# 5656608266 / 6464461276 / 7977624358
+NO_SPLIT_SCENE = "deadbeef99"
 # kept as archives: members live under "<dirname>/" (verified against the
 # live server -- dslr/colmap.zip holds colmap/cameras.txt etc.)
 ASSETS_ZIP = {
@@ -44,7 +47,7 @@ ASSETS_FILE = {"iphone_video_path": "iphone/rgb.mkv"}
 def build_server(root):
     """Materialise the blobs the real server would hand out, keyed by filepath."""
     blobs = {}
-    for s in SCENES:
+    for s in SCENES + [NO_SPLIT_SCENE]:
         for asset, (reldir, files) in ASSETS_ZIP.items():
             buf = io.BytesIO()
             # server archives are DEFLATED, like the real ones
@@ -252,24 +255,43 @@ def main():
     parts = [f for dp, _, fs in os.walk(cr) for f in fs if f.endswith(".part")]
     check("no .part sidecar left behind", not parts, f"{parts}")
 
-    # ---- 6. a scene in no split fails loudly ---------------------------
+    # ---- 6. a scene in no split warns but still downloads --------------
+    # Three scenes in DUSt3R's list are in no published split yet serve every
+    # asset, so this must NOT abort the run -- `split` only selects
+    # exclude_assets, and None means "exclude nothing". It must still say so.
     print("\n6. scene present in no split")
     sr = osp.join(tmp, "nosplit")
     cfg4 = make_cfg(sr, True)
+    import contextlib
+    import io as _io
     import yaml as _y
 
     c = _y.safe_load(open(cfg4))
-    c["download_scenes"] = SCENES + ["deadbeef99"]
+    c["download_scenes"] = SCENES + [NO_SPLIT_SCENE]
     _y.safe_dump(c, open(cfg4, "w"))
+    err = _io.StringIO()
+    raised = None
     try:
-        run(cfg4, FakeNet(blobs))
-        raised = None
-    except AssertionError as e:
-        raised = str(e)
+        with contextlib.redirect_stderr(err):
+            run(cfg4, FakeNet(blobs))
+    except BaseException as e:  # noqa: BLE001 -- any abort is the failure here
+        raised = f"{type(e).__name__}: {e}"
     check(
-        "raises AssertionError naming the scene",
-        raised is not None and "deadbeef99" in raised,
-        (raised or "no exception")[:70],
+        "does NOT abort the run",
+        raised is None,
+        raised or "completed",
+    )
+    check(
+        "warns naming the scene",
+        NO_SPLIT_SCENE in err.getvalue(),
+        err.getvalue().strip().splitlines()[-1][:70] if err.getvalue() else "no warning",
+    )
+    # the in-split scenes must still have landed
+    landed = [d for d in os.listdir(osp.join(sr, "data"))] if osp.isdir(osp.join(sr, "data")) else []
+    check(
+        "in-split scenes still downloaded",
+        all(s in landed for s in SCENES),
+        f"{sorted(landed)}",
     )
 
     shutil.rmtree(tmp)
