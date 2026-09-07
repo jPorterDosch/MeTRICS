@@ -52,19 +52,41 @@ set -eu
 # directory". `scontrol show job` still knows the path the job was submitted
 # with, so ask Slurm inside a job and fall back to BASH_SOURCE outside one.
 # (sbatch --test-only does NOT run the body, so it cannot catch a bug here.)
+#
+# Query SLURM_ARRAY_JOB_ID, not SLURM_JOB_ID, and keep only the first
+# Command=. In a job ARRAY exactly one task inherits the array's master job id
+# -- observed on 6177682_31, whose JobIDRaw was the array id 6177682 itself --
+# and `scontrol show job` on that id describes the ARRAY rather than the one
+# task, so the sed did not yield a single usable path. That task then exited 1
+# before doing any work, which is invisible until an afterok dependent sits at
+# DependencyNeverSatisfied. Every other task in the array was unaffected,
+# which is what made it look like a data problem.
+#
+# SLURM_SUBMIT_DIR is the belt to that braces: Slurm sets it to the directory
+# the job was submitted from, and every documented invocation here submits
+# from the repo root.
+_rel="datasets_download/download_scannetpp.sh"
 if [ -n "${SLURM_JOB_ID:-}" ]; then
-    _self="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
-             | sed -n 's/^ *Command=\([^ ]*\).*/\1/p')"
-    if [ -z "$_self" ] || [ ! -f "$_self" ]; then
-        echo "could not resolve this script's path from scontrol; set" \
-             "METRICS_REPO or run it with bash instead of sbatch" >&2
+    _self="$(scontrol show job "${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}" 2>/dev/null \
+             | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -n 1)"
+    if [ -n "$_self" ] && [ -f "$_self" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
+    elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "$SLURM_SUBMIT_DIR/$_rel" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "$SLURM_SUBMIT_DIR/$_rel")" && pwd)"
+    elif [ -n "${METRICS_REPO:-}" ] && [ -f "$METRICS_REPO/$_rel" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "$METRICS_REPO/$_rel")" && pwd)"
+    else
+        echo "could not resolve this script's path: scontrol gave" \
+             "'${_self:-<empty>}', SLURM_SUBMIT_DIR='${SLURM_SUBMIT_DIR:-}'." \
+             "Set METRICS_REPO to the repo root, submit from it, or run this" \
+             "with bash instead of sbatch" >&2
         exit 1
     fi
-    SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
     unset _self
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
+unset _rel
 source "$SCRIPT_DIR/env.sh"
 
 # token: environment first, then the gitignored file
@@ -74,6 +96,31 @@ fi
 : "${SCANNETPP_TOKEN:?no token: write it to datasets_download/.scannetpp_token or export SCANNETPP_TOKEN}"
 
 mkdir -p "$SCANNETPP_DIR"
+
+# DUSt3R's precomputed pairs supply BOTH the scene list this config downloads
+# and the per-scene image selection preprocess_scannetpp.py renders, so the
+# dataset is unusable for training without them. 26 MB, no token needed, and
+# idempotent. Fetched here rather than left as a manual README step because
+# forgetting it surfaces hours later, as a preprocessing array whose every
+# task dies on its first scene.
+PAIRS_DIR="$SCANNETPP_DIR/scannetpp_pairs"
+if [ ! -f "$PAIRS_DIR/scene_list.json" ]; then
+    echo "fetching scannetpp_pairs (DUSt3R precomputed pairs)..."
+    # .part + rename, the same contract as every other transfer here: a
+    # killed job must never leave a truncated file under a final name.
+    _pairs_zip="$SCANNETPP_DIR/scannetpp_pairs.zip.part"
+    curl -fSL --retry 5 --retry-delay 10 -o "$_pairs_zip" \
+        https://download.europe.naverlabs.com/ComputerVision/DUSt3R/scannetpp_pairs.zip
+    # the archive's members are already prefixed scannetpp_pairs/, so this
+    # lands as $SCANNETPP_DIR/scannetpp_pairs/
+    unzip -q -o "$_pairs_zip" -d "$SCANNETPP_DIR"
+    rm -f "$_pairs_zip"
+    if [ ! -f "$PAIRS_DIR/scene_list.json" ]; then
+        echo "scannetpp_pairs.zip did not yield scene_list.json" >&2
+        exit 1
+    fi
+    echo "scannetpp_pairs ready: $(ls "$PAIRS_DIR" | wc -l) entries"
+fi
 
 # Render the committed config with this run's data_root and token filled in.
 # The token stays out of the repo and off the process command line (which is
@@ -104,7 +151,14 @@ PYEOF
 # A finite stream, not `yes`: three lines comfortably covers the one prompt
 # that can still fire (and any the upstream script grows later), and printf
 # exits 0 once its bytes are in the pipe buffer rather than dying on SIGPIPE.
-printf 'y\ny\ny\n' | "$METRICS_PY" "$SCRIPT_DIR/download_scannetpp.py" "$RENDERED"
+# `|| true` so a failed download still reaches the verify below. The
+# downloader aborts the whole run on the first failed asset -- exactly the
+# case the comment on the verify step describes -- and under `set -e` that
+# status would terminate this script first, skipping the one step that says
+# what is actually missing. The verify exits non-zero on any gap, so the job
+# still fails; it just fails with a list.
+printf 'y\ny\ny\n' | "$METRICS_PY" "$SCRIPT_DIR/download_scannetpp.py" "$RENDERED" \
+    || echo "download_scannetpp.py exited non-zero; running verify to report gaps" >&2
 
 # The downloader treats a file that merely exists as complete, and aborts the
 # whole run on the first failed asset, so a partial tree is the normal outcome

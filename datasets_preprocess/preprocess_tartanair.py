@@ -61,6 +61,12 @@ def get_parser():
         help="write loose per-frame files instead of one frames.zip per "
         "trajectory (the original layout; ~5 inodes per frame)",
     )
+    parser.add_argument(
+        "--shard", type=int, default=0, help="this shard index (0-based)"
+    )
+    parser.add_argument(
+        "--num-shards", type=int, default=1, help="total number of shards"
+    )
     return parser
 
 
@@ -105,10 +111,10 @@ class RawSource:
         return f"{archive}/{self.env}/{self.difficulty}/{traj}/pose_left.txt"
 
     def count(self, asset, traj):
-        """Number of frame files for one asset -- the assert inputs.
+        """Number of frame files for one asset -- the count-check inputs.
 
         Goes through zipio.listdir so it shares the cached archive handle: the
-        assert calls this four times per trajectory and there are ~1000
+        check calls this four times per trajectory and there are ~1000
         trajectories, so opening the archive here would mean thousands of full
         central-directory parses of multi-GB zips over Lustre."""
         sub = ASSET_DIRS[asset]
@@ -134,17 +140,41 @@ class RawSource:
         return self.count("flow_flow", traj) + self.count("flow_mask", traj)
 
 
-def discover(root):
+def discover(root, shard=0, num_shards=1):
     """Yield (RawSource, [trajectories]) for every env/difficulty found.
 
     Zip layout is detected by the presence of *_image_left.zip; the env and
     difficulty are read from the archive's member paths rather than parsed out
     of the filename, because env names themselves contain underscores
     (abandonedfactory_night).
+
+    One (env, difficulty) is one shard unit -- 36 of them for the full
+    download, which is what the --array range in preprocess_tartanair.sh is
+    sized for. Sharding is applied to the archive list BEFORE any archive is
+    opened, so a task parses its own central directories only rather than all
+    36. The units are deliberately uneven (neighborhood_Easy is 76 GiB raw
+    against carwelding_Hard's 6 GiB) -- walltime has to cover the largest, and
+    the balanced alternative, round-robin over the flat trajectory list, would
+    force every task to open every archive just to enumerate.
     """
+    # A shard id at or above the shard count selects nothing (i % n < n
+    # always), which would silently convert zero trajectories and exit 0.
+    if not 0 <= shard < num_shards:
+        raise ValueError(
+            f"--shard {shard} is out of range for --num-shards {num_shards}; "
+            f"shard must be in [0, {num_shards})"
+        )
+
+    def mine(units):
+        return [u for i, u in enumerate(units) if i % num_shards == shard]
+
+    # layout is decided on the FULL archive list, not this shard's slice: a
+    # slice can legitimately be empty (num_shards > 36), and deciding on the
+    # slice would then mistake a zip-layout root for an extracted one and
+    # quietly find nothing at all.
     image_zips = sorted(f for f in os.listdir(root) if f.endswith("_image_left.zip"))
     if image_zips:
-        for fname in image_zips:
+        for fname in mine(image_zips):
             stem = fname[: -len("_image_left.zip")]
             with zipfile.ZipFile(osp.join(root, fname)) as zf:
                 names = zf.namelist()
@@ -161,13 +191,16 @@ def discover(root):
         return
 
     envs = [f for f in sorted(os.listdir(root)) if osp.isdir(osp.join(root, f))]
-    for env in envs:
-        for difficulty in ["Easy", "Hard"]:
-            d = osp.join(root, env, difficulty)
-            if not osp.isdir(d):
-                continue
-            trajs = sorted(f for f in os.listdir(d) if osp.isdir(osp.join(d, f)))
-            yield RawSource(root, env, difficulty), trajs
+    units = [
+        (env, difficulty)
+        for env in envs
+        for difficulty in ["Easy", "Hard"]
+        if osp.isdir(osp.join(root, env, difficulty))
+    ]
+    for env, difficulty in mine(units):
+        d = osp.join(root, env, difficulty)
+        trajs = sorted(f for f in os.listdir(d) if osp.isdir(osp.join(d, f)))
+        yield RawSource(root, env, difficulty), trajs
 
 
 def frame_count(src, traj):
@@ -182,12 +215,15 @@ def convert_trajectory(src, traj, emit):
     ).astype(np.float32)
     poses = np.loadtxt(io.StringIO(read_bytes(src.pose_txt(traj)).decode()))
     frame_num = len(poses)
-    assert (
-        src.count("image_left", traj)
-        == src.count("depth_left", traj)
-        == src.flow_count(traj) // 2 + 1
-        == frame_num
-    )
+    n_rgb = src.count("image_left", traj)
+    n_depth = src.count("depth_left", traj)
+    n_flow = src.flow_count(traj) // 2 + 1
+    if not (n_rgb == n_depth == n_flow == frame_num):
+        raise ValueError(
+            f"{src.env}/{src.difficulty}/{traj}: asset counts disagree -- "
+            f"image_left {n_rgb}, depth_left {n_depth}, flow+mask//2+1 "
+            f"{n_flow}, poses {frame_num}"
+        )
     for i in tqdm(range(frame_num), leave=False):
         pose = poses[i]
         x, y, z, qx, qy, qz, qw = pose
@@ -217,9 +253,14 @@ def convert_trajectory(src, traj, emit):
         emit(f"{i:06d}_cam.npz", cam_buf.getvalue())
 
 
-def main(rootdir, outdir, as_zip=True):
+def main(rootdir, outdir, as_zip=True, shard=0, num_shards=1):
     os.makedirs(outdir, exist_ok=True)
-    for src, trajs in discover(rootdir):
+    for src, trajs in discover(rootdir, shard, num_shards):
+        print(
+            f"[shard {shard}/{num_shards}] {src.env}/{src.difficulty}: "
+            f"{len(trajs)} trajectories",
+            flush=True,
+        )
         for traj in tqdm(trajs, desc=f"{src.env}/{src.difficulty}"):
             out_traj_dir = osp.join(outdir, src.env, src.difficulty, traj)
             os.makedirs(out_traj_dir, exist_ok=True)
@@ -249,4 +290,10 @@ def main(rootdir, outdir, as_zip=True):
 if __name__ == "__main__":
     parser = get_parser()
     args = parser.parse_args()
-    main(args.tartanair_dir, args.output_dir, as_zip=not args.extracted)
+    main(
+        args.tartanair_dir,
+        args.output_dir,
+        as_zip=not args.extracted,
+        shard=args.shard,
+        num_shards=args.num_shards,
+    )

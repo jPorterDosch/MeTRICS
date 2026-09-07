@@ -122,10 +122,11 @@ def main():
 
     # A shard id at or above the shard count selects nothing (i % n < n
     # always), which would silently extract zero scenes and exit 0.
-    assert 0 <= args.shard < args.num_shards, (
-        f"--shard {args.shard} is out of range for --num-shards "
-        f"{args.num_shards}; shard must be in [0, {args.num_shards})"
-    )
+    if not 0 <= args.shard < args.num_shards:
+        raise SystemExit(
+            f"--shard {args.shard} is out of range for --num-shards "
+            f"{args.num_shards}; shard must be in [0, {args.num_shards})"
+        )
     jobs = [j for i, j in enumerate(jobs) if i % args.num_shards == args.shard]
     print(
         f"[shard {args.shard}/{args.num_shards}] {len(jobs)} scenes assigned",
@@ -153,7 +154,14 @@ def main():
         f"[shard {args.shard}] extracted={done} skipped={skipped} failed={failed}",
         flush=True,
     )
+    # Per-scene failures are caught above so one bad .sens cannot cost the
+    # shard its remaining scenes -- but the TASK still has to fail, or Slurm
+    # reports success for an array element that produced nothing. Nothing runs
+    # verify_scannet.py at this stage, so an exit status of 0 here is the only
+    # signal there is, and the gap would otherwise surface much later as a
+    # scene with no frames.zip during preprocessing.
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

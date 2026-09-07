@@ -36,6 +36,15 @@ colorama
 # tokenised config as YAML and wraps it in a Munch for attribute access
 PyYAML
 munch
+# ScanNet++ preprocessing (datasets_preprocess/preprocess_scannetpp.py) has to
+# render depth from each scene's mesh, and does it by ray casting on the CPU:
+# embreex is the Embree binding trimesh.ray.ray_pyembree picks up, and it
+# bundles Embree itself, so there is no system library to install. Upstream
+# rasterises with pyrender instead, which needs a working OpenGL -- ISAAC's CPU
+# partitions have libEGL but no swrast DRI driver and no GPU, so eglInitialize
+# fails there. Without embreex trimesh falls back to a pure-numpy intersector
+# that is orders of magnitude too slow for ~65k renders.
+embreex
 scikit-learn
 gsplat
 evo

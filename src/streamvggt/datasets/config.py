@@ -1,7 +1,8 @@
 """Tyro-exposable configuration for the streamvggt multi-view datasets.
 
 A single :class:`DatasetConfig` fully describes how to construct one dataset
-(HAMMER / ARKitScenes lowres / ARKitScenes highres / ScanNet), and
+(HAMMER / ARKitScenes lowres / ARKitScenes highres / ScanNet /
+ScanNet++ / TartanAir), and
 :class:`MultiDatasetConfig` describes N of them as parallel per-dataset tuples
 (combine the built datasets with ``+`` in the entrypoint). DatasetConfig is
 meant to be nested inside a training
@@ -33,6 +34,8 @@ from .types import DatasetName, Split, TransformName
 from .hammer import HAMMER_Multi
 from .hypersim import HyperSim_Multi
 from .scannet import ScanNet_Multi
+from .scannetpp import ScanNetpp_Multi
+from .tartanair import TartanAir_Multi
 from .utils.transforms import ColorJitter, ImgNorm, SeqColorJitter
 
 
@@ -199,6 +202,10 @@ class DatasetConfig:
                 dataset = ARKitScenesHighRes_Multi(**kwargs)
             case DatasetName.SCANNET:
                 dataset = ScanNet_Multi(**kwargs)
+            case DatasetName.SCANNETPP:
+                dataset = ScanNetpp_Multi(**kwargs)
+            case DatasetName.TARTANAIR:
+                dataset = TartanAir_Multi(**kwargs)
             case DatasetName.HYPERSIM:
                 dataset = HyperSim_Multi(**kwargs)
             case _:

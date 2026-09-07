@@ -59,7 +59,14 @@ def main():
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
-    scenes = cfg["download_scenes"]
+    # str() is load-bearing, exactly as in download_scannetpp.py: scene IDs
+    # are opaque 10-char strings, but the ~1% that happen to be all digits
+    # (5656608266, 6464461276, 7977624358) are parsed by YAML as ints, and
+    # `data_root / scene_id` then raises "unsupported operand type(s) for /".
+    # Those three are quoted in the .yml, but the list is meant to be
+    # user-edited, and this is the one step that would have caught gaps --
+    # failing here, after a multi-hour download, is the worst place for it.
+    scenes = [str(s) for s in cfg["download_scenes"]]
     assets = cfg["download_assets"]
     # Only the assets in keep_zipped stay as archives on disk. The rest of
     # zipped_assets were zip-wrapped for transport and extracted on arrival,

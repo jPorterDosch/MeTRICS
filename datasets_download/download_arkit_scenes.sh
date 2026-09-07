@@ -27,19 +27,41 @@ set -eu
 # directory". `scontrol show job` still knows the path the job was submitted
 # with, so ask Slurm inside a job and fall back to BASH_SOURCE outside one.
 # (sbatch --test-only does NOT run the body, so it cannot catch a bug here.)
+#
+# Query SLURM_ARRAY_JOB_ID, not SLURM_JOB_ID, and keep only the first
+# Command=. In a job ARRAY exactly one task inherits the array's master job id
+# -- observed on 6177682_31, whose JobIDRaw was the array id 6177682 itself --
+# and `scontrol show job` on that id describes the ARRAY rather than the one
+# task, so the sed did not yield a single usable path. That task then exited 1
+# before doing any work, which is invisible until an afterok dependent sits at
+# DependencyNeverSatisfied. Every other task in the array was unaffected,
+# which is what made it look like a data problem.
+#
+# SLURM_SUBMIT_DIR is the belt to that braces: Slurm sets it to the directory
+# the job was submitted from, and every documented invocation here submits
+# from the repo root.
+_rel="datasets_download/download_arkit_scenes.sh"
 if [ -n "${SLURM_JOB_ID:-}" ]; then
-    _self="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
-             | sed -n 's/^ *Command=\([^ ]*\).*/\1/p')"
-    if [ -z "$_self" ] || [ ! -f "$_self" ]; then
-        echo "could not resolve this script's path from scontrol; set" \
-             "METRICS_REPO or run it with bash instead of sbatch" >&2
+    _self="$(scontrol show job "${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}" 2>/dev/null \
+             | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -n 1)"
+    if [ -n "$_self" ] && [ -f "$_self" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
+    elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "$SLURM_SUBMIT_DIR/$_rel" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "$SLURM_SUBMIT_DIR/$_rel")" && pwd)"
+    elif [ -n "${METRICS_REPO:-}" ] && [ -f "$METRICS_REPO/$_rel" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "$METRICS_REPO/$_rel")" && pwd)"
+    else
+        echo "could not resolve this script's path: scontrol gave" \
+             "'${_self:-<empty>}', SLURM_SUBMIT_DIR='${SLURM_SUBMIT_DIR:-}'." \
+             "Set METRICS_REPO to the repo root, submit from it, or run this" \
+             "with bash instead of sbatch" >&2
         exit 1
     fi
-    SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
     unset _self
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
+unset _rel
 source "$SCRIPT_DIR/env.sh"
 
 # NB: the downloader appends <dataset>/<split> to this (download_arkit_scenes.py:239),

@@ -1,24 +1,35 @@
 #!/bin/bash
-#SBATCH --job-name=scannet_preprocess
+#SBATCH --job-name=hammer_preprocess
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=24G
-#SBATCH --time=12:00:00
-#SBATCH --output=logs/scannet_preprocess_%j.out
+#SBATCH --time=04:00:00
+#SBATCH --output=logs/hammer_preprocess_%j.out
 #SBATCH --account=isaac-utk0516
 #SBATCH --partition=campus
 #SBATCH --qos=campus
 
-# Stage 3 + 4 of the ScanNet pipeline (after extract_scannet.sh): preprocess
-# extracted frames -> processed color/depth/cam tree, then generate_set ->
-# per-scene new_scene_metadata.npz (the loader input). CPU only.
+# HAMMER raw sequences -> processed train/ + test/ tree with per-sequence
+# frames.zip and scene_metadata.npz (what src/streamvggt/datasets/hammer.py
+# loads). CPU only, one worker process per sequence.
 #
 # Runs either way -- the #SBATCH block above is a comment to bash and a
 # directive to Slurm:
-#   sbatch datasets_preprocess/preprocess_scannet.sh   # batch (needs ./logs)
-#   bash   datasets_preprocess/preprocess_scannet.sh   # login node
+#   sbatch datasets_preprocess/preprocess_hammer.sh   # batch (needs ./logs)
+#   bash   datasets_preprocess/preprocess_hammer.sh   # login node
 #
-# Re-running after a failure redoes the preprocess from scratch (it has no
-# per-scene skip logic) but simply overwrites, so it is safe.
+# There is no generate_set stage for HAMMER: preprocess_hammer.py writes the
+# scene_metadata.npz the loader reads, so this one script is the whole
+# pipeline. Output is ~22 GB (rgb/depth bytes are copied verbatim out of the
+# raw frames.zip, so the total tracks the raw size).
+#
+# Quick: measured 18 s for one sequence (scene10_traj1_1, 305 frames), so 64
+# sequences over 16 workers is a few minutes. The 4 h wall is slack, not need.
+#
+# Re-running after a failure redoes every sequence from scratch -- there is no
+# per-sequence skip -- but it overwrites cleanly, so resubmission is safe.
+# preprocess_hammer.py fails fast: any missing frame, count mismatch,
+# non-contiguous numbering, or non-rigid pose aborts the whole run rather than
+# quietly dropping a sequence.
 
 set -eu
 
@@ -42,7 +53,7 @@ set -eu
 # SLURM_SUBMIT_DIR is the belt to that braces: Slurm sets it to the directory
 # the job was submitted from, and every documented invocation here submits
 # from the repo root.
-_rel="datasets_preprocess/preprocess_scannet.sh"
+_rel="datasets_preprocess/preprocess_hammer.sh"
 if [ -n "${SLURM_JOB_ID:-}" ]; then
     _self="$(scontrol show job "${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}" 2>/dev/null \
              | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -n 1)"
@@ -66,23 +77,17 @@ fi
 unset _rel
 source "$SCRIPT_DIR/../datasets_download/env.sh"
 
-OUT="$METRICS_PROCESSED_ROOT/processed_scannet"
+OUT="$METRICS_PROCESSED_ROOT/processed_hammer"
 
-# keep tqdm from flooding the log (per-frame bars across 16 workers);
+# keep tqdm from flooding the log (a bar per sequence across 16 workers);
 # honored by tqdm >= 4.66, harmless otherwise
 export TQDM_MININTERVAL=60
 
 cd "$METRICS_REPO"
 
-"$METRICS_PY" datasets_preprocess/preprocess_scannet.py \
-    --scannet_dir "$SCANNET_DIR" \
-    --output_dir "$OUT"
-
-# Max interval 150 is the default, hardcoded here for readability.
 # Outside Slurm SLURM_CPUS_PER_TASK is unset. Fall back to 8, NOT nproc: the
 # header offers a login-node run, where nproc reports the whole shared node.
-"$METRICS_PY" datasets_preprocess/generate_set_scannet.py \
-    --root "$OUT" \
-    --splits scans_test scans_train \
-    --max_interval 150 \
+"$METRICS_PY" datasets_preprocess/preprocess_hammer.py \
+    --hammer_dir "$HAMMER_DIR" \
+    --output_dir "$OUT" \
     --num_workers "${SLURM_CPUS_PER_TASK:-8}"
