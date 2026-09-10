@@ -26,56 +26,56 @@ test_loss:
 
 allow_repeat: False
 
-dataset1: Co3d_Multi(allow_repeat=${allow_repeat}, split='train', ROOT='../data/train/processed_co3d/', 
+dataset1: Co3d_Multi(allow_repeat=${allow_repeat}, split='train', ROOT='/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_co3d/', 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset2: WildRGBD_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="../data/train/wildrgbd", 
+dataset2: WildRGBD_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/wildrgbd", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset3: ARKitScenes_Multi(allow_repeat=${allow_repeat}, split='train', ROOT='../data/train/processed_arkitscenes/', 
+dataset3: ARKitScenes_Multi(allow_repeat=${allow_repeat}, split='train', ROOT='/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_arkitscenes/', 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset4: ARKitScenesHighRes_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="../data/train/processed_arkitscenes_highres", 
+dataset4: ARKitScenesHighRes_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_arkitscenes_highres", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset5: ScanNetpp_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="../data/train/processed_scannetpp/", 
+dataset5: ScanNetpp_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_scannetpp/", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)],  
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset6: ScanNet_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="../data/train/processed_scannet/", 
+dataset6: ScanNet_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_scannet/", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)],  
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset7: HyperSim_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="../data/train/hypersim", 
+dataset7: HyperSim_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/hypersim", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)],  
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset8: BlendedMVS_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="../data/train/processed_blendedmvs/", 
+dataset8: BlendedMVS_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_blendedmvs/", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)],  
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset9: MegaDepth_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="../data/train/processed_megadepth", 
+dataset9: MegaDepth_Multi(allow_repeat=${allow_repeat}, split="train", ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_megadepth", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)],  
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset10: Waymo_Multi(allow_repeat=${allow_repeat}, split=None, ROOT="../data/train/waymo/", 
+dataset10: Waymo_Multi(allow_repeat=${allow_repeat}, split=None, ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/waymo/", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)],  
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset11: VirtualKITTI2_Multi(allow_repeat=${allow_repeat}, split=None, ROOT="../data/train/processed_vkitti", 
+dataset11: VirtualKITTI2_Multi(allow_repeat=${allow_repeat}, split=None, ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_vkitti", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)],  
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset12: OmniObject3D_Multi(allow_repeat=${allow_repeat}, split=None, ROOT="../data/train/omniobject3d/",
+dataset12: OmniObject3D_Multi(allow_repeat=${allow_repeat}, split=None, ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/omniobject3d/",
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset13: Spring(allow_repeat=${allow_repeat}, split=None, ROOT="../data/train/spring/",
+dataset13: Spring(allow_repeat=${allow_repeat}, split=None, ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/spring/",
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset14: MVS_Synth_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="../data/train/mvs_synth",
+dataset14: MVS_Synth_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/mvs_synth",
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset15: PointOdyssey_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="../data/train/point_odyssey",
+dataset15: PointOdyssey_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/point_odyssey",
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
 
 train_dataset: 4500 @ ${dataset1} + 4500 @ ${dataset2} + 4500 @ ${dataset3} + 2250 @ ${dataset4} + 2250 @ ${dataset5} 
               + 4500 @ ${dataset6} + 1200 @ ${dataset7} + 2250 @ ${dataset8} + 2250 @ ${dataset9} + 2250 @ ${dataset10} 
               + 2250 @ ${dataset11} + 1800 @ ${dataset12} + 1800 @ ${dataset13} + 450 @ ${dataset14} + 2250 @ ${dataset15}
-test_dataset: 1000 @ ARKitScenes_Multi(split='test', ROOT='../data/train/processed_arkitscenes/', resolution=(518, 392), num_views=${num_test_views}, seed=42, n_corres=${n_corres_test})
+test_dataset: 1000 @ ARKitScenes_Multi(split='test', ROOT='/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_arkitscenes/', resolution=(518, 392), num_views=${num_test_views}, seed=42, n_corres=${n_corres_test})
 
 seed: 0
 batch_size: 1

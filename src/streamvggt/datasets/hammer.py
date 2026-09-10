@@ -8,6 +8,7 @@ from tqdm import tqdm
 from .base.base_multiview_dataset import BaseMultiViewDataset
 from .types import Split
 from .utils.image import imread_cv2
+from .utils.zipio import frames_root, listdir as zlistdir, np_load
 
 # preserves the original DUSt3R HAMMER stride cap; override via the constructor
 # or the DatasetConfig CLI rather than editing this constant.
@@ -89,7 +90,7 @@ class HAMMER_Multi(BaseMultiViewDataset):
             for subdir, ext in (("rgb", ".png"), ("depth", ".png"), ("cam", ".npz")):
                 files = [
                     f
-                    for f in os.listdir(osp.join(scene_dir, subdir))
+                    for f in zlistdir(osp.join(frames_root(scene_dir), subdir))
                     if f.endswith(ext)
                 ]
                 if len(files) != num_imgs:
@@ -150,7 +151,10 @@ class HAMMER_Multi(BaseMultiViewDataset):
         views = []
         for v, view_idx in enumerate(image_idxs):
             scene_id = self.sceneids[view_idx]
-            scene_dir = osp.join(self.scene_root, self.scenes[scene_id])
+            # frames live either in the scene dir (extracted layout) or in its
+            # frames.zip (inode-safe layout); the metadata npz read above is
+            # unaffected (always a real file in the scene dir)
+            scene_dir = frames_root(osp.join(self.scene_root, self.scenes[scene_id]))
 
             basename = self.images[view_idx]
 
@@ -161,7 +165,7 @@ class HAMMER_Multi(BaseMultiViewDataset):
             depthmap = depthmap.astype(np.float32) / 1000.0
             depthmap[~np.isfinite(depthmap)] = 0  # invalid
 
-            cam = np.load(osp.join(scene_dir, "cam", basename + ".npz"))
+            cam = np_load(osp.join(scene_dir, "cam", basename + ".npz"))
             camera_pose = cam["pose"]
             intrinsics = cam["intrinsics"]
             rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(

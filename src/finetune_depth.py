@@ -78,7 +78,22 @@ printer = get_logger(__name__, log_level="DEBUG")
 WANDB_PROJECT = "MeTRIC"
 WANDB_ENTITY = "sparse_representation_learning"
 
-_ARKITSCENES_RESOLUTIONS = (
+# Preprocessed datasets on the ISAAC project filesystem. Kept as one constant
+# so a mixture entry is a dataset name rather than a repeated absolute path.
+_DATA_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/processed")
+
+# ARKitScenes is NOT under _DATA_ROOT: metrics_data/processed is owned by hqi
+# with mode drwxr-sr-x, so this uid cannot create directories in it (the
+# preprocess job failed with EACCES doing exactly that). Its two trees are
+# written to a sibling root instead, via METRICS_PROCESSED_ROOT. Fold this back
+# into _DATA_ROOT once processed/ is group-writable -- both are on the same
+# Lustre mount, so the move is metadata-only.
+_ARKIT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd")
+
+# The training aspect-ratio list (config/train.yaml verbatim). Shared by every
+# dataset in a mixture -- CatDataset requires agreement -- and not specific to
+# any one of them despite where it was first introduced.
+_TRAIN_RESOLUTIONS = (
     (518, 392),
     (518, 336),
     (518, 294),
@@ -133,29 +148,62 @@ class FinetuneDepthCfg:
     # every tuple describes dataset i and lengths are validated up front. It is
     # the single source of truth for num_views/resolution (shared across the
     # mixture); build with dataset.build_all() and concatenate -- no eval.
-    # The default reproduces the original recipe's ARKitScenes slice:
-    # 4500 @ lowres + 2250 @ highres (the loaders partition the scenes).
+    # Default mixture: the three datasets preprocessed on the cluster today --
+    # ScanNet++ (mesh-rendered depth), TartanAir (synthetic, outdoor, sky) and
+    # ScanNet (real sensor). The previous default pointed at ARKitScenes under
+    # ../data/train/, which does not exist here; recover it per-run with
+    #   --train-dataset.root <lowres> <highres>
+    #   --train-dataset.dataset arkitscenes_lowres arkitscenes_highres
+    #   --train-dataset.stride-range 1 8 1 8 --train-dataset.epoch-size 4500 2250
+    #   --train-dataset.highres-root <highres> None
+    #
+    # Each stride_range is that loader's own default, preserved from the DUSt3R
+    # max_interval it replaced: ScanNet++ 3 (its frames are already a decimated
+    # selection of the capture), TartanAir 20 (rendered at a constant high rate,
+    # so adjacent frames are near-duplicates), ScanNet 8, ARKitScenes 8.
+    #
+    # epoch_size is the `N @` weight, and the slices are per DOMAIN rather than
+    # per directory: 1125 each to ScanNet++, TartanAir and ScanNet, and 1125 to
+    # ARKitScenes split 750/375 between its lowres and highres variants (the
+    # DUSt3R recipe's 2:1). Giving the two ARKitScenes directories a full share
+    # each would hand one sensor 2/5 of the mixture for being preprocessed
+    # twice. Total stays 4,500 samples/epoch, so the step budget the schedule
+    # is sized against (15 epochs = 67,500 steps) is unchanged by this addition.
+    #
+    # highres_root is passed EXPLICITLY for the lowres entry and must stay that
+    # way. The lowres loader subtracts the highres scene list from its own so
+    # the two variants partition the scenes; left at None it falls back to the
+    # DUSt3R sibling convention (ROOT + "_highres") and, per arkitscenes.py,
+    # "silently skipped when absent" -- a wrong path would not raise, it would
+    # quietly leave the highres scenes in BOTH datasets. Given these trees sit
+    # under a non-standard root, that failure is a real possibility.
     train_dataset: MultiDatasetConfig = field(
         default_factory=lambda: MultiDatasetConfig(
             root=(
-                Path("../data/train/processed_arkitscenes/"),
-                Path("../data/train/processed_arkitscenes_highres/"),
+                _DATA_ROOT / "processed_scannetpp",
+                _DATA_ROOT / "processed_tartanair",
+                _DATA_ROOT / "processed_scannet",
+                _ARKIT_ROOT / "processed_arkitscenes",
+                _ARKIT_ROOT / "processed_arkitscenes_highres",
             ),
             dataset=(
+                DatasetName.SCANNETPP,
+                DatasetName.TARTANAIR,
+                DatasetName.SCANNET,
                 DatasetName.ARKITSCENES_LOWRES,
                 DatasetName.ARKITSCENES_HIGHRES,
             ),
-            stride_range=((1, 8), (1, 8)),
-            epoch_size=(4500, 2250),
-            # the lowres loader excludes the highres tree's scenes; pass the
-            # real root explicitly so the partition cannot silently break if
-            # the roots stop following the <x>/<x>_highres naming convention
+            stride_range=((1, 3), (1, 20), (1, 8), (1, 8), (1, 8)),
+            epoch_size=(1125, 1125, 1125, 750, 375),
             highres_root=(
-                Path("../data/train/processed_arkitscenes_highres/"),
+                None,
+                None,
+                None,
+                _ARKIT_ROOT / "processed_arkitscenes_highres",
                 None,
             ),
             num_views=10,
-            resolution=_ARKITSCENES_RESOLUTIONS,
+            resolution=_TRAIN_RESOLUTIONS,
             split=Split.TRAIN,
             aug_crop=16,
             transform=TransformName.SEQ_COLOR_JITTER,
@@ -174,7 +222,7 @@ class FinetuneDepthCfg:
     # (the hammer sweep passes --val-dataset.* explicitly).
     val_dataset: MultiDatasetConfig = field(
         default_factory=lambda: MultiDatasetConfig(
-            root=(Path("/gpfs/data/jtompki1/cli277/metric/processed_scannet"),),
+            root=(_DATA_ROOT / "processed_scannet",),
             dataset=(DatasetName.SCANNET,),
             # TEST split must be (1, 1): consecutive frames, enforced by
             # DatasetConfig.validate() and the dataset constructors
@@ -730,6 +778,54 @@ def _prepare_batch(batch: list[dict], mcfg: MetricCfg) -> None:
     )
 
 
+def sparse_depth_stats(batch: list[dict], mask_ratio: float) -> dict | None:
+    """Achieved sparsity of the conditioning input for one batch.
+
+    ``mask_ratio`` is applied to the PATCH GRID, but a revealed pixel also has
+    to be GT-valid (simulate_sparse_depth intersects the two), so the pixels
+    actually measured are the intersection and the achieved ratio is always
+    >= the one requested. The excess is whatever share of the frame had no
+    depth to begin with, which is dataset-dependent -- sky on TartanAir,
+    sensor dropout on ScanNet -- so realized sparsity is a distribution, not
+    the number configured. Logging it means a run records the sparsity it
+    actually trained on.
+
+    Density is reduced per FRAME so the worst frame survives into
+    ``ratio_max``; averaging over the batch first would hide exactly the tail
+    that matters. Returns None when no view carries a sparse mask.
+
+    ``ratio_max`` IS NOT COMPARABLE ACROSS BATCH SIZES. It is a max over
+    batch_size * num_views frames, and a max over more draws is stochastically
+    larger: on TartanAir its expectation climbs 97.9% -> 99.3% going from 10
+    to 160 frames per batch on identical data, which is wider than the real
+    spread between datasets. Read it within a fixed batch size only; for a
+    tail figure that survives a batch-size or dataset-mix change, use
+    ``starved_frac`` (an indicator mean, unbiased at any n).
+    """
+    per_frame = []
+    for view in batch:
+        mask = view.get("sparse_depth_mask")
+        if mask is None:
+            continue
+        per_frame.append(mask.to(dtype=torch.float32).flatten(1).mean(dim=1))
+    if not per_frame:
+        return None
+    density = torch.cat(per_frame)
+    ratio = 1.0 - density
+    # guard mask_ratio == 1.0 (nothing requested visible) so the ratio of
+    # achieved to requested density stays finite
+    requested_density = max(1.0 - mask_ratio, 1e-9)
+    rel = density / requested_density
+    return {
+        "sparse_ratio": float(ratio.mean()),
+        "sparse_ratio_max": float(ratio.max()),
+        "sparse_density_rel": float(rel.mean()),
+        # same definition as the val accumulator's, so the two are readable
+        # against each other
+        "sparse_starved_frac": float((rel < 0.5).to(dtype=torch.float32).mean()),
+    }
+
+
 def _check_finite_loss(
     loss_value: float, loss_details: dict, accelerator: Accelerator
 ) -> None:
@@ -774,6 +870,7 @@ def train_loop(
     ):
         with accelerator.accumulate(model):
             _prepare_batch(batch, mcfg)
+            sparse_stats = sparse_depth_stats(batch, mcfg.depth_cond.sim_mask_ratio)
 
             epoch_f = epoch + data_iter_step / len(data_loader)
             if data_iter_step % accum_iter == 0:
@@ -820,6 +917,8 @@ def train_loop(
             metric_logger.update(lr=lr)
             metric_logger.update(step=step)
             metric_logger.update(loss=loss_value, **loss_details)
+            if sparse_stats is not None:
+                metric_logger.update(**sparse_stats)
 
             if (data_iter_step + 1) % accum_iter == 0 and (
                 (data_iter_step + 1) % (accum_iter * args.print_freq)
@@ -840,6 +939,30 @@ def train_loop(
                     if isinstance(val, dict):
                         continue
                     log_dict["train/" + name] = val
+                if sparse_stats is not None:
+                    # gather across ranks so the row describes the global batch;
+                    # ratio_max takes a true max rather than a mean of per-rank
+                    # maxima, which would blunt the tail it exists to report
+                    def _g(value):
+                        return accelerator.gather(
+                            torch.tensor(value, device=accelerator.device)
+                        )
+
+                    log_dict["train/sparse/ratio"] = _g(
+                        sparse_stats["sparse_ratio"]
+                    ).mean()
+                    log_dict["train/sparse/ratio_max"] = _g(
+                        sparse_stats["sparse_ratio_max"]
+                    ).max()
+                    log_dict["train/sparse/density_rel"] = _g(
+                        sparse_stats["sparse_density_rel"]
+                    ).mean()
+                    log_dict["train/sparse/starved_frac"] = _g(
+                        sparse_stats["sparse_starved_frac"]
+                    ).mean()
+                    log_dict["train/sparse/ratio_requested"] = (
+                        mcfg.depth_cond.sim_mask_ratio
+                    )
                 accelerator.log(misc.aggregate_per_view_metrics(log_dict), step=step)
 
         # mid-epoch checkpoint-last saves (ported from finetune.py): without
@@ -1139,6 +1262,47 @@ def _streaming_depth_metrics(
 # Accumulator keys are "<dataset>/<metric>", logged as
 # "<prefix>/<dataset>/<metric>_avg" per dataset and "<prefix>/all/<metric>_avg"
 # for the blend.
+def _accumulate_sparse_stats(
+    views: list[dict],
+    sums: dict[str, float],
+    counts: dict[str, int],
+    mask_ratio: float,
+) -> None:
+    """Per-dataset realized sparsity of the conditioning input, into the same
+    "<dataset>/<metric>" accumulator _reduce_metrics consumes.
+
+    Validation conditions on patch-masked depth exactly like training
+    (_prepare_batch is shared, and nothing overrides sim_mask_ratio for val),
+    so the sparsity a val number was measured at belongs next to it. The
+    achieved ratio exceeds the requested one by whatever share of the frame
+    had no GT depth, which is a property of the dataset rather than of the
+    config -- HAMMER is ~100% valid, ScanNet ~89% -- so a blended figure would
+    average away the very thing that makes the datasets differ.
+
+    Only mean-aggregatable quantities go in here: _reduce_metrics sums and
+    divides, so a max would come back as a mean of per-batch maxima. The tail
+    is carried by `sparse_starved_frac` instead -- the share of frames given
+    under half the requested density -- which is an indicator mean and so
+    reduces correctly.
+    """
+    requested_density = max(1.0 - mask_ratio, 1e-9)
+    masks = [v["sparse_depth_mask"] for v in views if "sparse_depth_mask" in v]
+    if not masks:
+        return
+    for b in range(views[0]["img"].shape[0]):
+        dataset = clip_dataset_label(views, b)
+        for mask in masks:
+            density = float(mask[b].to(dtype=torch.float32).mean())
+            rel = density / requested_density
+            for name, val in (
+                ("sparse_ratio", 1.0 - density),
+                ("sparse_density_rel", rel),
+                ("sparse_starved_frac", float(rel < 0.5)),
+            ):
+                sums[f"{dataset}/{name}"] += val
+                counts[f"{dataset}/{name}"] += 1
+
+
 def _reduce_metrics(
     sums: dict[str, float], counts: dict[str, int], accelerator: Accelerator
 ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
@@ -1384,6 +1548,9 @@ def val_loop(
                 data_loader, args.print_freq, accelerator, header
             ):
                 _prepare_batch(batch, mcfg)
+                _accumulate_sparse_stats(
+                    batch, loss_sums, loss_counts, mcfg.depth_cond.sim_mask_ratio
+                )
                 result = loss_of_one_batch(
                     batch,
                     model,
@@ -1510,6 +1677,9 @@ def streaming_eval(
                         "the batch dim of frame['img'] as extra frames"
                     )
                 _prepare_batch(batch, mcfg)
+                _accumulate_sparse_stats(
+                    batch, depth_sums, depth_counts, mcfg.depth_cond.sim_mask_ratio
+                )
                 result = loss_of_one_batch(
                     batch,
                     net,

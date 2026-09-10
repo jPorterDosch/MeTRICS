@@ -324,7 +324,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--download_dir",
-        default=os.path.expanduser("~/scratch/data/arkit_scenes"),
+        default="/lustre/isaac24/proj/UTK0516/metrics_data/arkit_scenes",
     )
 
     parser.add_argument("--download_laser_scanner_point_cloud", action="store_true")

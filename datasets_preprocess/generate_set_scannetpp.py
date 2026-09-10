@@ -16,12 +16,20 @@ Usage:
         --max_interval 150 --num_workers 8
 """
 
-import os
 import os.path as osp
 import argparse
+import sys
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+
+# same sibling-import workaround preprocess_arkitscenes.py uses: the packages
+# live under src/
+sys.path.insert(0, osp.join(osp.dirname(osp.abspath(__file__)), "..", "src"))
+from dust3r.utils.zipio import (  # noqa: E402
+    frames_root,
+    listdir as zlistdir,
+)
 
 
 def get_timestamp(img_name):
@@ -74,14 +82,25 @@ def process_scene(root, scene, max_interval):
     # Update pairs (each pair is (id1, id2, score)) with new indices.
     pairs = [(index2sorted[id1], index2sorted[id2], score) for id1, id2, score in pairs]
 
-    # Build image_collection: for each pair, verify that both image files exist.
+    # Which images actually made it to disk, enumerated ONCE.
+    #
+    # This replaces a per-pair osp.exists() pair, for two reasons. It has to
+    # work in the inode-safe layout, where the frames are members of the
+    # scene's frames.zip and there is no path for os.stat to find; frames_root
+    # resolves either layout and zipio.listdir reads both. And it has to
+    # scale: a scene has ~16k pairs, so the old code made ~32k existence
+    # checks per scene, and each one against an archive would rescan the whole
+    # central directory. One listing plus set lookups is the same answer.
+    on_disk = {
+        name[:-4]
+        for name in zlistdir(osp.join(frames_root(scene_dir), "images"))
+        if name.endswith(".jpg")
+    }
+
+    # Build image_collection: for each pair, verify that both images exist.
     image_collection = {}
     for id1, id2, score in pairs:
-        img1 = images[id1]
-        img2 = images[id2]
-        img1_path = osp.join(scene_dir, "images", img1 + ".jpg")
-        img2_path = osp.join(scene_dir, "images", img2 + ".jpg")
-        if not (osp.exists(img1_path) and osp.exists(img2_path)):
+        if images[id1] not in on_disk or images[id2] not in on_disk:
             continue
         if id1 not in image_collection:
             image_collection[id1] = []
@@ -92,13 +111,11 @@ def process_scene(root, scene, max_interval):
     #  2. Their name's first character is the same as the current image.
     video_collection = {}
     for i, image in enumerate(images):
-        img_path = osp.join(scene_dir, "images", image + ".jpg")
-        if not osp.exists(img_path):
+        if image not in on_disk:
             continue
         video_collection[i] = []
         for j in range(i + 1, len(images)):
-            next_img_path = osp.join(scene_dir, "images", images[j] + ".jpg")
-            if not osp.exists(next_img_path):
+            if images[j] not in on_disk:
                 continue
             if (
                 get_timestamp(images[j]) - get_timestamp(image) > max_interval

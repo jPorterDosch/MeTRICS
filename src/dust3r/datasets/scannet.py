@@ -1,7 +1,6 @@
 import os.path as osp
 import cv2
 import numpy as np
-import itertools
 import os
 import sys
 
@@ -9,6 +8,7 @@ sys.path.append(osp.join(osp.dirname(__file__), "..", ".."))
 from tqdm import tqdm
 from dust3r.datasets.base.base_multiview_dataset import BaseMultiViewDataset
 from dust3r.utils.image import imread_cv2
+from dust3r.utils.zipio import frames_root, np_load
 
 
 class ScanNet_Multi(BaseMultiViewDataset):
@@ -96,7 +96,10 @@ class ScanNet_Multi(BaseMultiViewDataset):
         views = []
         for v, view_idx in enumerate(image_idxs):
             scene_id = self.sceneids[view_idx]
-            scene_dir = osp.join(self.scene_root, self.scenes[scene_id])
+            # frames live either in the scene dir (extracted layout) or in its
+            # frames.zip (inode-safe layout); the metadata npz read above is
+            # unaffected (always a real file in the scene dir)
+            scene_dir = frames_root(osp.join(self.scene_root, self.scenes[scene_id]))
             rgb_dir = osp.join(scene_dir, "color")
             depth_dir = osp.join(scene_dir, "depth")
             cam_dir = osp.join(scene_dir, "cam")
@@ -112,7 +115,7 @@ class ScanNet_Multi(BaseMultiViewDataset):
             depthmap = depthmap.astype(np.float32) / 1000
             depthmap[~np.isfinite(depthmap)] = 0  # invalid
 
-            cam = np.load(osp.join(cam_dir, basename + ".npz"))
+            cam = np_load(osp.join(cam_dir, basename + ".npz"))
             camera_pose = cam["pose"]
             intrinsics = cam["intrinsics"]
             rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(

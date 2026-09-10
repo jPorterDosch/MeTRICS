@@ -17,7 +17,7 @@ def parallel_threads(
     kw_args=False,
     front_num=1,
     Pool=ThreadPool,
-    **tqdm_kw
+    **tqdm_kw,
 ):
     """tqdm but with parallel execution.
 

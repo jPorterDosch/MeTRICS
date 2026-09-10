@@ -19,6 +19,8 @@ from .types import DatasetName, Split, TransformName
 from .hammer import HAMMER_Multi
 from .hypersim import HyperSim_Multi
 from .scannet import ScanNet_Multi
+from .scannetpp import ScanNetpp_Multi
+from .tartanair import TartanAir_Multi
 
 import torch
 
@@ -29,6 +31,8 @@ __all__ = [
     "HAMMER_Multi",
     "HyperSim_Multi",
     "ScanNet_Multi",
+    "ScanNetpp_Multi",
+    "TartanAir_Multi",
     "BatchedRandomSampler",
     "CatDataset",
     "DatasetConfig",

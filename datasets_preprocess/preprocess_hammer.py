@@ -8,10 +8,19 @@ sensor) of every sequence into the layout the CUT3R/DUSt3R loaders expect
 (same shape as processed ScanNet):
 
     <output_dir>/<split>/<sequence>/
-        rgb/XXXXXX.png          # copied as-is from polarization/rgb
-        depth/XXXXXX.png        # copied as-is from polarization/_gt (uint16, mm)
-        cam/XXXXXX.npz          # {intrinsics: (3,3), pose: (4,4) cam2world} float32
-        scene_metadata.npz      # {images: sorted frame basenames}
+        frames.zip              # ONE uncompressed archive holding
+            rgb/XXXXXX.png      #   copied as-is from polarization/rgb
+            depth/XXXXXX.png    #   copied as-is from polarization/_gt (uint16, mm)
+            cam/XXXXXX.npz      #   {intrinsics: (3,3), pose: (4,4) cam2world} f32
+        scene_metadata.npz      # {images: sorted frame basenames}, a real file
+
+The archive keeps this to 3 inodes per sequence instead of ~2000; members are
+STORED, so the rgb/depth bytes stay bit-exact copies of the raw input and the
+layout is interchangeable with --extracted (loose files, the original layout).
+
+Raw per-sequence inputs are read from either layout: loose files under
+<sequence>/polarization/, or members of the <sequence>/frames.zip that
+download_hammer.py writes by default.
 
 Raw per-sequence inputs (all under <sequence>/polarization/):
     intrinsics.txt  3x3 pinhole K (single camera per sequence)
@@ -35,15 +44,26 @@ Usage:
 """
 
 import argparse
+import io
 import os
 import os.path as osp
 import re
-import shutil
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import cv2
 import numpy as np
 from tqdm import tqdm
+
+# same sibling-import workaround preprocess_arkitscenes.py uses
+sys.path.insert(0, osp.join(osp.dirname(osp.abspath(__file__)), "..", "src"))
+from dust3r.utils.zipio import (  # noqa: E402
+    SceneZipWriter,
+    exists as zexists,
+    frames_root,
+    listdir as zlistdir,
+    read_bytes,
+)
 
 TRAIN_SCENES = {f"scene{i}" for i in range(2, 12)}
 TEST_SCENES = {"scene12", "scene13", "scene14"}
@@ -73,6 +93,12 @@ def get_parser():
         default=max(1, (os.cpu_count() or 1) // 2),
         help="Number of parallel worker processes (one sequence per task).",
     )
+    parser.add_argument(
+        "--extracted",
+        action="store_true",
+        help="write loose per-frame files instead of one frames.zip per "
+        "sequence (the original layout; ~3 inodes per frame)",
+    )
     return parser
 
 
@@ -90,7 +116,7 @@ def split_of_sequence(seq):
 
 def load_intrinsics(pol_dir, seq):
     intrinsics_path = osp.join(pol_dir, "intrinsics.txt")
-    K = np.loadtxt(intrinsics_path)
+    K = np.loadtxt(io.StringIO(read_bytes(intrinsics_path).decode()))
     if K.shape != (3, 3) or not np.isfinite(K).all():
         raise ValueError(f"{seq}: bad intrinsics matrix in {intrinsics_path}:\n{K}")
     if K[0, 0] <= 0 or K[1, 1] <= 0:
@@ -111,7 +137,7 @@ def validate_intrinsics_against_image(K, W, H, seq):
 
 
 def load_pose(pose_path, seq):
-    pose = np.loadtxt(pose_path)
+    pose = np.loadtxt(io.StringIO(read_bytes(pose_path).decode()))
     if pose.shape != (4, 4) or not np.isfinite(pose).all():
         raise ValueError(f"{seq}: bad pose in {pose_path}:\n{pose}")
     R = pose[:3, :3]
@@ -125,7 +151,7 @@ def load_pose(pose_path, seq):
 
 
 def list_frames(dirpath, ext, seq):
-    basenames = sorted(f[: -len(ext)] for f in os.listdir(dirpath) if f.endswith(ext))
+    basenames = sorted(f[: -len(ext)] for f in zlistdir(dirpath) if f.endswith(ext))
     if not basenames:
         raise ValueError(f"{seq}: no *{ext} files in {dirpath}")
     expected = [f"{i:06d}" for i in range(len(basenames))]
@@ -136,13 +162,15 @@ def list_frames(dirpath, ext, seq):
     return basenames
 
 
-def process_sequence(seq, input_dir, output_dir):
-    pol_dir = osp.join(input_dir, seq, "polarization")
+def process_sequence(seq, input_dir, output_dir, as_zip=True):
+    # raw frames come from either layout: loose files under <seq>/polarization,
+    # or members of the <seq>/frames.zip that download_hammer.py writes
+    pol_dir = osp.join(frames_root(osp.join(input_dir, seq)), "polarization")
     rgb_dir = osp.join(pol_dir, "rgb")
     gt_dir = osp.join(pol_dir, "_gt")
     pose_dir = osp.join(pol_dir, "_pose")
     for d in (rgb_dir, gt_dir, pose_dir):
-        if not osp.isdir(d):
+        if not zexists(d):
             raise FileNotFoundError(f"{seq}: missing directory {d}")
 
     basenames = list_frames(rgb_dir, ".png", seq)
@@ -154,23 +182,55 @@ def process_sequence(seq, input_dir, output_dir):
     K = load_intrinsics(pol_dir, seq)
 
     seq_out = osp.join(output_dir, split_of_sequence(seq), seq)
-    out_rgb_dir = osp.join(seq_out, "rgb")
-    out_depth_dir = osp.join(seq_out, "depth")
-    out_cam_dir = osp.join(seq_out, "cam")
-    os.makedirs(out_rgb_dir, exist_ok=True)
-    os.makedirs(out_depth_dir, exist_ok=True)
-    os.makedirs(out_cam_dir, exist_ok=True)
+    os.makedirs(seq_out, exist_ok=True)
 
+    if as_zip:
+        writer = SceneZipWriter(osp.join(seq_out, "frames.zip"))
+        emit = writer.writestr
+    else:
+        writer = None
+        for sub in ("rgb", "depth", "cam"):
+            os.makedirs(osp.join(seq_out, sub), exist_ok=True)
+
+        def emit(member_name, data):
+            with open(osp.join(seq_out, member_name), "wb") as f:
+                f.write(data)
+
+    try:
+        num = _convert_frames(seq, basenames, rgb_dir, gt_dir, pose_dir, K, emit)
+    except BaseException:
+        if writer is not None:
+            writer.__exit__(RuntimeError, RuntimeError("aborted"), None)
+        raise
+    if writer is not None:
+        writer.__exit__(None, None, None)  # closes + renames .tmp -> final
+
+    # metadata stays a real file in the scene dir in both layouts, so the
+    # loader can read it without opening the archive
+    np.savez(osp.join(seq_out, "scene_metadata.npz"), images=basenames)
+    return seq, num
+
+
+def _convert_frames(seq, basenames, rgb_dir, gt_dir, pose_dir, K, emit):
+    """Validate and convert every frame, handing outputs to emit(name, bytes).
+
+    Every check the original performed is unchanged; only the sink differs
+    (zip member vs loose file). rgb and depth are passed through as raw bytes
+    rather than re-encoded, so they stay bit-exact just as the original
+    shutil.copyfile did.
+    """
     shape = None
     for basename in basenames:
         rgb_path = osp.join(rgb_dir, f"{basename}.png")
         depth_path = osp.join(gt_dir, f"{basename}.png")
         pose_path = osp.join(pose_dir, f"{basename}.txt")
 
-        rgb = cv2.imread(rgb_path, cv2.IMREAD_UNCHANGED)
+        rgb_raw = read_bytes(rgb_path)
+        depth_raw = read_bytes(depth_path)
+        rgb = cv2.imdecode(np.frombuffer(rgb_raw, np.uint8), cv2.IMREAD_UNCHANGED)
         if rgb is None or rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
             raise ValueError(f"{seq}: unreadable or non-RGB image {rgb_path}")
-        depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+        depth = cv2.imdecode(np.frombuffer(depth_raw, np.uint8), cv2.IMREAD_UNCHANGED)
         if depth is None or depth.dtype != np.uint16 or depth.ndim != 2:
             raise ValueError(f"{seq}: unreadable or non-uint16 depth {depth_path}")
         if depth.shape != rgb.shape[:2]:
@@ -199,16 +259,18 @@ def process_sequence(seq, input_dir, output_dir):
 
         pose = load_pose(pose_path, seq)
 
-        np.savez(osp.join(out_cam_dir, f"{basename}.npz"), intrinsics=K, pose=pose)
-        # copy instead of re-encoding: keeps RGB and GT depth bit-exact
-        shutil.copyfile(rgb_path, osp.join(out_rgb_dir, f"{basename}.png"))
-        shutil.copyfile(depth_path, osp.join(out_depth_dir, f"{basename}.png"))
+        cam_buf = io.BytesIO()
+        np.savez(cam_buf, intrinsics=K, pose=pose)
+        emit(f"cam/{basename}.npz", cam_buf.getvalue())
+        # pass the raw bytes through instead of re-encoding: keeps RGB and GT
+        # depth bit-exact, as the original shutil.copyfile did
+        emit(f"rgb/{basename}.png", rgb_raw)
+        emit(f"depth/{basename}.png", depth_raw)
 
-    np.savez(osp.join(seq_out, "scene_metadata.npz"), images=basenames)
-    return seq, len(basenames)
+    return len(basenames)
 
 
-def main(input_dir, output_dir, num_workers):
+def main(input_dir, output_dir, num_workers, as_zip=True):
     if not osp.isdir(input_dir):
         raise FileNotFoundError(f"HAMMER directory not found: {input_dir}")
 
@@ -234,7 +296,7 @@ def main(input_dir, output_dir, num_workers):
     num_frames = {}
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = {
-            executor.submit(process_sequence, seq, input_dir, output_dir): seq
+            executor.submit(process_sequence, seq, input_dir, output_dir, as_zip): seq
             for seq in sequences
         }
         for future in tqdm(as_completed(futures), total=len(futures), desc="Sequences"):
@@ -258,4 +320,9 @@ def main(input_dir, output_dir, num_workers):
 if __name__ == "__main__":
     parser = get_parser()
     cli_args = parser.parse_args()
-    main(cli_args.hammer_dir, cli_args.output_dir, cli_args.num_workers)
+    main(
+        cli_args.hammer_dir,
+        cli_args.output_dir,
+        cli_args.num_workers,
+        as_zip=not cli_args.extracted,
+    )

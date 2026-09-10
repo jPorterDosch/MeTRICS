@@ -1,34 +1,38 @@
 #!/bin/bash
-#SBATCH --job-name=hammer_download
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
-#SBATCH --time=24:00:00
-#SBATCH --output=logs/hammer_download_%j.out
+#SBATCH --job-name=scannetpp_finalize
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
+#SBATCH --output=logs/scannetpp_finalize_%j.out
 #SBATCH --account=isaac-utk0516
 #SBATCH --partition=campus
 #SBATCH --qos=campus
 
-# HAMMER (https://github.com/Junggy/HAMMER-dataset)
+# Stage 2 of 2 for ScanNet++: concatenate the per-scene scene_metadata.npz
+# into all_metadata.npz, then generate_set -> per-scene
+# new_scene_metadata.npz. Those two files are what
+# src/dust3r/datasets/scannetpp.py loads; the frames.zip archives written by
+# stage 1 are useless without them.
+#
+# Run AFTER every task of preprocess_scannetpp.sh has finished:
+#   sbatch datasets_preprocess/preprocess_scannetpp.sh
+#   sbatch datasets_preprocess/preprocess_scannetpp_finalize.sh
+# or chain it and let Slurm wait:
+#   jid=$(sbatch --parsable datasets_preprocess/preprocess_scannetpp.sh)
+#   sbatch --dependency=afterok:$jid \
+#       datasets_preprocess/preprocess_scannetpp_finalize.sh
 #
 # Runs either way -- the #SBATCH block above is a comment to bash and a
 # directive to Slurm:
-#   sbatch datasets_download/download_hammer.sh   # batch (needs ./logs to exist)
-#   bash   datasets_download/download_hammer.sh   # login node
+#   sbatch datasets_preprocess/preprocess_scannetpp_finalize.sh
+#   bash   datasets_preprocess/preprocess_scannetpp_finalize.sh
 #
-# Downloads only the polarization (RGB) camera subset needed for CUT3R
-# (~24 GB of the 170 GB official zip) via HTTP range requests.
-# Single-stream, so this is network-bound rather than CPU-bound.
-#
-# Resumable: members already on disk at the expected size are skipped and every
-# file is CRC32-checked, so re-running after a timeout continues safely.
-#
-# Requires outbound HTTPS to campar.in.tum.de. If the compute nodes are
-# firewalled, run it on a login node with bash.
+# Minutes, not hours: this only reads and rewrites metadata. It refuses to run
+# and lists the gaps if any scene is still missing its scene_metadata.npz,
+# rather than quietly writing an all_metadata.npz that is short some scenes --
+# which would train on a silently smaller dataset. Safe to re-run; both
+# outputs are overwritten wholesale.
 
-# -e so a failure here stops the script instead of falling through to the
-# steps after it. NOT -o pipefail: a `yes`/`printf` feeding a prompt exits 141
-# on SIGPIPE once the reader is done, and pipefail would turn that into a
-# spurious failure after a successful run.
 set -eu
 
 # Resolving this script's own directory has to survive both invocation paths.
@@ -51,7 +55,7 @@ set -eu
 # SLURM_SUBMIT_DIR is the belt to that braces: Slurm sets it to the directory
 # the job was submitted from, and every documented invocation here submits
 # from the repo root.
-_rel="datasets_download/download_hammer.sh"
+_rel="datasets_preprocess/preprocess_scannetpp_finalize.sh"
 if [ -n "${SLURM_JOB_ID:-}" ]; then
     _self="$(scontrol show job "${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}" 2>/dev/null \
              | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -n 1)"
@@ -73,7 +77,28 @@ else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 unset _rel
-source "$SCRIPT_DIR/env.sh"
+source "$SCRIPT_DIR/../datasets_download/env.sh"
 
-mkdir -p "$HAMMER_DIR"
-"$METRICS_PY" "$SCRIPT_DIR/download_hammer.py" --out "$HAMMER_DIR"
+OUT="$METRICS_PROCESSED_ROOT/processed_scannetpp"
+PAIRS="${SCANNETPP_PAIRS:-$SCANNETPP_DIR/scannetpp_pairs}"
+
+export TQDM_MININTERVAL=60
+
+cd "$METRICS_REPO"
+
+"$METRICS_PY" datasets_preprocess/preprocess_scannetpp.py \
+    --scannetpp_dir "$SCANNETPP_DIR" \
+    --precomputed_pairs "$PAIRS" \
+    --output_dir "$OUT" \
+    --finalize
+
+# Max interval 150 is the default, hardcoded here for readability -- it is the
+# frame-number gap allowed when grouping images into pseudo-video clips, and
+# DSLR frame numbers are camera shutter counts, so it is not a time in
+# seconds.
+# Outside Slurm SLURM_CPUS_PER_TASK is unset. Fall back to 8, NOT nproc: the
+# header offers a login-node run, where nproc reports the whole shared node.
+"$METRICS_PY" datasets_preprocess/generate_set_scannetpp.py \
+    --root "$OUT" \
+    --max_interval 150 \
+    --num_workers "${SLURM_CPUS_PER_TASK:-8}"

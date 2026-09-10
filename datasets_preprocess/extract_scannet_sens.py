@@ -8,10 +8,18 @@ exports for every scene, writing *in place* into each scene dir:
 
     <raw_root>/<split>/<scene>/
         <scene>.sens          # input, left untouched
-        color/{i}.jpg         # export_color_images
-        depth/{i}.png         # export_depth_images
-        pose/{i}.txt          # export_poses
-        intrinsic/intrinsic_{color,depth}.txt + extrinsic_*   # export_intrinsics
+        frames.zip            # ONE uncompressed archive holding
+            color/{i}.jpg     #   export_color_images
+            depth/{i}.png     #   export_depth_images
+            pose/{i}.txt      #   export_poses
+            intrinsic/intrinsic_{color,depth}.txt + extrinsic_*
+
+The archive is the default because the loose layout costs one inode per frame:
+ScanNet's ~2.5M frames would be ~7.5M inodes here and as many again after
+preprocessing, which overruns a normal per-user Lustre inode quota. Members are
+STORED (no compression), so readers seek straight to the bytes and the pixel
+data is identical either way -- ``--extracted`` restores the loose layout when
+inodes are not a concern.
 
 That layout is exactly what ``preprocess_scannet.py`` consumes next, so the full
 pipeline is three explicit stages, each its own script (no duplicated logic):
@@ -20,8 +28,10 @@ pipeline is three explicit stages, each its own script (no duplicated logic):
     2. python preprocess_scannet.py    --scannet_dir <raw> --output_dir <proc>
     3. python generate_set_scannet.py  --root <proc> --splits scans_train scans_test ...
 
-Resumable: a scene whose ``intrinsic/intrinsic_depth.txt`` exists and whose
-``color`` frame count matches ``depth`` is skipped. Shardable for a SLURM array
+Resumable: a scene with a complete ``frames.zip`` is skipped (the writer renames
+``.tmp`` -> final only on success, so a final-named archive is always complete);
+in ``--extracted`` mode the old check applies -- ``intrinsic/intrinsic_depth.txt``
+exists and ``color`` frame count matches ``depth``. Shardable for a SLURM array
 via ``--shard i --num-shards N`` (scenes assigned round-robin).
 
 Run with the StreamVGGT env python (needs imageio + pypng, which SensorData uses).
@@ -32,14 +42,17 @@ import os
 import os.path as osp
 import sys
 
-from scannet_sensor import SensorData
+sys.path.insert(0, osp.join(osp.dirname(osp.abspath(__file__)), "..", "src"))
+from dust3r.utils.zipio import SceneZipWriter  # noqa: E402
+
+from scannet_sensor import SensorData  # noqa: E402
 
 
 def get_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--raw-root",
-        default="/gpfs/data/jtompki1/cli277/metric/scannet",
+        default="/lustre/isaac24/proj/UTK0516/metrics_data/scannet",
         help="dir containing the split subdirs (e.g. scans_train, scans_test)",
     )
     p.add_argument(
@@ -55,11 +68,21 @@ def get_parser():
         action="store_true",
         help="list what would be done, extract nothing",
     )
+    p.add_argument(
+        "--extracted",
+        action="store_true",
+        help="write loose per-frame files instead of one frames.zip per scene "
+        "(the original layout; ~one inode per frame)",
+    )
     return p
 
 
-def already_extracted(scene_dir):
+def already_extracted(scene_dir, as_zip=True):
     """True if this scene already has a complete-looking extraction (skip it)."""
+    if as_zip:
+        # SceneZipWriter renames .tmp -> final only on clean exit, so the
+        # mere existence of the final name means the archive is complete
+        return osp.isfile(osp.join(scene_dir, "frames.zip"))
     intr = osp.join(scene_dir, "intrinsic", "intrinsic_depth.txt")
     color, depth = osp.join(scene_dir, "color"), osp.join(scene_dir, "depth")
     if not (osp.isfile(intr) and osp.isdir(color) and osp.isdir(depth)):
@@ -68,9 +91,13 @@ def already_extracted(scene_dir):
     return nc > 0 and nc == len(os.listdir(depth))
 
 
-def extract_scene(scene_dir, sens_path):
+def extract_scene(scene_dir, sens_path, as_zip=True):
     """Export color/depth/pose/intrinsic from one .sens, in place."""
     sd = SensorData(sens_path)
+    if as_zip:
+        with SceneZipWriter(osp.join(scene_dir, "frames.zip")) as writer:
+            sd.export_all_to_zip(writer)
+        return
     sd.export_color_images(osp.join(scene_dir, "color"))
     sd.export_depth_images(osp.join(scene_dir, "depth"))
     sd.export_poses(osp.join(scene_dir, "pose"))
@@ -93,15 +120,23 @@ def main():
             if osp.isdir(scene_dir) and osp.isfile(sens):
                 jobs.append((split, scene, scene_dir, sens))
 
+    # A shard id at or above the shard count selects nothing (i % n < n
+    # always), which would silently extract zero scenes and exit 0.
+    if not 0 <= args.shard < args.num_shards:
+        raise SystemExit(
+            f"--shard {args.shard} is out of range for --num-shards "
+            f"{args.num_shards}; shard must be in [0, {args.num_shards})"
+        )
     jobs = [j for i, j in enumerate(jobs) if i % args.num_shards == args.shard]
     print(
         f"[shard {args.shard}/{args.num_shards}] {len(jobs)} scenes assigned",
         flush=True,
     )
 
+    as_zip = not args.extracted
     done = skipped = failed = 0
     for split, scene, scene_dir, sens in jobs:
-        if already_extracted(scene_dir):
+        if already_extracted(scene_dir, as_zip):
             skipped += 1
             continue
         if args.dry_run:
@@ -109,7 +144,7 @@ def main():
             continue
         try:
             print(f"[{done + failed + 1}] extract {split}/{scene}", flush=True)
-            extract_scene(scene_dir, sens)
+            extract_scene(scene_dir, sens, as_zip)
             done += 1
         except Exception as e:  # one bad .sens shouldn't kill the shard
             failed += 1
@@ -119,7 +154,14 @@ def main():
         f"[shard {args.shard}] extracted={done} skipped={skipped} failed={failed}",
         flush=True,
     )
+    # Per-scene failures are caught above so one bad .sens cannot cost the
+    # shard its remaining scenes -- but the TASK still has to fail, or Slurm
+    # reports success for an array element that produced nothing. Nothing runs
+    # verify_scannet.py at this stage, so an exit status of 0 here is the only
+    # signal there is, and the gap would otherwise surface much later as a
+    # scene with no frames.zip during preprocessing.
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -13,10 +13,15 @@ Usage:
 
 import os
 import os.path as osp
+import sys
 import argparse
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+
+# same sibling-import workaround preprocess_arkitscenes.py uses
+sys.path.insert(0, osp.join(osp.dirname(osp.abspath(__file__)), "..", "src"))
+from dust3r.utils.zipio import frames_root, listdir as zlistdir  # noqa: E402
 
 
 def get_timestamp(img_name):
@@ -45,14 +50,17 @@ def process_scene(root, split, scene, max_interval):
         max_interval (int): Maximum allowed difference in timestamps for grouping images.
     """
     scene_dir = osp.join(root, split, scene)
-    color_dir = osp.join(scene_dir, "color")
+    # frames live either in the scene dir (extracted layout) or in its
+    # frames.zip (inode-safe layout); the npz written below is always a real
+    # file in the scene dir, which is where the loaders look for it
+    color_dir = osp.join(frames_root(scene_dir), "color")
     # depth_dir and camera_dir are defined in case you need them in future modifications.
     # depth_dir = osp.join(scene_dir, 'depth')
     # camera_dir = osp.join(scene_dir, 'cam')
 
     # Get all image basenames from the color folder (without file extension)
     basenames = sorted(
-        [f.split(".")[0] for f in os.listdir(color_dir) if f.endswith(".jpg")],
+        [f.split(".")[0] for f in zlistdir(color_dir) if f.endswith(".jpg")],
         key=lambda x: get_timestamp(x),
     )
 

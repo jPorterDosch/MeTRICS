@@ -25,6 +25,10 @@ class DatasetName(str, enum.Enum):
     ARKITSCENES_LOWRES = "arkitscenes_lowres"
     ARKITSCENES_HIGHRES = "arkitscenes_highres"
     SCANNET = "scannet"
+    # ScanNet++ and TartanAir are preprocessed train-only (no test partition);
+    # their loaders reject Split.TEST rather than hand back training frames.
+    SCANNETPP = "scannetpp"
+    TARTANAIR = "tartanair"
     HYPERSIM = "hypersim"
 
 

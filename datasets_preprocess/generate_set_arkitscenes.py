@@ -10,7 +10,6 @@ Usage:
     python generate_set_arkitscenes.py --root /path/to/data --splits Training Test --max_interval 5.0 --num_workers 8
 """
 
-import os
 import os.path as osp
 import argparse
 import numpy as np

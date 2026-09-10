@@ -1,34 +1,36 @@
 #!/bin/bash
-#SBATCH --job-name=hammer_download
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
-#SBATCH --time=24:00:00
-#SBATCH --output=logs/hammer_download_%j.out
+#SBATCH --job-name=hammer_preprocess
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=24G
+#SBATCH --time=04:00:00
+#SBATCH --output=logs/hammer_preprocess_%j.out
 #SBATCH --account=isaac-utk0516
 #SBATCH --partition=campus
 #SBATCH --qos=campus
 
-# HAMMER (https://github.com/Junggy/HAMMER-dataset)
+# HAMMER raw sequences -> processed train/ + test/ tree with per-sequence
+# frames.zip and scene_metadata.npz (what src/streamvggt/datasets/hammer.py
+# loads). CPU only, one worker process per sequence.
 #
 # Runs either way -- the #SBATCH block above is a comment to bash and a
 # directive to Slurm:
-#   sbatch datasets_download/download_hammer.sh   # batch (needs ./logs to exist)
-#   bash   datasets_download/download_hammer.sh   # login node
+#   sbatch datasets_preprocess/preprocess_hammer.sh   # batch (needs ./logs)
+#   bash   datasets_preprocess/preprocess_hammer.sh   # login node
 #
-# Downloads only the polarization (RGB) camera subset needed for CUT3R
-# (~24 GB of the 170 GB official zip) via HTTP range requests.
-# Single-stream, so this is network-bound rather than CPU-bound.
+# There is no generate_set stage for HAMMER: preprocess_hammer.py writes the
+# scene_metadata.npz the loader reads, so this one script is the whole
+# pipeline. Output is ~22 GB (rgb/depth bytes are copied verbatim out of the
+# raw frames.zip, so the total tracks the raw size).
 #
-# Resumable: members already on disk at the expected size are skipped and every
-# file is CRC32-checked, so re-running after a timeout continues safely.
+# Quick: measured 18 s for one sequence (scene10_traj1_1, 305 frames), so 64
+# sequences over 16 workers is a few minutes. The 4 h wall is slack, not need.
 #
-# Requires outbound HTTPS to campar.in.tum.de. If the compute nodes are
-# firewalled, run it on a login node with bash.
+# Re-running after a failure redoes every sequence from scratch -- there is no
+# per-sequence skip -- but it overwrites cleanly, so resubmission is safe.
+# preprocess_hammer.py fails fast: any missing frame, count mismatch,
+# non-contiguous numbering, or non-rigid pose aborts the whole run rather than
+# quietly dropping a sequence.
 
-# -e so a failure here stops the script instead of falling through to the
-# steps after it. NOT -o pipefail: a `yes`/`printf` feeding a prompt exits 141
-# on SIGPIPE once the reader is done, and pipefail would turn that into a
-# spurious failure after a successful run.
 set -eu
 
 # Resolving this script's own directory has to survive both invocation paths.
@@ -51,7 +53,7 @@ set -eu
 # SLURM_SUBMIT_DIR is the belt to that braces: Slurm sets it to the directory
 # the job was submitted from, and every documented invocation here submits
 # from the repo root.
-_rel="datasets_download/download_hammer.sh"
+_rel="datasets_preprocess/preprocess_hammer.sh"
 if [ -n "${SLURM_JOB_ID:-}" ]; then
     _self="$(scontrol show job "${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}" 2>/dev/null \
              | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -n 1)"
@@ -73,7 +75,19 @@ else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 unset _rel
-source "$SCRIPT_DIR/env.sh"
+source "$SCRIPT_DIR/../datasets_download/env.sh"
 
-mkdir -p "$HAMMER_DIR"
-"$METRICS_PY" "$SCRIPT_DIR/download_hammer.py" --out "$HAMMER_DIR"
+OUT="$METRICS_PROCESSED_ROOT/processed_hammer"
+
+# keep tqdm from flooding the log (a bar per sequence across 16 workers);
+# honored by tqdm >= 4.66, harmless otherwise
+export TQDM_MININTERVAL=60
+
+cd "$METRICS_REPO"
+
+# Outside Slurm SLURM_CPUS_PER_TASK is unset. Fall back to 8, NOT nproc: the
+# header offers a login-node run, where nproc reports the whole shared node.
+"$METRICS_PY" datasets_preprocess/preprocess_hammer.py \
+    --hammer_dir "$HAMMER_DIR" \
+    --output_dir "$OUT" \
+    --num_workers "${SLURM_CPUS_PER_TASK:-8}"
