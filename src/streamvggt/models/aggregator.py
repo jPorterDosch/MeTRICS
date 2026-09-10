@@ -266,11 +266,18 @@ class Aggregator(nn.Module):
             patch_tokens = patch_tokens + injected_patch_feats.reshape(B * S, P, C)
 
         if use_cache:
+            # slice_expand_and_flatten flattens (B, S, X, C) frame-axis-fastest,
+            # so the CURRENT frame sits at the end of each batch row. Slicing the
+            # flat tensor with [-1:] keeps only batch element B-1 -- correct at
+            # B=1, a shape error the moment B>1. Unflatten first, then take the
+            # last frame of every row. The frame-0 vs later-frame token choice
+            # still rides on the traced S_true, which is what keeps one exported
+            # graph legal for both.
             camera_token_full = slice_expand_and_flatten(self.camera_token, B, S_true)
-            camera_token = camera_token_full[-1:, :, :]
-            
+            camera_token = camera_token_full.reshape(B, -1, *camera_token_full.shape[1:])[:, -1]
+
             register_token_full = slice_expand_and_flatten(self.register_token, B, S_true)
-            register_token = register_token_full[-1:, :, :]
+            register_token = register_token_full.reshape(B, -1, *register_token_full.shape[1:])[:, -1]
         else:
             camera_token = slice_expand_and_flatten(self.camera_token, B, S)
             register_token = slice_expand_and_flatten(self.register_token, B, S)
