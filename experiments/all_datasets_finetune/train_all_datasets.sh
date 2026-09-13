@@ -84,6 +84,19 @@ EXP_GROUP=metric_all_datasets
 # mode drwxr-sr-x, so this uid cannot mkdir in it and the preprocess job was
 # run with METRICS_PROCESSED_ROOT pointed at this sibling instead.
 ARKIT_OUT="${ARKIT_OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
+
+# Checkpoints go to LUSTRE, not $REPO/checkpoints: NFS home is capped at 50 GB
+# per user. A checkpoint is 5.0 GiB MEASURED (checkpoint-best.pth of
+# be510a2bdb9e7035 = 5,369,122,406 bytes): the fp32 params plus AdamW state for
+# only the ~72 M trainable params (LoRA + depth head + conditioner), not for all
+# 1.26 B. Only two ever exist -- checkpoint-last.pth and checkpoint-best.pth,
+# each written to a .tmp and renamed -- so ~10 GiB steady, ~15 GiB peak.
+#
+# NOTE: --save-freq does NOT change this. It controls how often
+# checkpoint-last is OVERWRITTEN, not how many files exist; lowering it buys
+# I/O, not disk.
+CKPT_DIR="${CKPT_DIR:-/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd}"
+mkdir -p "$CKPT_DIR"
 # StreamVGGT backbone weights: the official release (Zhuo & Zheng et al.,
 # arXiv 2507.11539), staged on the project filesystem 2026-09-07 and verified
 # against the model -- a raw state_dict of 1,797 fp32 tensors / 1.26 B params
@@ -94,10 +107,7 @@ ARKIT_OUT="${ARKIT_OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
 # scratch. Override with PRETRAINED=/path/to/other.pth.
 PRETRAINED=${PRETRAINED:-/lustre/isaac24/proj/UTK0516/ckpt/checkpoints.pth}
 
-# --- environment -------------------------------------------------------------
-# The pyenv 3.11.13 interpreter, not a conda env (Oscar's StreamVGGT env has no
-# counterpart here).
-export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/bin:$PATH
+export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/envs/metrics/bin:$PATH
 # pyenv 3.11.13 was built against libbz2.so.1.0 but RHEL8 ships libbz2.so.1, so
 # `import bz2` -- and therefore torchvision -- fails without this shim
 # (~/.local/lib/libbz2.so.1.0 -> /usr/lib64/libbz2.so.1). Same reason the
@@ -144,7 +154,7 @@ python finetune_depth.py \
     \
     `# --- model / checkpointing -------------------------------------------` \
     --pretrained "$PRETRAINED" \
-    --save-dir "$REPO/checkpoints" \
+    --save-dir "$CKPT_DIR" \
     \
     `# --- conditioning arm: TOKEN injection, LoRA --------------------------` \
     `# The full-corpus run uses the token arm (sparse depth residual-added`    \
@@ -154,6 +164,15 @@ python finetune_depth.py \
     `#   --depth-cond.injection HEAD --depth-cond.heads DEPTH`      \
     `#   --lora.no-enabled --train.train-heads DEPTH`                          \
     --depth-cond.injection TOKEN \
+    --depth-cond.heads DEPTH \
+    --train.train-heads DEPTH \
+    \
+    `# --- loss: log-space depth accuracy, low confidence regularizer -------` \
+    `# as in the HAMMER ladder. NOTE: this changes the experiment hash, so`   \
+    `# this script no longer reproduces metric_all_datasets/be510a2bdb9e7035` \
+    `# (the earlier run, linear depth + depth_alpha 0.1).`                    \
+    --loss.depth-log-space \
+    --loss.depth-alpha 0.02 \
     \
     `# --- train data: ScanNet++ + TartanAir + ScanNet ----------------------` \
     `# These are already the FinetuneDepthCfg defaults, but an experiment`     \
