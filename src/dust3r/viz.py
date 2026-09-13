@@ -841,7 +841,17 @@ def drawMatches_lines(
 import torch
 import os
 import time
-import viser
+
+# Optional, exactly like the trimesh import at the top of this file: viser is a
+# web-based 3D viewer used by ONE thing here -- viser.ViserServer() inside the
+# visualisation server class below -- and nothing on the training path touches
+# it. It was a bare module-level import, so a compute node without viser could
+# not `from dust3r.viz import colorize`, which is all finetune.py:26 wants, and
+# finetune_depth.py died at import before a single batch was loaded.
+try:
+    import viser
+except ImportError:
+    print("/!\\ module viser is not installed, cannot run the 3D viewer /!\\")
 
 
 def rotation_matrix_to_quaternion(R):

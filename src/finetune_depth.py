@@ -27,7 +27,7 @@ import torch.backends.cudnn as cudnn
 import wandb
 from torch.utils.data import DataLoader
 
-from streamvggt.loss import LossConfig
+from streamvggt.loss import LossConfig, Recipe
 from dust3r.inference import loss_of_one_batch  # noqa
 import dust3r.utils.path_to_croco  # noqa: F401
 import croco.utils.misc as misc  # noqa
@@ -45,6 +45,7 @@ import torch.multiprocessing
 from streamvggt.depth_cond import (
     DepthCondCfg,
     EncoderCacheCfg,
+    HeadType,
     LoRACfg,
     MetricCfg,
     MetricStreamVGGT,
@@ -1707,11 +1708,38 @@ def streaming_eval(
     )
 
 
+# Recipes whose loss reads point-head output (pts3d_in_other_view). Training one
+# with the point head frozen would silently leave that head at its pretrained
+# weights while the loss still depends on it.
+_POINT_SUPERVISED_RECIPES = (Recipe.FINETUNE_TRAIN, Recipe.DISTILL)
+
+
+def _check_trainable_heads(cfg: FinetuneDepthCfg) -> None:
+    """Refuse to train a point-supervised recipe without the point head.
+
+    train.train_heads defaults to [DEPTH] because the default depth_train loss
+    never reads the point head. finetune_test is exempt: it is the eval metric
+    (run with --epochs 0), where nothing trains."""
+    training = cfg.epochs > cfg.start_epoch
+    if (
+        training
+        and cfg.loss.recipe in _POINT_SUPERVISED_RECIPES
+        and HeadType.POINT not in cfg.train.train_heads
+    ):
+        raise ValueError(
+            f"loss.recipe={cfg.loss.recipe.value} supervises the point head, but "
+            f"train.train_heads={[h.value for h in cfg.train.train_heads]} leaves "
+            "it frozen. Pass --train.train-heads DEPTH POINT (and "
+            "--depth-cond.heads DEPTH POINT for head injection)."
+        )
+
+
 def main(cfg: FinetuneDepthCfg) -> None:
     if cfg.resume is None and cfg.start_epoch != 0:
         raise ValueError(
             "start_epoch must be 0 for a fresh run; use --resume to continue"
         )
+    _check_trainable_heads(cfg)
 
     mcfg = MetricCfg(
         depth_cond=cfg.depth_cond,

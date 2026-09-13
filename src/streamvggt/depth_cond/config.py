@@ -73,10 +73,11 @@ class DepthCondCfg:
     norm_constant_m: float = 10.0
     log_depth: bool = True
 
-    # which DPT heads receive head-injection (head arm only)
-    heads: list[HeadType] = field(
-        default_factory=lambda: [HeadType.DEPTH, HeadType.POINT]
-    )
+    # which DPT heads receive head-injection (head arm only). Depth only by
+    # default: under the default depth_train loss nothing reads the point head,
+    # so injecting into it is wasted compute. Add POINT together with
+    # train.train_heads when training a recipe that supervises points.
+    heads: list[HeadType] = field(default_factory=lambda: [HeadType.DEPTH])
 
     # conv encoder width (encoder == CONV)
     conv_channels: int = 128
@@ -203,9 +204,15 @@ class TrainCondCfg:
     # arms (the arms stay comparable because this knob is part of the hashed
     # manifest). The pretrained heads must be free to move for the output to
     # become metric; camera/track heads stay frozen (out of scope).
-    train_heads: list[HeadType] = field(
-        default_factory=lambda: [HeadType.DEPTH, HeadType.POINT]
-    )
+    #
+    # Depth only by default. The default depth_train loss reads only the depth
+    # head (depth / depth_conf), so an unfrozen point head receives no gradient
+    # and never moves: on run be510a2bdb9e7035 point_head was byte-identical to
+    # pretrained (0/62 tensors changed) while the log counted it as trainable.
+    # Recipes that DO supervise points (finetune_train, distill read
+    # pts3d_in_other_view) must add POINT explicitly -- finetune_depth.main()
+    # refuses to train them otherwise.
+    train_heads: list[HeadType] = field(default_factory=lambda: [HeadType.DEPTH])
 
     def validate(self) -> None:
         self.train_heads = [HeadType(h) for h in self.train_heads]
