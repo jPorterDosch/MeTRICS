@@ -1,5 +1,6 @@
 """CPU regressions for empirical pixel-frequency sparse-depth simulation."""
 
+import dataclasses
 import json
 import os
 import sys
@@ -36,6 +37,7 @@ from streamvggt.depth_cond.config import (  # noqa: E402
     MetricCfg,
     SparseSimMode,
     experiment_manifest,
+    freq_map_sha256,
 )
 from streamvggt.depth_cond.sparse import (  # noqa: E402
     load_freq_map,
@@ -249,6 +251,41 @@ def test_config_roundtrip() -> None:
         assert old_checkpoint_cfg.sim_freq_map_path == ""
 
 
+def test_freq_map_sha256() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "freq.npz"
+        np.savez(path, freq=np.full((4, 4), 0.4, dtype=np.float32))
+        cfg = DepthCondCfg(
+            sim_mode=SparseSimMode.PIXEL_FREQ,
+            sim_mask_ratio=0.6,
+            sim_freq_map_path=str(path),
+        )
+        cfg.validate()
+        first = cfg.sim_freq_map_sha256
+        assert first == freq_map_sha256(str(path))
+        manifest = experiment_manifest(MetricCfg(depth_cond=cfg))
+        assert manifest["depth_cond.sim_freq_map_sha256"] == first
+
+        # identical data re-saved (new zip timestamps) keeps the digest
+        np.savez(path, freq=np.full((4, 4), 0.4, dtype=np.float32))
+        DepthCondCfg(**dataclasses.asdict(cfg)).validate()
+
+        # rebuilt map at the same path: the saved digest rejects it
+        rebuilt = np.full((4, 4), 0.4, dtype=np.float32)
+        rebuilt[0, 0] = 0.5
+        np.savez(path, freq=rebuilt)
+        _assert_value_error(
+            "rebuilt", lambda: DepthCondCfg(**dataclasses.asdict(cfg)).validate()
+        )
+        fresh = DepthCondCfg(
+            sim_mode=SparseSimMode.PIXEL_FREQ,
+            sim_mask_ratio=0.6,
+            sim_freq_map_path=str(path),
+        )
+        fresh.validate()
+        assert experiment_manifest(MetricCfg(depth_cond=fresh)) != manifest
+
+
 def test_real_artifact() -> None:
     path = Path(ROOT) / "assets" / "spot" / "valid_freq_640x480.npz"
     if not path.is_file():
@@ -271,6 +308,7 @@ if __name__ == "__main__":
         test_valid_mask_and,
         test_mae_withheld_nonempty,
         test_config_roundtrip,
+        test_freq_map_sha256,
         test_real_artifact,
     ]
     for test in tests:

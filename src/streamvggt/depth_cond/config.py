@@ -14,6 +14,22 @@ import math
 import pathlib
 from dataclasses import dataclass, field
 
+import numpy as np
+
+
+def freq_map_sha256(path: str) -> str:
+    """SHA-256 over the 'freq' array's dtype, shape and bytes. Hashes the array
+    rather than the .npz file because np.savez embeds zip timestamps, so an
+    identical rebuild would otherwise get a different digest."""
+    with np.load(path) as artifact:
+        if "freq" not in artifact:
+            raise ValueError(f"freq map {path} must contain key 'freq'")
+        array = np.ascontiguousarray(artifact["freq"])
+    digest = hashlib.sha256()
+    digest.update(f"{array.dtype.str}{array.shape}".encode())
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
 
 class EncoderType(str, enum.Enum):
     IDENTITY = "identity"  # raw passthrough ("naive")
@@ -105,6 +121,10 @@ class DepthCondCfg:
     # with key 'freq', [H,W] float32 in [0,1], raw sensor orientation. Loaded and
     # density-checked in sparse.load_freq_map. Empty = unset.
     sim_freq_map_path: str = ""
+    # content digest of the map (freq_map_sha256), part of the experiment hash.
+    # Filled by validate() on a fresh run; a checkpoint's saved value is checked
+    # against the file on reload, so a rebuilt map fails loudly.
+    sim_freq_map_sha256: str = ""
 
     def validate(self) -> None:
         # coerce plain strings (CLI / YAML / tests) to enum members
@@ -146,6 +166,15 @@ class DepthCondCfg:
                 raise ValueError(
                     "--depth-cond.sim-freq-map-path does not exist: "
                     f"{self.sim_freq_map_path}"
+                )
+            digest = freq_map_sha256(self.sim_freq_map_path)
+            if not self.sim_freq_map_sha256:
+                self.sim_freq_map_sha256 = digest
+            elif self.sim_freq_map_sha256 != digest:
+                raise ValueError(
+                    f"freq map {self.sim_freq_map_path} has sha256 {digest}, but "
+                    f"the config expects {self.sim_freq_map_sha256}; the map was "
+                    "rebuilt since this run was configured"
                 )
         if self.sim_patch_size <= 0:
             raise ValueError(

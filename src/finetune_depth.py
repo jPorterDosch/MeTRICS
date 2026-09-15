@@ -291,9 +291,17 @@ _NON_IDENTITY_FIELDS = (
     "val_log_images",
 )
 
+# Nested manifest keys that do not define the experiment. The freq map is
+# identified by depth_cond.sim_freq_map_sha256; its path differs per machine
+# (Oscar vs ISAAC checkouts), so it is recorded in manifest.json but not hashed.
+_NON_IDENTITY_KEYS = ("depth_cond.sim_freq_map_path",)
+
 
 def build_manifest(cfg: FinetuneDepthCfg) -> dict:
-    return experiment_manifest(cfg, exclude=_NON_IDENTITY_FIELDS)
+    manifest = experiment_manifest(cfg, exclude=_NON_IDENTITY_FIELDS)
+    for key in _NON_IDENTITY_KEYS:
+        manifest.pop(key, None)
+    return manifest
 
 
 def _validate_resume_identity(cfg: FinetuneDepthCfg, manifest: dict) -> None:
@@ -317,7 +325,7 @@ def _validate_resume_identity(cfg: FinetuneDepthCfg, manifest: dict) -> None:
     owner = {
         key: value
         for key, value in owner.items()
-        if key not in ("experiment_hash", "experiment_id")
+        if key not in ("experiment_hash", "experiment_id", *_NON_IDENTITY_KEYS)
     }
     missing = object()
     drift = []
@@ -536,7 +544,12 @@ def run(
 
     # the manifest goes to disk AND to wandb so runs can be filtered for
     # comparison (e.g. head-vs-token pairs agreeing on every other knob)
-    record = {"experiment_hash": run_hash, "experiment_id": run_id}
+    record = {
+        "experiment_hash": run_hash,
+        "experiment_id": run_id,
+        # recorded for provenance only; excluded from the hash (_NON_IDENTITY_KEYS)
+        "depth_cond.sim_freq_map_path": args.depth_cond.sim_freq_map_path,
+    }
     if accelerator.is_main_process:
         with open(os.path.join(args.output_dir, "manifest.json"), "w") as f:
             json.dump({**manifest, **record}, f, indent=2, sort_keys=True)

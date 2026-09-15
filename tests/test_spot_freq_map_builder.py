@@ -16,7 +16,6 @@ from build_spot_freq_map import (  # noqa: E402
     RAW_H,
     RAW_W,
     compute_freq,
-    radial_autocorr,
     read_spot_depth,
     save_artifact,
 )
@@ -74,16 +73,18 @@ def test_artifact_roundtrip() -> None:
     assert loaded_meta["mean_valid"] == float(loaded.mean())
 
 
-def test_radial_autocorr_blocky_exceeds_iid() -> None:
-    rng = np.random.default_rng(7)
-    iid = rng.random((24, 128, 128)) < 0.4
-    coarse = rng.random((24, 16, 16)) < 0.4
-    blocky = np.repeat(np.repeat(coarse, 8, axis=1), 8, axis=2)
-    _, iid_profile, iid_ell = radial_autocorr(iid)
-    _, block_profile, block_ell = radial_autocorr(blocky)
-    assert np.isclose(iid_profile[0], 1.0)
-    assert np.isclose(block_profile[0], 1.0)
-    assert block_ell > iid_ell
+def test_far_depth_is_invalid() -> None:
+    depth = np.ones((RAW_H, RAW_W), dtype=np.float32)
+    depth[0, 0] = 100.0  # inclusive cutoff: still valid
+    depth[0, 1] = 100.5  # beyond the far cutoff
+    depth[0, 2] = np.nan
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "0"
+        _write_depth(path, depth)
+        freq, _ = compute_freq([path])
+    assert freq[0, 0] == 1.0
+    assert freq[0, 1] == 0.0
+    assert freq[0, 2] == 0.0
 
 
 if __name__ == "__main__":
@@ -91,7 +92,7 @@ if __name__ == "__main__":
         test_reader_roundtrip_and_wrong_header,
         test_compute_freq_exact,
         test_artifact_roundtrip,
-        test_radial_autocorr_blocky_exceeds_iid,
+        test_far_depth_is_invalid,
     ]
     for test in tests:
         test()

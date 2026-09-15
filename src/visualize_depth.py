@@ -1298,6 +1298,12 @@ def main() -> None:
                 "--prompt-density applies to --prompt sim; arkit is dense by "
                 "definition (it IS the dense end of the axis)"
             )
+        if mcfg.depth_cond.sim_mode == "pixel_freq":
+            raise SystemExit(
+                "--prompt-density is not supported for pixel_freq runs: their "
+                "density is fixed by the empirical SPOT map, and any other "
+                "density would misrepresent the run"
+            )
         if not 0.0 < args.prompt_density <= 1.0:
             raise SystemExit(
                 f"--prompt-density must be in (0, 1]; got {args.prompt_density}"
