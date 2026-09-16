@@ -11,6 +11,7 @@ import unittest
 from collections import defaultdict
 from unittest import mock
 
+import numpy as np
 import torch
 from accelerate import PartialState
 
@@ -19,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import finetune_depth as fd  # noqa: E402
 import croco.utils.misc as misc  # noqa: E402
 import train_utils  # noqa: E402
+from streamvggt.depth_cond.config import DepthCondCfg, SparseSimMode  # noqa: E402
 from streamvggt.loss.head_loss import DepthOrPmapLoss  # noqa: E402
 
 PartialState()
@@ -79,6 +81,39 @@ class TrainAreaDTests(unittest.TestCase):
                 resume=os.path.join(directory, "checkpoint-last.pth")
             )
             fd._validate_resume_identity(current, fd.build_manifest(current))
+
+    def test_freq_map_identity_is_content_not_path(self) -> None:
+        def cfg_for(path: str, **kwargs) -> fd.FinetuneDepthCfg:
+            depth_cond = DepthCondCfg(
+                sim_mode=SparseSimMode.PIXEL_FREQ,
+                sim_freq_map_path=path,
+            )
+            depth_cond.validate()
+            return fd.FinetuneDepthCfg(depth_cond=depth_cond, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            freq = np.full((4, 4), 0.4, dtype=np.float32)
+            here = os.path.join(directory, "here.npz")
+            moved = os.path.join(directory, "moved.npz")
+            np.savez(here, freq=freq)
+            np.savez(moved, freq=freq)
+            owner = cfg_for(here)
+            self.assertNotIn("depth_cond.sim_freq_map_path", fd.build_manifest(owner))
+            self.assertEqual(
+                fd.build_manifest(owner), fd.build_manifest(cfg_for(moved))
+            )
+
+            # resume from another checkout: same map contents, different path
+            self._write_manifest(directory, owner)
+            resume = os.path.join(directory, "checkpoint-last.pth")
+            current = cfg_for(moved, resume=resume)
+            fd._validate_resume_identity(current, fd.build_manifest(current))
+
+            freq[0, 0] = 0.5
+            np.savez(moved, freq=freq)
+            rebuilt = cfg_for(moved, resume=resume)
+            with self.assertRaisesRegex(ValueError, "sim_freq_map_sha256"):
+                fd._validate_resume_identity(rebuilt, fd.build_manifest(rebuilt))
 
     def test_resume_requires_parseable_complete_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
