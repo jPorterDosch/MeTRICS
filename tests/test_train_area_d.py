@@ -86,7 +86,6 @@ class TrainAreaDTests(unittest.TestCase):
         def cfg_for(path: str, **kwargs) -> fd.FinetuneDepthCfg:
             depth_cond = DepthCondCfg(
                 sim_mode=SparseSimMode.PIXEL_FREQ,
-                sim_mask_ratio=0.6,
                 sim_freq_map_path=path,
             )
             depth_cond.validate()

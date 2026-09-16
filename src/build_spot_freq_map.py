@@ -163,7 +163,11 @@ def main() -> None:
     save_artifact(args.out, combined_freq, meta)
     make_plots(args.plots_dir, seq_freqs, seq_densities, combined_freq)
     print(f"combined mean valid fraction: {mean_valid:.6f}")
-    print(f"set --depth-cond.sim-mask-ratio {round(1 - mean_valid, 2)}")
+    print(
+        f"train with --depth-cond.sim-mode PIXEL_FREQ --depth-cond.sim-freq-map-path "
+        f"{args.out.resolve()} (mask ratio {1 - mean_valid:.6f} is derived from the "
+        "map; do not pass --depth-cond.sim-mask-ratio)"
+    )
 
 
 if __name__ == "__main__":

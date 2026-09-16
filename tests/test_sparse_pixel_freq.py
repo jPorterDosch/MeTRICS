@@ -33,10 +33,12 @@ else:
 
 
 from streamvggt.depth_cond.config import (  # noqa: E402
+    DEFAULT_SIM_MASK_RATIO,
     DepthCondCfg,
     MetricCfg,
     SparseSimMode,
     experiment_manifest,
+    freq_map_mask_ratio,
     freq_map_sha256,
 )
 from streamvggt.depth_cond.sparse import (  # noqa: E402
@@ -227,7 +229,6 @@ def test_config_roundtrip() -> None:
         np.savez(path, freq=np.full((2, 2), 0.4, dtype=np.float32))
         original = DepthCondCfg(
             sim_mode=SparseSimMode.PIXEL_FREQ,
-            sim_mask_ratio=0.6,
             sim_freq_map_path=str(path),
         )
         original.validate()
@@ -257,7 +258,6 @@ def test_freq_map_sha256() -> None:
         np.savez(path, freq=np.full((4, 4), 0.4, dtype=np.float32))
         cfg = DepthCondCfg(
             sim_mode=SparseSimMode.PIXEL_FREQ,
-            sim_mask_ratio=0.6,
             sim_freq_map_path=str(path),
         )
         cfg.validate()
@@ -279,11 +279,65 @@ def test_freq_map_sha256() -> None:
         )
         fresh = DepthCondCfg(
             sim_mode=SparseSimMode.PIXEL_FREQ,
-            sim_mask_ratio=0.6,
             sim_freq_map_path=str(path),
         )
         fresh.validate()
         assert experiment_manifest(MetricCfg(depth_cond=fresh)) != manifest
+
+
+def test_mask_ratio_is_derived_from_map() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "freq.npz"
+        np.savez(path, freq=np.full((4, 4), 0.4, dtype=np.float32))
+        derived = freq_map_mask_ratio(str(path))
+
+        cfg = DepthCondCfg(
+            sim_mode=SparseSimMode.PIXEL_FREQ, sim_freq_map_path=str(path)
+        )
+        cfg.validate()
+        assert cfg.sim_mask_ratio == derived
+
+        # a saved config re-validates: the derived value must not look "typed"
+        DepthCondCfg(**dataclasses.asdict(cfg)).validate()
+
+        # the default is NOT silently accepted as agreement with the map
+        _assert_value_error(
+            "must not be set",
+            lambda: DepthCondCfg(
+                sim_mode=SparseSimMode.PIXEL_FREQ,
+                sim_mask_ratio=DEFAULT_SIM_MASK_RATIO,
+                sim_freq_map_path=str(path),
+            ).validate(),
+        )
+        _assert_value_error(
+            "must not be set",
+            lambda: DepthCondCfg(
+                sim_mode=SparseSimMode.PIXEL_FREQ,
+                sim_mask_ratio=0.5,
+                sim_freq_map_path=str(path),
+            ).validate(),
+        )
+        # even the map's own value: on a fresh config the flag is always wrong
+        _assert_value_error(
+            "must not be set",
+            lambda: DepthCondCfg(
+                sim_mode=SparseSimMode.PIXEL_FREQ,
+                sim_mask_ratio=derived,
+                sim_freq_map_path=str(path),
+            ).validate(),
+        )
+        # a hand-edited saved config is caught too
+        edited = dataclasses.asdict(cfg)
+        edited["sim_mask_ratio"] = 0.5
+        _assert_value_error("hand-edited", lambda: DepthCondCfg(**edited).validate())
+
+    # other modes are untouched: unset still means DEFAULT_SIM_MASK_RATIO
+    random_cfg = DepthCondCfg(sim_mode=SparseSimMode.RANDOM)
+    random_cfg.validate()
+    assert random_cfg.sim_mask_ratio == DEFAULT_SIM_MASK_RATIO
+    explicit = DepthCondCfg(sim_mode=SparseSimMode.RANDOM, sim_mask_ratio=0.5)
+    explicit.validate()
+    assert explicit.sim_mask_ratio == 0.5
 
 
 def test_real_artifact() -> None:
@@ -309,6 +363,7 @@ if __name__ == "__main__":
         test_mae_withheld_nonempty,
         test_config_roundtrip,
         test_freq_map_sha256,
+        test_mask_ratio_is_derived_from_map,
         test_real_artifact,
     ]
     for test in tests:
