@@ -113,9 +113,13 @@ for i in "${!ARM_NAMES[@]}"; do
         --train-dataset.highres-root None None None \
                                      "$ARKIT_OUT/processed_arkitscenes_highres" None \
         --val-dataset.root "$DATA/processed_scannet" \
-        --val-dataset.dataset SCANNET \
-        --val-dataset.stride-range 1 1 \
-        --val-dataset.epoch-size 1000 \
+                           "$ARKIT_OUT/processed_arkitscenes" \
+                           "$ARKIT_OUT/processed_arkitscenes_highres" \
+                           "$DATA/processed_hammer" \
+        --val-dataset.dataset SCANNET ARKITSCENES_LOWRES ARKITSCENES_HIGHRES HAMMER \
+        --val-dataset.stride-range 1 1 1 1 1 1 1 1 \
+        --val-dataset.epoch-size 1000 1000 1000 1000 \
+        --val-dataset.highres-root None "$ARKIT_OUT/processed_arkitscenes_highres" None None \
         --batch-size 1 \
         --accum-iter 1 \
         --epochs 15 \
