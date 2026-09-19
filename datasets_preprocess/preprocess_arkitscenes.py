@@ -23,6 +23,32 @@ from streamvggt.datasets.utils.zipio import (  # noqa: E402
 )
 
 
+# Frame selection. ARKitScenes is captured as video -- vga_wide runs at 30 fps
+# and lowres_depth at 60 fps, over the same span -- and every vga_wide basename
+# has an exact lowres_depth twin (100% on every scene sampled), so the two
+# assets need no timestamp matching: their shared basenames ARE the stream.
+#
+# The previous selection came from DUSt3R's selected_pairs.npz, which kept
+# whichever frames its covisibility sampler liked. That left a median of 8
+# disconnected fragments per scene with a median length of 11 frames, so
+# sampling a 32-frame clip from a scene produced a clip spanning seconds-long
+# breaks in the capture. Here a scene contributes ONE contiguous run instead.
+#
+# TARGET_FPS is the rate the run is resampled to and MAX_FRAMES_PER_SCENE caps
+# its length: at 10 fps and 400 frames a scene is 40 s of continuous video and
+# costs about the same on disk as the fragmented selection it replaces (~48 MB),
+# which is what keeps the rebuild inside the Lustre quota.
+TARGET_FPS = 10.0
+MAX_FRAMES_PER_SCENE = 400
+# A run must be long enough to be worth keeping at all: 32 frames is the clip
+# length used for evaluation, so anything shorter can never be evaluated.
+MIN_RUN_FRAMES = 32
+# Continuity threshold on the RAW stream, as a multiple of its median step.
+# vga_wide timestamps alternate 0.033/0.034 s, so a pure equality test would
+# split every other frame.
+RAW_GAP_FACTOR = 1.5
+
+
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -34,6 +60,11 @@ def get_parser():
         default=os.path.expanduser(
             "~/scratch/data/dust3r_data/data_arkitscenes/arkitscenes_pairs"
         ),
+        help="DUSt3R's arkitscenes_pairs dir. Only its per-split "
+        "scene_list.json is read, for the Training/Test assignment -- keeping "
+        "it means a rebuild does not silently move scenes between splits. The "
+        "per-scene selected_pairs.npz is no longer used: frames are chosen "
+        "from the raw capture (see select_video_run).",
     )
     parser.add_argument(
         "--output_dir",
@@ -62,6 +93,63 @@ def closest(value, sorted_list):
             return value_after
         else:
             return value_before
+
+
+def frame_timestamp(basename):
+    """Capture time in seconds from a "<scene>_<seconds>.png" frame name."""
+    return float(basename.rsplit("_", 1)[-1][: -len(".png")])
+
+
+def select_video_run(rgb_dir, depth_dir, traj_timestamps):
+    """Pick one contiguous run of frames from a scene's raw assets.
+
+    A frame is usable only if it has RGB, depth and a pose: vga_wide and
+    lowres_depth share basenames exactly, and the pose comes from interpolating
+    lowres_wide.traj, which is defined only between its first and last
+    timestamp. The longest surviving run is then resampled to TARGET_FPS and
+    truncated to MAX_FRAMES_PER_SCENE.
+
+    args:
+        rgb_dir: resolved vga_wide asset root.
+        depth_dir: resolved lowres_depth asset root.
+        traj_timestamps: ascending pose timestamps from lowres_wide.traj.
+
+    returns:
+        list of frame basenames ("<scene>_<seconds>.png"), ascending in time,
+        or [] when the scene has no run of at least MIN_RUN_FRAMES.
+    """
+    shared = set(zlistdir(rgb_dir)) & set(zlistdir(depth_dir))
+    names = sorted(
+        (name for name in shared if name.endswith(".png")), key=frame_timestamp
+    )
+    if len(names) < MIN_RUN_FRAMES:
+        return []
+
+    timestamps = np.array([frame_timestamp(name) for name in names])
+    # interp1d refuses to extrapolate, so frames outside the trajectory span
+    # cannot be posed at all (~2% of a scene, at its head and tail)
+    in_range = (timestamps >= traj_timestamps[0]) & (timestamps <= traj_timestamps[-1])
+    names = [name for name, keep in zip(names, in_range) if keep]
+    timestamps = timestamps[in_range]
+    if len(names) < MIN_RUN_FRAMES:
+        return []
+
+    steps = np.diff(timestamps)
+    native_step = float(np.median(steps))
+    runs = np.split(
+        np.arange(len(names)), np.flatnonzero(steps > RAW_GAP_FACTOR * native_step) + 1
+    )
+    longest = max(runs, key=len)
+    if len(longest) < MIN_RUN_FRAMES:
+        return []
+
+    # resample by taking every stride-th frame: the run stays contiguous in
+    # time, just at a lower rate
+    stride = max(1, int(round((1.0 / TARGET_FPS) / native_step)))
+    kept = longest[::stride][:MAX_FRAMES_PER_SCENE]
+    if len(kept) < MIN_RUN_FRAMES:
+        return []
+    return [names[i] for i in kept]
 
 
 def get_up_vectors(pose_device_to_world):
@@ -131,7 +219,9 @@ def main(rootdir, pairsdir, outdir):
             else:
                 root_subdir = "Test"
             out_scene_subdir = osp.join(outsubdir, scene_subdir)
-            os.makedirs(out_scene_subdir, exist_ok=True)
+            # the scene dir is created only once the scene is known to be
+            # usable: creating it up front left 989 empty Training dirs behind
+            # for scenes the old selection rejected
 
             scene_dir = osp.join(rootdir, root_subdir, scene_subdir)
             # asset_root resolves each raw asset for both layouts: an
@@ -149,124 +239,119 @@ def main(rootdir, pairsdir, outdir):
             ):
                 continue
 
-            # STEP 2: read selected_pairs.npz
-            selected_pairs_path = osp.join(
-                pairsdir, subdir, scene_subdir, "selected_pairs.npz"
-            )
-            selected_npz = np.load(selected_pairs_path)
-            selection, pairs = selected_npz["selection"], selected_npz["pairs"]
-            selected_sky_direction_scene = str(selected_npz["sky_direction_scene"][0])
-            if len(selection) == 0 or len(pairs) == 0:
-                # not a valid scene
-                continue
-            valid_scenes.append(scene_subdir)
-
-            # STEP 3: parse the scene and export the list of valid (K, pose, rgb, depth) and convert images
+            # STEP 2: a scene already converted is valid by construction (the
+            # npz is written last, after frames.zip is renamed into place)
             scene_metadata_path = osp.join(out_scene_subdir, "scene_metadata.npz")
             if osp.isfile(scene_metadata_path):
+                valid_scenes.append(scene_subdir)
                 continue
-            else:
-                print(f"parsing {scene_subdir}")
-                # loads traj
-                timestamps, poses, quaternions, poses_cam_to_world = read_traj(
-                    traj_path
+
+            print(f"parsing {scene_subdir}")
+            # loads traj
+            timestamps, poses, quaternions, poses_cam_to_world = read_traj(traj_path)
+
+            poses = np.array(poses)
+            quaternions = np.array(quaternions, dtype=np.quaternion)
+            quaternions = quaternion.unflip_rotors(quaternions)
+            timestamps = np.array(timestamps)
+
+            # STEP 3: pick ONE contiguous run of the capture. The old selection
+            # came from DUSt3R's selected_pairs.npz, whose covisibility sampler
+            # returned scattered windows; `pairs` went unused by the streamvggt
+            # loaders, and the scenes it rejected outright (988 of them, for an
+            # empty pair list) are usable video.
+            selection = select_video_run(rgb_dir, depth_dir, timestamps)
+            if not selection:
+                continue
+            valid_scenes.append(scene_subdir)
+            os.makedirs(out_scene_subdir, exist_ok=True)
+
+            selected_images = [
+                (basename, basename.split(".png")[0].split("_")[1])
+                for basename in selection
+            ]
+            timestamps_selected = [float(frame_id) for _, frame_id in selected_images]
+
+            sky_direction_scene, trajectories, intrinsics, images = (
+                convert_scene_metadata(
+                    scene_subdir,
+                    intrinsics_dir,
+                    timestamps,
+                    quaternions,
+                    poses,
+                    poses_cam_to_world,
+                    selected_images,
+                    timestamps_selected,
                 )
+            )
+            assert isinstance(sky_direction_scene, str)
+            # every selected frame exists in both assets by construction
+            # (select_video_run intersects the two listings), so the old
+            # membership re-check is gone
 
-                poses = np.array(poses)
-                quaternions = np.array(quaternions, dtype=np.quaternion)
-                quaternions = quaternion.unflip_rotors(quaternions)
-                timestamps = np.array(timestamps)
-
-                selected_images = [
-                    (basename, basename.split(".png")[0].split("_")[1])
-                    for basename in selection
-                ]
-                timestamps_selected = [
-                    float(frame_id) for _, frame_id in selected_images
-                ]
-
-                sky_direction_scene, trajectories, intrinsics, images = (
-                    convert_scene_metadata(
-                        scene_subdir,
-                        intrinsics_dir,
-                        timestamps,
-                        quaternions,
-                        poses,
-                        poses_cam_to_world,
-                        selected_images,
-                        timestamps_selected,
+            # all converted frames go into ONE uncompressed zip per scene
+            # (inode-safe layout); the write is atomic (.tmp -> rename)
+            # and the npz below is saved only after the zip completes, so
+            # the skip-on-npz check above implies a complete frames.zip
+            with SceneZipWriter(osp.join(out_scene_subdir, "frames.zip")) as writer:
+                for basename in images:
+                    img = Image.open(
+                        io.BytesIO(read_bytes(osp.join(rgb_dir, basename)))
                     )
-                )
-                assert selected_sky_direction_scene == sky_direction_scene
+                    depth = cv2.imdecode(
+                        np.frombuffer(
+                            read_bytes(osp.join(depth_dir, basename)), np.uint8
+                        ),
+                        cv2.IMREAD_UNCHANGED,
+                    )
 
-                assert isinstance(sky_direction_scene, str)
-                img_names = set(zlistdir(rgb_dir))
-                depth_names = set(zlistdir(depth_dir))
-                if not all(
-                    basename in img_names and basename in depth_names
-                    for basename in images
-                ):
-                    continue
+                    # rotate the image
+                    if sky_direction_scene == "RIGHT":
+                        try:
+                            img = img.transpose(Image.Transpose.ROTATE_90)
+                        except Exception:
+                            img = img.transpose(Image.ROTATE_90)
+                        depth = cv2.rotate(depth, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    elif sky_direction_scene == "LEFT":
+                        try:
+                            img = img.transpose(Image.Transpose.ROTATE_270)
+                        except Exception:
+                            img = img.transpose(Image.ROTATE_270)
+                        depth = cv2.rotate(depth, cv2.ROTATE_90_CLOCKWISE)
+                    elif sky_direction_scene == "DOWN":
+                        try:
+                            img = img.transpose(Image.Transpose.ROTATE_180)
+                        except Exception:
+                            img = img.transpose(Image.ROTATE_180)
+                        depth = cv2.rotate(depth, cv2.ROTATE_180)
 
-                # all converted frames go into ONE uncompressed zip per scene
-                # (inode-safe layout); the write is atomic (.tmp -> rename)
-                # and the npz below is saved only after the zip completes, so
-                # the skip-on-npz check above implies a complete frames.zip
-                with SceneZipWriter(osp.join(out_scene_subdir, "frames.zip")) as writer:
-                    for basename in images:
-                        img = Image.open(
-                            io.BytesIO(read_bytes(osp.join(rgb_dir, basename)))
-                        )
-                        depth = cv2.imdecode(
-                            np.frombuffer(
-                                read_bytes(osp.join(depth_dir, basename)), np.uint8
-                            ),
-                            cv2.IMREAD_UNCHANGED,
-                        )
+                    W, H = img.size
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG")
+                    writer.writestr(
+                        "vga_wide/" + basename.replace(".png", ".jpg"),
+                        buf.getvalue(),
+                    )
 
-                        # rotate the image
-                        if sky_direction_scene == "RIGHT":
-                            try:
-                                img = img.transpose(Image.Transpose.ROTATE_90)
-                            except Exception:
-                                img = img.transpose(Image.ROTATE_90)
-                            depth = cv2.rotate(depth, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                        elif sky_direction_scene == "LEFT":
-                            try:
-                                img = img.transpose(Image.Transpose.ROTATE_270)
-                            except Exception:
-                                img = img.transpose(Image.ROTATE_270)
-                            depth = cv2.rotate(depth, cv2.ROTATE_90_CLOCKWISE)
-                        elif sky_direction_scene == "DOWN":
-                            try:
-                                img = img.transpose(Image.Transpose.ROTATE_180)
-                            except Exception:
-                                img = img.transpose(Image.ROTATE_180)
-                            depth = cv2.rotate(depth, cv2.ROTATE_180)
+                    depth = cv2.resize(
+                        depth, (W, H), interpolation=cv2.INTER_NEAREST_EXACT
+                    )
+                    ok, enc = cv2.imencode(".png", depth)
+                    assert ok, f"png encode failed for {basename}"
+                    writer.writestr("lowres_depth/" + basename, enc.tobytes())
 
-                        W, H = img.size
-                        buf = io.BytesIO()
-                        img.save(buf, format="JPEG")
-                        writer.writestr(
-                            "vga_wide/" + basename.replace(".png", ".jpg"),
-                            buf.getvalue(),
-                        )
-
-                        depth = cv2.resize(
-                            depth, (W, H), interpolation=cv2.INTER_NEAREST_EXACT
-                        )
-                        ok, enc = cv2.imencode(".png", depth)
-                        assert ok, f"png encode failed for {basename}"
-                        writer.writestr("lowres_depth/" + basename, enc.tobytes())
-
-                # save at the end
-                np.savez(
-                    scene_metadata_path,
-                    trajectories=trajectories,
-                    intrinsics=intrinsics,
-                    images=images,
-                    pairs=pairs,
-                )
+            # save at the end. `pairs` is written empty: the covisibility pairs
+            # were DUSt3R's frame-selection input, nothing downstream reads
+            # them (generate_set_arkitscenes builds an image_collection the
+            # streamvggt loaders never touch), and they cannot be re-indexed
+            # against a selection they did not produce.
+            np.savez(
+                scene_metadata_path,
+                trajectories=trajectories,
+                intrinsics=intrinsics,
+                images=images,
+                pairs=np.zeros((0, 3), dtype=np.float64),
+            )
 
         outlistfile = osp.join(outsubdir, "scene_list.json")
         # (filter with a comprehension: the upstream remove-while-iterating
