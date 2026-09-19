@@ -15,6 +15,7 @@ import cv2
 from tqdm import tqdm
 from multiprocessing import Pool
 
+sys.path.insert(0, osp.dirname(osp.abspath(__file__)))
 sys.path.insert(0, osp.join(osp.dirname(osp.abspath(__file__)), "..", "src"))
 from streamvggt.datasets.utils.zipio import (  # noqa: E402
     SceneZipWriter,
@@ -22,6 +23,14 @@ from streamvggt.datasets.utils.zipio import (  # noqa: E402
     listdir as zlistdir,
     read_bytes,
 )
+from preprocess_arkitscenes import frame_timestamp  # noqa: E402
+
+# How far a laser-GT depth frame may sit from the RGB frame it is paired with,
+# as a fraction of the RGB frame period (0.6 -> 20 ms at 30 fps). Scales with
+# the capture rate, admits this release's uniform ~16 ms depth/RGB offset, and
+# still rejects anything that is not the nearest frame. Protocol parameter: it
+# decides which frames exist and how far depth may sit from its image.
+MATCH_WINDOW_FRAMES = 0.6
 
 
 def get_parser():
@@ -188,16 +197,58 @@ def process_scene(args):
             key=lambda x: float(x[1]),
         )
 
+        # Pair each laser-GT depth frame with the RGB frame nearest in time.
+        #
+        # This replaces a +/-1 ms name probe inherited from CUT3R, which built
+        # its candidate names without :.3f ("427.29499999999996") and so only
+        # ever matched an exact name. Depth and RGB timestamps in this release
+        # are either identical or uniformly ~16 ms apart -- one frame at 60 Hz,
+        # a capture-pipeline offset rather than jitter -- so whole scenes
+        # matched nothing: 809 of 2,233 eligible scenes produced output on the
+        # 2026-09-09 run, selected by device timing rather than by content.
+        #
+        # The window is a fraction of the RGB frame period so it scales with
+        # the capture rate: at 30 fps it admits the ~16 ms offset while still
+        # rejecting a frame that is not the nearest one. It is a protocol
+        # parameter -- it decides which frames exist and how far the depth can
+        # sit from its image -- so it is named, and the offsets actually used
+        # are reported per scene.
+        rgb_by_timestamp = {
+            frame_timestamp(name): name for name in img_files if name.endswith(".png")
+        }
+        rgb_timestamps = np.array(sorted(rgb_by_timestamp))
+        if rgb_timestamps.size < 2:
+            print(f"Skipping {scene_subdir}: {rgb_timestamps.size} RGB frames")
+            return None
+        match_window = MATCH_WINDOW_FRAMES * float(np.median(np.diff(rgb_timestamps)))
+
         selected_depths = []
         timestamps_selected = []
+        offsets = []
+        unmatched = 0
         timestamp_min = timestamps.min()
         timestamp_max = timestamps.max()
         for basename, frame_id in all_depths:
             frame_id = float(frame_id)
             if frame_id < timestamp_min or frame_id > timestamp_max:
                 continue
-            selected_depths.append((basename, frame_id))
-            timestamps_selected.append(frame_id)
+            nearest = rgb_timestamps[np.abs(rgb_timestamps - frame_id).argmin()]
+            offset = abs(nearest - frame_id)
+            if offset > match_window:
+                unmatched += 1
+                continue
+            offsets.append(offset)
+            # the pose is interpolated at the RGB timestamp, since that is the
+            # frame the depth is being attached to
+            selected_depths.append((basename, frame_id, rgb_by_timestamp[nearest]))
+            timestamps_selected.append(float(nearest))
+        if offsets:
+            print(
+                f"{scene_subdir}: matched {len(offsets)} depth frames "
+                f"(median offset {np.median(offsets) * 1e3:.1f} ms, "
+                f"max {max(offsets) * 1e3:.1f} ms), {unmatched} beyond "
+                f"{match_window * 1e3:.1f} ms"
+            )
 
         sky_direction_scene, trajectories, intrinsics, images, depths = (
             convert_scene_metadata(
@@ -271,7 +322,10 @@ def process_scene(args):
                 depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
                 ok, enc = cv2.imencode(".png", depth)
                 assert ok, f"png encode failed for {depth_path}"
-                writer.writestr("highres_depth/" + depth_path, enc.tobytes())
+                # named for the RGB frame, not the depth frame: the two differ
+                # by up to the match window, and the loader reads one basename
+                # per frame from the metadata
+                writer.writestr("highres_depth/" + image_path, enc.tobytes())
 
         # save at the end
         np.savez(
@@ -314,31 +368,15 @@ def convert_scene_metadata(
     # semantics in both layouts, and O(1) per probe instead of a stat / a
     # namelist scan
     intrinsic_names = set(zlistdir(intrinsics_dir))
-    for i, (basename, frame_id) in enumerate(selected_depths):
-        intrinsic_name = f"{scene_subdir}_{frame_id}.pincam"
-        search_interval = int(0.1 / 0.001)
-        for timestamp in range(-search_interval, search_interval + 1):
-            if intrinsic_name in intrinsic_names:
-                break
-            intrinsic_name = (
-                f"{scene_subdir}_{float(frame_id) + timestamp * 0.001:.3f}.pincam"
-            )
+    for i, (basename, frame_id, image_path) in enumerate(selected_depths):
+        # the pose and the intrinsics belong to the RGB frame, so both are
+        # looked up by ITS timestamp, not the depth frame's
+        rgb_frame_id = image_path[len(scene_subdir) + 1 : -len(".png")]
+        intrinsic_name = f"{scene_subdir}_{rgb_frame_id}.pincam"
         if intrinsic_name not in intrinsic_names:
             print(f"Skipping {intrinsic_name}")
             continue
         intrinsic_fn = osp.join(intrinsics_dir, intrinsic_name)
-
-        image_path = "{}_{}.png".format(scene_subdir, frame_id)
-        search_interval = int(0.001 / 0.001)
-        for timestamp in range(-search_interval, search_interval + 1):
-            if image_path in all_images:
-                break
-            image_path = "{}_{}.png".format(
-                scene_subdir, float(frame_id) + timestamp * 0.001
-            )
-        if image_path not in all_images:
-            print(f"Skipping {scene_subdir} {frame_id}")
-            continue
 
         w, h, fx, fy, hw, hh = np.loadtxt(
             io.BytesIO(read_bytes(intrinsic_fn))
@@ -348,7 +386,9 @@ def convert_scene_metadata(
         pose[:3, :3] = quaternion.as_rotation_matrix(interpolated_rotations[i])
         pose[:3, 3] = interpolated_positions[i]
 
-        images.append(basename)
+        # the frame is named for its RGB timestamp; both zip members use that
+        # name, so the loader keeps reading one basename per frame
+        images.append(image_path)
         depths.append(basename)
         if sky_direction_scene == "RIGHT" or sky_direction_scene == "LEFT":
             intrinsics.append([h, w, fy, fx, hh, hw])  # swapped intrinsics
