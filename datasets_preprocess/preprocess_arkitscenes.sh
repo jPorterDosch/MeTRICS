@@ -40,15 +40,21 @@
 # names -- pointing it at the highres tree would find no scene_metadata.npz
 # under a "Test" directory and silently do nothing.
 #
-# RESUMABILITY DIFFERS, which decides how a timeout is handled:
-#   * highres SKIPS a scene whose scene_metadata.npz already exists
-#     (preprocess_arkitscenes_highres.py:171), so re-running continues.
-#   * lowres has NO such check -- it reprocesses every scene from scratch on
-#     every run. A wall-clock kill costs the whole pass, which is why this
-#     asks for the full 6-day `long` QOS ceiling rather than a nominal 48 h.
-# Neither script shards, so this is one process either way; if 6 days is not
-# enough for lowres, the fix is sharding preprocess_arkitscenes.py, not a
-# longer wall (6 days is the QOS maximum -- see `sacctmgr show qos long`).
+# BOTH variants skip a scene whose scene_metadata.npz already exists, so a
+# wall-clock kill costs only the scene in flight and re-running continues. The
+# npz is written after frames.zip is renamed into place, so its presence means
+# the scene is complete.
+#
+# That skip also means a rebuild CANNOT be run over an existing tree: every
+# scene would be skipped and the pass would silently do nothing. Point
+# ARKIT_OUT_LOW / ARKIT_OUT_HIGH at a new directory instead, which also keeps
+# the current tree readable while the rebuild runs.
+#
+# Neither script shards, so this is one process either way. Measured at ~37 s
+# per scene (400 frames), the ~4500 lowres scenes take roughly 46 h, inside the
+# 6-day `long` ceiling; if that stops being true the fix is sharding
+# preprocess_arkitscenes.py, not a longer wall (6 days is the QOS maximum --
+# see `sacctmgr show qos long`).
 
 set -eu
 
@@ -107,8 +113,10 @@ esac
 # landed elsewhere.
 RAW="${ARKIT_RAW_DIR:-$ARKIT_DIR/raw}"
 PAIRS="${ARKIT_PAIRS_DIR:-$ARKIT_DIR/arkitscenes_pairs}"
-OUT_LOW="$METRICS_PROCESSED_ROOT/processed_arkitscenes"
-OUT_HIGH="$METRICS_PROCESSED_ROOT/processed_arkitscenes_highres"
+# Overridable so a rebuild can be written beside the tree in use rather than
+# into it (see RESUMABILITY above).
+OUT_LOW="${ARKIT_OUT_LOW:-$METRICS_PROCESSED_ROOT/processed_arkitscenes}"
+OUT_HIGH="${ARKIT_OUT_HIGH:-$METRICS_PROCESSED_ROOT/processed_arkitscenes_highres}"
 
 # keep tqdm from flooding the log (one bar per split, thousands of scenes);
 # honored by tqdm >= 4.66, harmless otherwise
