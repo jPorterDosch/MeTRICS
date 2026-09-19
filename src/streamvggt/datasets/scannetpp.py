@@ -12,8 +12,16 @@ from .utils.zipio import frames_root, listdir as zlistdir
 
 # preserves the original DUSt3R ScanNet++ stride cap (max_interval=3); override
 # via the constructor or the DatasetConfig CLI rather than editing this
-# constant. It is far tighter than TartanAir's because ScanNet++ frames are
-# already a decimated selection of the capture, not a full-rate video.
+# constant.
+#
+# NOTE what a stride now BUYS here. The cap was set when a scene held ~143
+# frames, every 50th of the 60 fps capture (~1.2 fps), so strides 1-3 spanned
+# 0.8-2.5 s. preprocess_scannetpp.py now keeps every registered frame (~637
+# per scene, every 10th, ~6 fps), so the same strides span 0.17-0.5 s and a
+# clip covers ~5x less camera motion than it used to. The number is unchanged
+# because it is the inherited default and the training script pins
+# stride_range to (1, 1) anyway; raising it is how to recover the old
+# parallax, and that is a training decision, not a loader one.
 DEFAULT_STRIDE_RANGE = (1, 3)
 
 # Continuity threshold for splitting a scene's iPhone run, in video frame

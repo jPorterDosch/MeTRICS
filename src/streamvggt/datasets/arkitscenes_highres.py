@@ -4,7 +4,12 @@ import os.path as osp
 import cv2
 import numpy as np
 
-from .arkitscenes import DEFAULT_STRIDE_RANGE, GAP_FACTOR, MAX_GAP_SECONDS
+from .arkitscenes import (
+    DEFAULT_STRIDE_RANGE,
+    GAP_FACTOR,
+    MAX_GAP_SECONDS,
+    frame_timestamp,
+)
 from .base.base_multiview_dataset import (
     BaseMultiViewDataset,
     EmptyDatasetError,
@@ -109,9 +114,7 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
                 # capture -- 62% of 32-frame windows in this tree span a jump
                 # of over a second -- so a scene is many short runs, and most
                 # of them are too short to fill a clip.
-                timestamps = np.array(
-                    [float(str(name).split("_")[1][: -len(".png")]) for name in imgs]
-                )
+                timestamps = np.array([frame_timestamp(name) for name in imgs])
                 sequences = segment_frame_ids_by_rate(
                     img_ids, timestamps, GAP_FACTOR, MAX_GAP_SECONDS, cut_off
                 )

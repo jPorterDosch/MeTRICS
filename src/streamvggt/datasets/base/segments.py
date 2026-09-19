@@ -79,11 +79,22 @@ def _max_gap_from_rate(
     step is itself a gap, and an unbounded factor rule would then merge every
     fragment into one run.
 
+    The ceiling therefore doubles as a minimum frame rate. When the nominal
+    period is itself above the ceiling -- a capture slower than 1/ceiling, e.g.
+    under 2 fps for ARKitScenes' 0.5 s -- the returned threshold is below every
+    step, so `split_contiguous` returns one run per frame and the scene is
+    dropped by the caller's `min_frames` filter rather than kept as one slow
+    run. That is intended (such a capture is not video at the rate the
+    temporal metrics assume) and visible: the loaders print the scene they
+    skip. 5 of 713 scenes in the current ARKitScenes high-res tree are in this
+    class.
+
     args:
         timestamps: ascending frame times in seconds.
         gap_factor: multiple of the nominal frame period still counted as
             continuous.
-        ceiling: largest threshold to return, in seconds.
+        ceiling: largest threshold to return, in seconds; equivalently the
+            slowest frame period still treated as a capture.
 
     returns:
         the threshold to pass as `max_gap`.
@@ -117,8 +128,15 @@ def split_by_rate(
     very discontinuity the split is meant to remove.
 
     So each run is re-split against its OWN rate until the runs stop changing,
-    which makes the postcondition local: within a returned run, no step exceeds
-    `gap_factor` times that run's median step (or `ceiling`, whichever binds).
+    which makes the postcondition local: within a returned run of at least 3
+    frames, no step exceeds `gap_factor` times that run's median step (or
+    `ceiling`, whichever binds).
+
+    Runs of 1 or 2 frames are exempt -- two frames give one step, whose median
+    IS that step, so re-measuring can only ever call it continuous. Their one
+    step is bounded by the threshold of the pass that produced them, which can
+    be as large as `ceiling`. They matter only where `min_frames <= 2`; every
+    loader here passes `num_views`, which is 4 or more.
 
     args:
         keys: ascending timeline positions (see `split_contiguous`).

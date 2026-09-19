@@ -83,6 +83,33 @@ def test_a_locally_dense_run_is_re_split_against_its_own_rate() -> None:
     assert len(runs) > 1
 
 
+def test_duplicated_frames_survive_into_a_run() -> None:
+    # A frame duplicated once does NOT raise: one zero step among many leaves
+    # the median alone, and a zero step is under any threshold, so the pair
+    # stays inside its run and the clip carries the same frame twice. Nothing
+    # downstream can tell -- which is why the preprocessing match is kept
+    # one-to-one at the source (preprocess_arkitscenes_highres.py) rather than
+    # relying on a check here.
+    keys = np.array([0.0, 0.1, 0.1, 0.2, 0.3])
+    runs = split_by_rate(keys, 1.5, 0.5)
+    assert [run.tolist() for run in runs] == [[0, 1, 2, 3, 4]]
+
+
+def test_a_run_of_only_duplicates_fails_loudly() -> None:
+    # when duplicates dominate, the median step IS zero and there is no rate
+    # to derive: raise rather than return 0 and hand back one run per frame
+    with pytest.raises(ValueError, match="positive"):
+        split_by_rate(np.zeros(4), 1.5, 0.5)
+
+
+def test_capture_slower_than_the_ceiling_is_dropped_not_merged() -> None:
+    # 1 s steps against a 0.5 s ceiling: below 2 fps, so every step is a gap
+    # and nothing survives a min_frames filter -- see _max_gap_from_rate
+    slow = np.arange(10) * 1.0
+    assert all(len(run) == 1 for run in split_by_rate(slow, 1.5, 0.5))
+    assert segment_frame_ids_by_rate(list(range(10)), slow, 1.5, 0.5, 4) == []
+
+
 def test_by_rate_segments_carry_global_ids_and_drop_short_runs() -> None:
     keys = np.array([0.0, 0.1, 0.2, 0.3, 9.0, 9.1])
     sequences = segment_frame_ids_by_rate(
