@@ -93,9 +93,10 @@ cd "$METRICS_REPO"
     --finalize
 
 # Max interval 150 is the default, hardcoded here for readability -- it is the
-# frame-number gap allowed when grouping images into pseudo-video clips, and
-# DSLR frame numbers are camera shutter counts, so it is not a time in
-# seconds.
+# frame-number gap allowed when grouping images into the video_collection, in
+# iPhone video frames (60 fps), not seconds. Nothing downstream reads that
+# collection: ScanNetpp_Multi builds its own runs from the frame numbers in
+# the metadata (see streamvggt/datasets/base/segments.py).
 # Outside Slurm SLURM_CPUS_PER_TASK is unset. Fall back to 8, NOT nproc: the
 # header offers a login-node run, where nproc reports the whole shared node.
 "$METRICS_PY" datasets_preprocess/generate_set_scannetpp.py \
