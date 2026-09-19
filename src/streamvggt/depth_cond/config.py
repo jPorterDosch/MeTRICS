@@ -14,6 +14,45 @@ import math
 import pathlib
 from dataclasses import dataclass, field
 
+import numpy as np
+
+
+# sim_mask_ratio when nothing sets it (sim_mode other than pixel_freq, which
+# derives its ratio from the map instead).
+DEFAULT_SIM_MASK_RATIO = 0.95
+
+# A derived sim_mask_ratio round-trips through checkpoints and manifests as a
+# float, so re-validating a saved config must accept it. A saved ratio further
+# from the map's density than this was hand-edited and is refused.
+_DERIVED_RATIO_TOL = 1e-6
+
+
+def _load_freq_array(path: str) -> "np.ndarray":
+    with np.load(path) as artifact:
+        if "freq" not in artifact:
+            raise ValueError(f"freq map {path} must contain key 'freq'")
+        return np.ascontiguousarray(artifact["freq"])
+
+
+def _freq_digest(array: "np.ndarray") -> str:
+    digest = hashlib.sha256()
+    digest.update(f"{array.dtype.str}{array.shape}".encode())
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def freq_map_sha256(path: str) -> str:
+    """SHA-256 over the 'freq' array's dtype, shape and bytes. Hashes the array
+    rather than the .npz file because np.savez embeds zip timestamps, so an
+    identical rebuild would otherwise get a different digest."""
+    return _freq_digest(_load_freq_array(path))
+
+
+def freq_map_mask_ratio(path: str) -> float:
+    """The mask ratio a pixel_freq run trains at: 1 - the map's mean validity.
+    Accumulated in float64 so the value does not drift between machines."""
+    return 1.0 - float(_load_freq_array(path).mean(dtype=np.float64))
+
 
 class EncoderType(str, enum.Enum):
     IDENTITY = "identity"  # raw passthrough ("naive")
@@ -56,6 +95,9 @@ class SparseSimMode(str, enum.Enum):
     NONE = "none"  # no masking: full dense GT depth as conditioning
     RANDOM = "random"  # MAE-style: random visible patches, resampled per frame
     TUBE_MASK = "tube_mask"  # one patch mask shared by every frame of the clip
+    PIXEL_FREQ = (
+        "pixel_freq"  # per-pixel Bernoulli from an empirical validity-frequency map
+    )
 
 
 @dataclass
@@ -95,9 +137,22 @@ class DepthCondCfg:
     token_append: bool = False
 
     # sparse-depth simulation from GT depthmaps during training (sparse.py)
-    sim_mode: SparseSimMode = SparseSimMode.RANDOM
+    sim_mode: SparseSimMode = SparseSimMode.RANDOM  # pixel_freq uses the empirical map
     sim_patch_size: int = 14
-    sim_mask_ratio: float = 0.95  # fraction of patches masked out (invisible)
+    # Fraction of patches masked out (invisible). None = unset, which validate()
+    # resolves: DEFAULT_SIM_MASK_RATIO for the random/tube modes, or the map's
+    # own density for pixel_freq. pixel_freq draws per-pixel from the map and
+    # ignores this knob entirely, so passing a value there is an error rather
+    # than a number that silently means nothing.
+    sim_mask_ratio: float | None = None
+    # empirical per-pixel validity-frequency map (sim_mode == PIXEL_FREQ): .npz
+    # with key 'freq', [H,W] float32 in [0,1], raw sensor orientation. Loaded and
+    # density-checked in sparse.load_freq_map. Empty = unset.
+    sim_freq_map_path: str = ""
+    # content digest of the map (freq_map_sha256), part of the experiment hash.
+    # Filled by validate() on a fresh run; a checkpoint's saved value is checked
+    # against the file on reload, so a rebuilt map fails loudly.
+    sim_freq_map_sha256: str = ""
 
     def validate(self) -> None:
         # coerce plain strings (CLI / YAML / tests) to enum members
@@ -125,6 +180,53 @@ class DepthCondCfg:
                 "depth_cond.token_append=True (append extra tokens) is not built; "
                 "the residual-add path is the default. Leave token_append=False."
             )
+        if self.sim_mode is SparseSimMode.PIXEL_FREQ:
+            if not self.sim_freq_map_path:
+                raise ValueError(
+                    "--depth-cond.sim-freq-map-path is required when "
+                    "--depth-cond.sim-mode=pixel_freq"
+                )
+            if not pathlib.Path(self.sim_freq_map_path).is_file():
+                raise ValueError(
+                    "--depth-cond.sim-freq-map-path does not exist: "
+                    f"{self.sim_freq_map_path}"
+                )
+            array = _load_freq_array(self.sim_freq_map_path)
+            digest = _freq_digest(array)
+            # the map IS the density: derive the ratio, never accept a typed one.
+            # A non-empty sha256 marks a config that came back from a checkpoint
+            # or manifest, where the derived ratio round-trips as a plain float;
+            # an empty one marks a fresh config, where any ratio was typed.
+            derived = 1.0 - float(array.mean(dtype=np.float64))
+            if not self.sim_freq_map_sha256:
+                if self.sim_mask_ratio is not None:
+                    raise ValueError(
+                        "--depth-cond.sim-mask-ratio must not be set when "
+                        "--depth-cond.sim-mode=pixel_freq: the density is fixed "
+                        f"by the map ({derived:.6f} for {self.sim_freq_map_path}), "
+                        "which per-pixel sampling reads directly. Got "
+                        f"{self.sim_mask_ratio}; drop the flag"
+                    )
+                self.sim_freq_map_sha256 = digest
+                self.sim_mask_ratio = derived
+            else:
+                if self.sim_freq_map_sha256 != digest:
+                    raise ValueError(
+                        f"freq map {self.sim_freq_map_path} has sha256 {digest}, "
+                        f"but the config expects {self.sim_freq_map_sha256}; the "
+                        "map was rebuilt since this run was configured"
+                    )
+                if self.sim_mask_ratio is None:
+                    self.sim_mask_ratio = derived
+                elif abs(self.sim_mask_ratio - derived) > _DERIVED_RATIO_TOL:
+                    raise ValueError(
+                        f"saved sim_mask_ratio {self.sim_mask_ratio} disagrees "
+                        f"with freq map {self.sim_freq_map_path} ({derived:.6f}) "
+                        "even though the map's contents match; the saved config "
+                        "was hand-edited"
+                    )
+        if self.sim_mask_ratio is None:
+            self.sim_mask_ratio = DEFAULT_SIM_MASK_RATIO
         if not 0.0 <= self.sim_mask_ratio < 1.0:
             raise ValueError(
                 f"sim_mask_ratio must be in [0, 1), got {self.sim_mask_ratio}"

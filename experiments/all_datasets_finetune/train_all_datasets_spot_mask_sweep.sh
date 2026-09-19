@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=all_ds_inject
+#SBATCH --job-name=all_ds_spot
 #SBATCH --account=isaac-utk0256
 #SBATCH --partition=ai-tenn
 #SBATCH --qos=ai-tenn
@@ -9,48 +9,55 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=192G
 #SBATCH --time=3-00:00:00
-#SBATCH --output=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/all_ds_inject_%j.out
-#SBATCH --error=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/all_ds_inject_%j.out
+#SBATCH --output=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/all_ds_spot_%j.out
+#SBATCH --error=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/all_ds_spot_%j.out
 
 # =============================================================================
-# Injection-site ablation over the full five-dataset mixture: the 2x2 ladder
-# from experiments/hammer_finetune/train_hammer_{head,token}inject_{headonly,lora}.sh,
-# run on train_all_datasets.sh's recipe instead of HAMMER.
+# The TOKEN half of the injection ladder, re-run under the EMPIRICAL SPOT mask
+# instead of uniform random patch masking.
 #
-#   arm  injection  trainable                      HAMMER ladder
-#   ---  ---------  -----------------------------  -------------------------
-#    0   HEAD       heads + conditioner (no LoRA)  1/4 baseline
-#    1   HEAD       + LoRA on decoder attention    2/4 bridge
-#    2   TOKEN      + LoRA on decoder attention    3/4 proposed
-#    3   TOKEN      heads + conditioner (no LoRA)  4/4 negative control
+#   arm  injection  trainable                      inject-sweep counterpart
+#   ---  ---------  -----------------------------  ------------------------
+#    0   TOKEN      + LoRA on decoder attention    arm 2 (66c8672b41ac8421)
+#    1   TOKEN      heads + conditioner (no LoRA)  arm 3 (54bbf74c1353d559)
 #
-# Contrasts: 0 vs 1 = pure LoRA effect at HEAD; 1 vs 2 = pure injection-site
-# effect (the key one); 3 vs 2 = does TOKEN need decoder plasticity.
+# Contrast: 0 vs 1 = does TOKEN still need decoder plasticity once the prompt
+# is the real sensor pattern rather than a uniform random one. The HEAD arms
+# are dropped: the inject sweep settled that question at 0.95 random sparsity
+# (TOKEN without LoRA beat HEAD with LoRA, 0.0329 vs 0.0563 val absrel), and
+# re-running them here would cost ~36 GPU-hours to re-answer it.
 #
-# ONLY injection and LoRA vary. Everything else is train_all_datasets.sh
-# verbatim -- data, stride (1,1), epoch sizes, 15 epochs, lr schedule -- with
-# the HAMMER ladder's loss: --loss.depth-log-space --loss.depth-alpha 0.02.
+# ONLY the mask changes from train_all_datasets_inject_sweep.sh -- data,
+# stride (1,1), epoch sizes, 15 epochs, lr schedule, loss, heads are verbatim.
 #
-# Heads pinned to DEPTH (--depth-cond.heads DEPTH --train.train-heads DEPTH),
-# as in the HAMMER ladder. Under depth_train the point head gets no gradient
-# anyway (be510a2bdb9e7035: point_head 0/62 tensors changed).
+# WHAT THE MASK CHANGES. The inject sweep trained at sim_mask_ratio 0.95 with
+# RANDOM patch masking: 5% of patches visible, uniform over the frame. The SPOT
+# map is both DENSER and STRUCTURED -- mean validity 0.4205, so a ~0.58 mask
+# ratio, with per-pixel validity drawn from the real sensor's hole pattern
+# (assets/spot/valid_freq_640x480.npz, 2558 frames over seqs 0 and 1). Expect
+# lower absrel across the board from the denser prompt; the comparison that
+# matters is arm 0 vs arm 1, not these numbers against the inject sweep's.
+#
+# NO --depth-cond.sim-mask-ratio FLAG. Under sim_mode=pixel_freq the density is
+# the map's, derived in DepthCondCfg.validate(); passing a ratio is a hard
+# error. The map's content sha256 is part of the experiment hash, so rebuilding
+# the .npz gives these arms new hashes rather than silently redefining them.
 #
 # The arms run one after another in this job. An arm whose run dir already
 # exists is refused by finetune_depth and the loop moves on to the next arm;
 # any other failure also moves on.
 #
-#   sbatch experiments/all_datasets_finetune/train_all_datasets_inject_sweep.sh
+#   sbatch experiments/all_datasets_finetune/train_all_datasets_spot_mask_sweep.sh
 #
-# Cost: TOKEN + LoRA took 22h49m on an H100 (linear-loss run). LoRA arms cost
-# about the same; head-only arms skip the decoder backward and should be faster.
+# Cost: the inject sweep's TOKEN arms took 23h10m (LoRA) and 20h49m (no LoRA)
+# on an H100. Masking cost is identical at any density, so budget ~44h total,
+# inside the 3-day wall clock.
 # =============================================================================
 
 set -euo pipefail
 
-ARM_NAMES=(head_headonly head_lora token_lora token_headonly)
+ARM_NAMES=(spot_token_lora spot_token_headonly)
 ARM_FLAGS=(
-    "--depth-cond.injection HEAD --lora.no-enabled"
-    "--depth-cond.injection HEAD --lora.enabled"
     "--depth-cond.injection TOKEN --lora.enabled"
     "--depth-cond.injection TOKEN --lora.no-enabled"
 )
@@ -58,10 +65,14 @@ ARM_FLAGS=(
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 DATA=/lustre/isaac24/proj/UTK0516/metrics_data/processed
 ARKIT_OUT="${ARKIT_OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
-# same exp_group as train_all_datasets.sh, so the four cells sit side by side
+# same exp_group as train_all_datasets.sh, so these sit beside the random-mask
+# cells and can be filtered apart by depth_cond.sim_mode in the manifest
 EXP_GROUP=metric_all_datasets
 CKPT_DIR="${CKPT_DIR:-/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd}"
 PRETRAINED=${PRETRAINED:-/lustre/isaac24/proj/UTK0516/ckpt/checkpoints.pth}
+# absolute: the loop runs from $REPO/src, so a relative path would resolve
+# against src/ instead of the repo root
+SPOT_FREQ_MAP="${SPOT_FREQ_MAP:-$REPO/assets/spot/valid_freq_640x480.npz}"
 mkdir -p "$CKPT_DIR" "$REPO/logs"
 
 # environment identical to train_all_datasets.sh (see its comments)
@@ -79,6 +90,13 @@ else
 fi
 
 [ -f "$PRETRAINED" ] || { echo "[fatal] missing $PRETRAINED"; exit 1; }
+# the mask is committed to the repo; a missing file means a bad checkout or a
+# hand-edited SPOT_FREQ_MAP, and finetune_depth would refuse anyway
+[ -f "$SPOT_FREQ_MAP" ] || {
+    echo "[fatal] missing SPOT frequency map: $SPOT_FREQ_MAP"
+    echo "        rebuild it with: python src/build_spot_freq_map.py --data-root <spot_data>"
+    exit 1
+}
 for d in "$DATA/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/processed_scannet" \
          "$ARKIT_OUT/processed_arkitscenes" "$ARKIT_OUT/processed_arkitscenes_highres"; do
     [ -d "$d" ] || { echo "[fatal] missing dataset root: $d"; exit 1; }
@@ -99,6 +117,8 @@ for i in "${!ARM_NAMES[@]}"; do
         ${ARM_FLAGS[$i]} \
         --depth-cond.heads DEPTH \
         --train.train-heads DEPTH \
+        --depth-cond.sim-mode PIXEL_FREQ \
+        --depth-cond.sim-freq-map-path "$SPOT_FREQ_MAP" \
         --loss.depth-log-space \
         --loss.depth-alpha 0.02 \
         --train-dataset.root "$DATA/processed_scannetpp" \
