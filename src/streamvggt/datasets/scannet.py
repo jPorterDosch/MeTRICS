@@ -6,6 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 from .base.base_multiview_dataset import BaseMultiViewDataset, EmptyDatasetError
+from .base.segments import segment_frame_ids
 from .types import Split
 from .utils.image import imread_cv2
 from .utils.zipio import frames_root, np_load
@@ -13,6 +14,12 @@ from .utils.zipio import frames_root, np_load
 # preserves the original DUSt3R ScanNet stride cap; override via the constructor
 # or the DatasetConfig CLI rather than editing this constant.
 DEFAULT_STRIDE_RANGE = (1, 30)
+
+# Largest frame-index step still treated as one continuous capture. ScanNet is
+# extracted frame by frame from the .sens stream, so steps are 1 apart for
+# 99.95% of frames; the rest are dropped frames (largest observed jump: 141
+# frames, i.e. ~4.7 s at 30 fps). A clip spanning one of those is not video.
+MAX_FRAME_GAP = 1
 
 
 class ScanNet_Multi(BaseMultiViewDataset):
@@ -65,7 +72,8 @@ class ScanNet_Multi(BaseMultiViewDataset):
         offset = 0
         scenes = []
         sceneids = []
-        scene_img_list = []
+        seq_img_list = []
+        seqids = []
         images = []
         start_img_ids = []
 
@@ -79,17 +87,35 @@ class ScanNet_Multi(BaseMultiViewDataset):
                 num_imgs = len(basenames)
                 img_ids = list(np.arange(num_imgs) + offset)
                 cut_off = self.min_views()
-                start_img_ids_ = img_ids[: num_imgs - cut_off + 1]
 
                 if num_imgs < cut_off:
                     print(f"Skipping {scene}")
                     continue
 
-                start_img_ids.extend(start_img_ids_)
+                # basenames are the zero-padded .sens frame index ("00000"),
+                # i.e. the frame's position on the 30 fps capture timeline.
+                # preprocess_scannet.py drops frames with a non-finite pose, so
+                # the indices have holes and adjacent entries are not always
+                # adjacent in time.
+                frame_idx = np.array([int(str(name)) for name in basenames])
+                sequences = segment_frame_ids(
+                    img_ids, frame_idx, MAX_FRAME_GAP, cut_off
+                )
+                if not sequences:
+                    print(f"Skipping {scene}: no run of {cut_off} consecutive frames")
+                    continue
+
+                for img_ids_seq in sequences:
+                    seq_img_list.append(img_ids_seq)
+                    start_img_ids.extend(img_ids_seq[: len(img_ids_seq) - cut_off + 1])
+                    # seqids is indexed by GLOBAL image id, so every frame of
+                    # this run points at the sequence just appended
+                    for gid in img_ids_seq:
+                        seqids.append((gid, len(seq_img_list) - 1))
+
                 sceneids.extend([j] * num_imgs)
                 images.extend(basenames)
                 scenes.append(scene)
-                scene_img_list.append(img_ids)
 
                 # offset groups
                 offset += num_imgs
@@ -103,7 +129,16 @@ class ScanNet_Multi(BaseMultiViewDataset):
         self.sceneids = sceneids
         self.images = images
         self.start_img_ids = start_img_ids
-        self.scene_img_list = scene_img_list
+        # one entry per contiguous run, NOT per scene (a scene with dropped
+        # frames yields several): indexed by seqids[start_id], never by
+        # sceneids[start_id], which stays the scene-path lookup
+        self.seq_img_list = seq_img_list
+        # dense global-id -> sequence-index lookup, matching ScanNetpp_Multi;
+        # frames in a run too short for one clip keep the -1 sentinel and are
+        # never reachable, since every start_img_id comes from a sequence list
+        self.seqids = np.full(offset, -1, dtype=np.int64)
+        for gid, seq_idx in seqids:
+            self.seqids[gid] = seq_idx
 
     def __len__(self):
         return len(self.start_img_ids)
@@ -113,7 +148,7 @@ class ScanNet_Multi(BaseMultiViewDataset):
 
     def _get_views(self, idx, resolution, rng, num_views):
         start_id = self.start_img_ids[idx]
-        all_image_ids = self.scene_img_list[self.sceneids[start_id]]
+        all_image_ids = self.seq_img_list[self.seqids[start_id]]
         pos, ordered_video = self.get_seq_from_start_id(
             num_views,
             start_id,

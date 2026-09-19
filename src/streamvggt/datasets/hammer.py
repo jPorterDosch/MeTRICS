@@ -6,6 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 from .base.base_multiview_dataset import BaseMultiViewDataset
+from .base.segments import segment_frame_ids
 from .types import Split
 from .utils.image import imread_cv2
 from .utils.zipio import frames_root, listdir as zlistdir, np_load
@@ -13,6 +14,11 @@ from .utils.zipio import frames_root, listdir as zlistdir, np_load
 # preserves the original DUSt3R HAMMER stride cap; override via the constructor
 # or the DatasetConfig CLI rather than editing this constant.
 DEFAULT_STRIDE_RANGE = (1, 20)
+
+# Largest frame-index step still treated as one continuous capture.
+# preprocess_hammer.py writes every frame of a sequence, so no HAMMER scene
+# splits today; this only guards a future preprocessing change.
+MAX_FRAME_GAP = 1
 
 
 class HAMMER_Multi(BaseMultiViewDataset):
@@ -75,7 +81,8 @@ class HAMMER_Multi(BaseMultiViewDataset):
         offset = 0
         scenes = []
         sceneids = []
-        scene_img_list = []
+        seq_img_list = []
+        seqids = []
         images = []
         start_img_ids = []
 
@@ -105,11 +112,26 @@ class HAMMER_Multi(BaseMultiViewDataset):
                 print(f"Skipping {scene}: only {num_imgs} frames < {cut_off} views")
                 continue
 
-            start_img_ids.extend(img_ids[: num_imgs - cut_off + 1])
+            # preprocess_hammer.py enforces basenames == range(n), so this is
+            # one run per sequence today; it is here so a future preprocessing
+            # change that drops frames cannot silently produce clips that jump
+            # across the hole
+            frame_idx = np.array([int(str(name)) for name in basenames])
+            sequences = segment_frame_ids(img_ids, frame_idx, MAX_FRAME_GAP, cut_off)
+            if not sequences:
+                print(f"Skipping {scene}: no run of {cut_off} consecutive frames")
+                continue
+
+            for img_ids_seq in sequences:
+                seq_img_list.append(img_ids_seq)
+                start_img_ids.extend(img_ids_seq[: len(img_ids_seq) - cut_off + 1])
+                # seqids is indexed by GLOBAL image id
+                for gid in img_ids_seq:
+                    seqids.append((gid, len(seq_img_list) - 1))
+
             sceneids.extend([j] * num_imgs)
             images.extend(basenames)
             scenes.append(scene)
-            scene_img_list.append(img_ids)
 
             offset += num_imgs
             j += 1
@@ -124,7 +146,12 @@ class HAMMER_Multi(BaseMultiViewDataset):
         self.sceneids = sceneids
         self.images = images
         self.start_img_ids = start_img_ids
-        self.scene_img_list = scene_img_list
+        # one entry per contiguous run, NOT per scene: indexed by
+        # seqids[start_id], never by sceneids[start_id] (the scene-path lookup)
+        self.seq_img_list = seq_img_list
+        self.seqids = np.full(offset, -1, dtype=np.int64)
+        for gid, seq_idx in seqids:
+            self.seqids[gid] = seq_idx
 
     def __len__(self):
         return len(self.start_img_ids)
@@ -134,7 +161,7 @@ class HAMMER_Multi(BaseMultiViewDataset):
 
     def _get_views(self, idx, resolution, rng, num_views):
         start_id = self.start_img_ids[idx]
-        all_image_ids = self.scene_img_list[self.sceneids[start_id]]
+        all_image_ids = self.seq_img_list[self.seqids[start_id]]
         # Causal-ordered sampling is centralized in get_seq_from_start_id
         # (ascending order is an invariant there; one random per-clip stride
         # drawn from self.stride_range). TODO: still to pick that range and whether to

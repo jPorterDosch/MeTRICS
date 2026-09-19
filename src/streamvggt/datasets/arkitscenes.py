@@ -9,6 +9,7 @@ from .base.base_multiview_dataset import (
     EmptyDatasetError,
     intrinsics_rows_to_K,
 )
+from .base.segments import segment_frame_ids_by_rate
 from .types import Split
 from .utils.image import imread_cv2
 from .utils.zipio import frames_root
@@ -16,6 +17,22 @@ from .utils.zipio import frames_root
 # preserves the original DUSt3R ARKitScenes stride cap; override via the
 # constructor or the DatasetConfig CLI rather than editing this constant.
 DEFAULT_STRIDE_RANGE = (1, 8)
+
+# Continuity threshold for splitting a scene into runs, on the frame timestamps
+# carried in the filenames ("<scene>_<seconds>.png").
+#
+# The capture rate is a property of the scene, not of the dataset: the current
+# processed tree sits at 10 fps (0.1 s steps) and raw vga_wide runs at 30 fps,
+# so the threshold is derived per scene from the median step rather than
+# hard-coded. GAP_FACTOR admits the jitter in ARKit timestamps (steps of
+# 0.033/0.034 s alternate) while rejecting a dropped frame.
+#
+# MAX_GAP_SECONDS is the ceiling: a scene whose frames are MOSTLY fragments has
+# a median step that is itself a gap, and a pure factor rule would then merge
+# every fragment into one run. Both are protocol parameters -- they decide
+# which clips exist -- so they are stated here rather than inferred silently.
+GAP_FACTOR = 1.5
+MAX_GAP_SECONDS = 0.5
 
 
 class ARKitScenes_Multi(BaseMultiViewDataset):
@@ -106,7 +123,8 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
         intrinsics = []
         trajectories = []
         start_img_ids = []
-        scene_img_list = []
+        seq_img_list = []
+        seqids = []
         j = 0
         for scene in self.scenes:
             scene_dir = osp.join(self.ROOT, split, scene)
@@ -123,15 +141,36 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                     continue
 
                 img_ids = list(np.arange(num_imgs) + offset)
-                start_img_ids_ = img_ids[: num_imgs - cut_off + 1]
+
+                # "<scene>_<seconds>.png" -> the frame's capture time. The
+                # processed tree keeps whichever windows the upstream frame
+                # selection happened to pick, so a scene is typically several
+                # separate runs with seconds of missing capture between them.
+                timestamps = np.array(
+                    [
+                        float(str(name).rsplit("_", 1)[-1][: -len(".png")])
+                        for name in imgs
+                    ]
+                )
+                sequences = segment_frame_ids_by_rate(
+                    img_ids, timestamps, GAP_FACTOR, MAX_GAP_SECONDS, cut_off
+                )
+                if not sequences:
+                    print(f"Skipping {scene}: no run of {cut_off} consecutive frames")
+                    continue
+
+                for img_ids_seq in sequences:
+                    seq_img_list.append(img_ids_seq)
+                    start_img_ids.extend(img_ids_seq[: len(img_ids_seq) - cut_off + 1])
+                    # seqids is indexed by GLOBAL image id
+                    for gid in img_ids_seq:
+                        seqids.append((gid, len(seq_img_list) - 1))
 
                 scenes.append(scene)
-                scene_img_list.append(img_ids)
                 sceneids.extend([j] * num_imgs)
                 images.extend(imgs)
                 intrinsics.extend(list(intrinsics_rows_to_K(intrins)))
                 trajectories.extend(list(traj))
-                start_img_ids.extend(start_img_ids_)
 
                 offset += num_imgs
                 j += 1
@@ -145,7 +184,12 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
         self.images = images
         self.intrinsics = intrinsics
         self.trajectories = trajectories
-        self.scene_img_list = scene_img_list
+        # one entry per contiguous run, NOT per scene: indexed by
+        # seqids[start_id], never by sceneids[start_id] (the scene-path lookup)
+        self.seq_img_list = seq_img_list
+        self.seqids = np.full(offset, -1, dtype=np.int64)
+        for gid, seq_idx in seqids:
+            self.seqids[gid] = seq_idx
         self.start_img_ids = start_img_ids
 
     def __len__(self):
@@ -156,7 +200,7 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
 
     def _get_views(self, idx, resolution, rng, num_views):
         start_id = self.start_img_ids[idx]
-        all_image_ids = self.scene_img_list[self.sceneids[start_id]]
+        all_image_ids = self.seq_img_list[self.seqids[start_id]]
         pos, ordered_video = self.get_seq_from_start_id(
             num_views,
             start_id,
