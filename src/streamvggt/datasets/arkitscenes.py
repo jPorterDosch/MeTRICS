@@ -35,25 +35,35 @@ DEFAULT_STRIDE_RANGE = (1, 8)
 GAP_FACTOR = 1.5
 MAX_GAP_SECONDS = 0.5
 
+# Run length that decides which ARKitScenes variant OWNS a scene. It is a fixed
+# number rather than either loader's num_views on purpose: the two variants are
+# separate DatasetConfigs with independent num_views, so keying the partition
+# on one of them would let the same capture land in BOTH datasets (high-res
+# num_views below low-res) or in NEITHER (above it), and the composition of the
+# training mixture would shift whenever a training knob moved. 32 is the clip
+# length used for evaluation.
+PARTITION_MIN_FRAMES = 32
+
 
 def frame_timestamp(name):
     """Capture time in seconds from a "<scene>_<seconds>.png" frame name."""
     return float(str(name).rsplit("_", 1)[-1][: -len(".png")])
 
 
-def highres_scenes_with_clips(highres_split_dir, min_frames):
-    """Scene ids in the high-res tree that can still yield one clip.
+def highres_scenes_with_clips(highres_split_dir, min_frames=PARTITION_MIN_FRAMES):
+    """Scene ids the high-res variant owns: those with a run of `min_frames`.
 
     The two ARKitScenes variants partition the scenes, and this loader drops
     whatever the high-res one owns. Ownership cannot be a directory listing:
     ARKitScenesHighRes_Multi samples within contiguous runs, and laser depth
     covers only a fraction of the capture, so most of its scene dirs yield no
-    run long enough for a clip -- 158 of 719 at num_views=10, and 656 at 32.
+    run long enough for a clip -- 158 of 719 at 10 frames, and 656 at 32.
     Excluding those by name put 130 (resp. 504) captures in NEITHER dataset,
     though their low-res video is perfectly usable.
 
-    So a scene is excluded only if the high-res loader can actually sample it,
-    using the same segmentation rule that loader applies.
+    So a scene is excluded only when the high-res loader can actually sample
+    it, using that loader's segmentation rule and PARTITION_MIN_FRAMES -- which
+    both loaders apply, so the split between them is the same from either side.
     """
     scenes = []
     for scene in sorted(os.listdir(highres_split_dir)):
@@ -136,9 +146,7 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                         f"ARKitScenes highres_root was given explicitly but "
                         f"{highres_split_dir} does not exist"
                     )
-                high_res_list = highres_scenes_with_clips(
-                    highres_split_dir, self.min_views()
-                )
+                high_res_list = highres_scenes_with_clips(highres_split_dir)
             else:
                 # original DUSt3R convention: sibling tree named ROOT_highres;
                 # silently skipped when absent (lowres-only setups)
@@ -147,9 +155,7 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                     highres_dir,
                 )
                 if os.path.isdir(highres_split_dir):
-                    high_res_list = highres_scenes_with_clips(
-                        highres_split_dir, self.min_views()
-                    )
+                    high_res_list = highres_scenes_with_clips(highres_split_dir)
 
             self.scenes = np.setdiff1d(self.scenes, high_res_list)
         # start-id sampling, identical to the other four loaders (ScanNet,

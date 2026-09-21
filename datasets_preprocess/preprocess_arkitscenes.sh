@@ -55,6 +55,9 @@
 # 6-day `long` ceiling; if that stops being true the fix is sharding
 # preprocess_arkitscenes.py, not a longer wall (6 days is the QOS maximum --
 # see `sacctmgr show qos long`).
+#
+# Budget ~218 GB for the rebuilt lowres Training split: 400 frames per scene at
+# ~118 KB (a vga jpg plus a uint16 depth png), 30 fps, over ~4,500 scenes.
 
 set -eu
 

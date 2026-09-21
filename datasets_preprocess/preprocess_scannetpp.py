@@ -444,7 +444,8 @@ class VideoFrameReader:
     rgb_mask.mkv per scene, against ~250 s of ray casting for the same scene.
 
     grab() skips the colour conversion and copy for frames we are not
-    keeping, which is most of them (COLMAP registers every 20th frame).
+    keeping, which is still most of them (COLMAP registers every 10th frame,
+    and every registered frame is now converted).
     """
 
     def __init__(self, path):

@@ -8,6 +8,7 @@ from .arkitscenes import (
     DEFAULT_STRIDE_RANGE,
     GAP_FACTOR,
     MAX_GAP_SECONDS,
+    PARTITION_MIN_FRAMES,
     frame_timestamp,
 )
 from .base.base_multiview_dataset import (
@@ -114,12 +115,25 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
                 # capture -- 62% of 32-frame windows in this tree span a jump
                 # of over a second -- so a scene is many short runs, and most
                 # of them are too short to fill a clip.
+                #
+                # The run length is PARTITION_MIN_FRAMES, not this dataset's
+                # num_views: ARKitScenes_Multi drops exactly the scenes this
+                # keeps, and the two configs carry independent num_views, so
+                # keying on num_views here would put a capture in both datasets
+                # or in neither the moment they disagree.
                 timestamps = np.array([frame_timestamp(name) for name in imgs])
                 sequences = segment_frame_ids_by_rate(
-                    img_ids, timestamps, GAP_FACTOR, MAX_GAP_SECONDS, cut_off
+                    img_ids,
+                    timestamps,
+                    GAP_FACTOR,
+                    MAX_GAP_SECONDS,
+                    max(cut_off, PARTITION_MIN_FRAMES),
                 )
                 if not sequences:
-                    print(f"Skipping {scene}: no run of {cut_off} consecutive frames")
+                    print(
+                        f"Skipping {scene}: no run of "
+                        f"{max(cut_off, PARTITION_MIN_FRAMES)} consecutive frames"
+                    )
                     continue
 
                 for img_ids_seq in sequences:
