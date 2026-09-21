@@ -64,7 +64,12 @@ ARM_FLAGS=(
 
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 DATA=/lustre/isaac24/proj/UTK0516/metrics_data/processed
-ARKIT_OUT="${ARKIT_OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
+# The datasets rebuilt as video are NOT under $DATA, which still holds the
+# PRE-REBUILD ScanNet++ (~143 thinned iPhone frames per scene plus DSLR stills,
+# against ~637 contiguous iPhone frames here). Both load, so reading ScanNet++
+# from $DATA silently trains on the old selection.
+REBUILT="${REBUILT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
+ARKIT_OUT="${ARKIT_OUT:-$REBUILT}"
 # same exp_group as train_all_datasets.sh, so these sit beside the random-mask
 # cells and can be filtered apart by depth_cond.sim_mode in the manifest
 EXP_GROUP=metric_all_datasets
@@ -97,7 +102,7 @@ fi
     echo "        rebuild it with: python src/build_spot_freq_map.py --data-root <spot_data>"
     exit 1
 }
-for d in "$DATA/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/processed_scannet" \
+for d in "$REBUILT/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/processed_scannet" \
          "$ARKIT_OUT/processed_arkitscenes" "$ARKIT_OUT/processed_arkitscenes_highres"; do
     [ -d "$d" ] || { echo "[fatal] missing dataset root: $d"; exit 1; }
 done
@@ -121,7 +126,7 @@ for i in "${!ARM_NAMES[@]}"; do
         --depth-cond.sim-freq-map-path "$SPOT_FREQ_MAP" \
         --loss.depth-log-space \
         --loss.depth-alpha 0.02 \
-        --train-dataset.root "$DATA/processed_scannetpp" \
+        --train-dataset.root "$REBUILT/processed_scannetpp" \
                              "$DATA/processed_tartanair" \
                              "$DATA/processed_scannet" \
                              "$ARKIT_OUT/processed_arkitscenes" \

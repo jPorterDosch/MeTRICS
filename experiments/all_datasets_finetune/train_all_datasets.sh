@@ -80,10 +80,15 @@ set -euo pipefail
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 DATA=/lustre/isaac24/proj/UTK0516/metrics_data/processed
 EXP_GROUP=metric_all_datasets
-# ARKitScenes is NOT under $DATA: metrics_data/processed is hqi-owned with
-# mode drwxr-sr-x, so this uid cannot mkdir in it and the preprocess job was
-# run with METRICS_PROCESSED_ROOT pointed at this sibling instead.
-ARKIT_OUT="${ARKIT_OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
+# The datasets rebuilt as video are NOT under $DATA: metrics_data/processed is
+# hqi-owned with mode drwxr-sr-x, so this uid cannot mkdir in it and the
+# preprocess jobs ran with METRICS_PROCESSED_ROOT pointed at this sibling.
+#
+# $DATA still holds the PRE-REBUILD ScanNet++ (~143 thinned iPhone frames per
+# scene plus DSLR stills, against ~637 contiguous iPhone frames here). Both
+# load, so reading ScanNet++ from $DATA silently trains on the old selection.
+REBUILT="${REBUILT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
+ARKIT_OUT="${ARKIT_OUT:-$REBUILT}"
 
 # Checkpoints go to LUSTRE, not $REPO/checkpoints: NFS home is capped at 50 GB
 # per user. A checkpoint is 5.0 GiB MEASURED (checkpoint-best.pth of
@@ -140,9 +145,11 @@ if [ ! -f "$PRETRAINED" ]; then
     echo "        copy the checkpoint over, or set PRETRAINED=/path/to/ckpt.pth"
     exit 1
 fi
-for d in processed_scannetpp processed_tartanair processed_scannet; do
+for d in processed_tartanair processed_scannet; do
     [ -d "$DATA/$d" ] || { echo "[fatal] missing dataset root: $DATA/$d"; exit 1; }
 done
+[ -d "$REBUILT/processed_scannetpp" ] || {
+    echo "[fatal] missing dataset root: $REBUILT/processed_scannetpp"; exit 1; }
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
 # finetune_depth.py resolves relative paths (and save_current_code's ".")
@@ -208,7 +215,7 @@ python finetune_depth.py \
     `#`                                                                        \
     `# highres-root is NOT passed: it only applies to ARKitScenes lowres and`  \
     `# the default no longer carries ARKitScenes entries to clear.`            \
-    --train-dataset.root "$DATA/processed_scannetpp" \
+    --train-dataset.root "$REBUILT/processed_scannetpp" \
                          "$DATA/processed_tartanair" \
                          "$DATA/processed_scannet" \
                          "$ARKIT_OUT/processed_arkitscenes" \
