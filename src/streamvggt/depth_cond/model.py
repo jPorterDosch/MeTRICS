@@ -110,7 +110,9 @@ class MetricStreamVGGT(nn.Module):
             raise RuntimeError(
                 "load_pretrained must be called before apply_lora_adapters"
             )
-        sd = torch.load(path, map_location=map_location)
+        # mmap: the ~5GB state dict otherwise sits fully resident alongside the
+        # freshly constructed model it is copied into (~2x peak host RAM)
+        sd = torch.load(path, map_location=map_location, mmap=True)
         if (
             isinstance(sd, dict)
             and "model" in sd
