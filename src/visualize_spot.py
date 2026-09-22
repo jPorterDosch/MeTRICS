@@ -426,8 +426,24 @@ def main() -> None:
 
     ckpt_path = resolve_checkpoint(args.weights, args.checkpoint)
     print(f"Loading checkpoint: {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    # mmap: the 1.26B-param state dict is ~5GB fp32, and build_model constructs
+    # a second full copy before the weights are loaded into it. Materialising
+    # both eagerly is what OOM-kills the job; mmap pages storages in from disk
+    # only as load_state_dict copies them out (measured 0.37GB peak vs ~5GB).
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False, mmap=True)
     raw = load_saved_args(ckpt)
+    # Every SPOT view already carries real sensor 'sparse_depth', so
+    # simulate_sparse_depth skips it and the freq map is never read here. But
+    # DepthCondCfg.validate() demands the path exist whenever sim_mode is
+    # pixel_freq, and the saved path points at the machine the checkpoint was
+    # trained on (the same per-machine drift finetune_depth._NON_IDENTITY_KEYS
+    # already keeps out of the experiment hash). Neutralise the unused mask
+    # simulation rather than carry a dead cross-machine path. Nothing in the
+    # model's key layout reads sim_*, so the state dict still matches.
+    raw["depth_cond"] = dict(raw["depth_cond"])
+    raw["depth_cond"]["sim_mode"] = "none"
+    raw["depth_cond"]["sim_freq_map_path"] = ""
+    raw["depth_cond"]["sim_freq_map_sha256"] = ""
     mcfg = rebuild_metric_cfg(raw)
 
     pretrained_path = ""
@@ -462,6 +478,10 @@ def main() -> None:
         model, _ = build_model(cfg, mcfg, device, load_pretrained=False)
         state_dict = {k.replace("module.", ""): v for k, v in ckpt["model"].items()}
         model.load_state_dict(state_dict, strict=True)
+        del state_dict
+    # raw/mcfg/cfg carry everything still needed; holding ckpt would pin the
+    # whole mmapped state dict for the rest of the run
+    del ckpt
     if model is not None:
         model.eval()
 
