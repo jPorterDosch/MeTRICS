@@ -143,8 +143,10 @@ class ScanNetpp_Multi(BaseMultiViewDataset):
             cut_off = self.min_views()
             # frame_%06d is the index in the 60 fps iPhone video, so the step
             # between kept frames is the decimation of the capture. It is a
-            # property of the preprocessing run (currently ~50, i.e. every 50th
-            # frame), hence derived per scene rather than hard-coded.
+            # property of the preprocessing run -- every 10th frame (~6 fps)
+            # in the rebuilt tree, every ~50th in the DUSt3R selection before
+            # it -- hence derived per scene rather than hard-coded: at a step
+            # of 10 the split threshold is ~15 frames.
             frame_numbers = np.array(frame_numbers)
             sequences = (
                 segment_frame_ids_by_rate(

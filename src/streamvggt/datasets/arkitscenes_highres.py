@@ -55,6 +55,19 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
         super().__init__(
             *args, stride_range=stride_range, regular_stride=regular_stride, **kwargs
         )
+        # ARKitScenes_Multi hands this loader every scene holding a run of
+        # PARTITION_MIN_FRAMES, without knowing this loader's num_views. Past
+        # that, the scenes whose longest laser run is between the two are
+        # dropped by ARKitScenes_Multi AND unsampleable here, so they vanish
+        # from both variants with nothing but a Skipping line. Refuse instead.
+        if self.num_views > PARTITION_MIN_FRAMES:
+            raise ValueError(
+                f"ARKitScenesHighRes num_views={self.num_views} exceeds "
+                f"PARTITION_MIN_FRAMES={PARTITION_MIN_FRAMES}: scenes whose "
+                f"longest laser-GT run is {PARTITION_MIN_FRAMES}-"
+                f"{self.num_views - 1} frames would be in neither ARKitScenes "
+                "variant. Raise PARTITION_MIN_FRAMES in arkitscenes.py to match."
+            )
         match self.split:
             case Split.TRAIN:
                 self.split_dir = "Training"
@@ -127,12 +140,12 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
                     timestamps,
                     GAP_FACTOR,
                     MAX_GAP_SECONDS,
-                    max(cut_off, PARTITION_MIN_FRAMES),
+                    PARTITION_MIN_FRAMES,
                 )
                 if not sequences:
                     print(
                         f"Skipping {scene}: no run of "
-                        f"{max(cut_off, PARTITION_MIN_FRAMES)} consecutive frames"
+                        f"{PARTITION_MIN_FRAMES} consecutive frames"
                     )
                     continue
 

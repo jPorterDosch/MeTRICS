@@ -117,7 +117,7 @@ esac
 RAW="${ARKIT_RAW_DIR:-$ARKIT_DIR/raw}"
 PAIRS="${ARKIT_PAIRS_DIR:-$ARKIT_DIR/arkitscenes_pairs}"
 # Overridable so a rebuild can be written beside the tree in use rather than
-# into it (see RESUMABILITY above).
+# into it (see the note on skipping converted scenes in the header).
 OUT_LOW="${ARKIT_OUT_LOW:-$METRICS_PROCESSED_ROOT/processed_arkitscenes}"
 OUT_HIGH="${ARKIT_OUT_HIGH:-$METRICS_PROCESSED_ROOT/processed_arkitscenes_highres}"
 
@@ -139,12 +139,26 @@ fi
 
 cd "$METRICS_REPO"
 
+# Both conversion scripts exit non-zero when any scene fails, AFTER writing
+# every split for the scenes that did convert. Under `set -e` that exit would
+# stop this script before generate_set -- the only writer of
+# new_scene_metadata.npz, which ARKitScenes_Multi opens for every scene -- and
+# before the highres pass. A scene that fails on every run (bad orientation,
+# intrinsics on a different clock) would then keep the whole lowres tree
+# unloadable forever. So a conversion failure is recorded and reported at the
+# end instead: the job still ends FAILED, but the trees it did build are usable.
+status=0
+
 if [ "$ARKIT_VARIANT" = "lowres" ] || [ "$ARKIT_VARIANT" = "both" ]; then
     echo "=== lowres: preprocess -> $OUT_LOW ==="
     "$METRICS_PY" datasets_preprocess/preprocess_arkitscenes.py \
         --arkitscenes_dir "$RAW" \
         --precomputed_pairs "$PAIRS" \
-        --output_dir "$OUT_LOW"
+        --output_dir "$OUT_LOW" || {
+        status=$?
+        echo "[warn] lowres conversion exited $status; see FAILED lines above." \
+             "Continuing so generate_set runs on the scenes that converted." >&2
+    }
 
     # ARKitScenes_Multi reads new_scene_metadata.npz, which ONLY this writes.
     # max_interval 5.0 is the DUSt3R recipe's value, in seconds of capture
@@ -161,7 +175,15 @@ if [ "$ARKIT_VARIANT" = "highres" ] || [ "$ARKIT_VARIANT" = "both" ]; then
     echo "=== highres: preprocess -> $OUT_HIGH (no generate_set) ==="
     "$METRICS_PY" datasets_preprocess/preprocess_arkitscenes_highres.py \
         --arkitscenes_dir "$RAW" \
-        --output_dir "$OUT_HIGH"
+        --output_dir "$OUT_HIGH" || {
+        status=$?
+        echo "[warn] highres conversion exited $status; see FAILED lines above" >&2
+    }
 fi
 
+if [ "$status" -ne 0 ]; then
+    echo "=== done with FAILED scenes (variant: $ARKIT_VARIANT) -- rerun to" \
+         "retry them; converted scenes are skipped ===" >&2
+    exit "$status"
+fi
 echo "=== done (variant: $ARKIT_VARIANT) ==="
