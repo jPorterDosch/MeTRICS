@@ -39,6 +39,11 @@ class BenchSpec:
     tae_json: str | None = None  # manifest with K/pose (ScanNet only)
     tae_scenes: int = 0  # VDA: eval_scenes_num
     tae_range: tuple[int, int] = (0, 0)  # VDA: start_idx, end_idx
+    base: str | None = None  # tree dir + json key when they differ from name (the *_500 variants)
+
+    @property
+    def dirname(self) -> str:
+        return self.base or self.name
 
 
 SPECS: dict[str, BenchSpec] = {
@@ -60,6 +65,19 @@ SPECS: dict[str, BenchSpec] = {
     # nyuv2 video split. This is the standard 654-still test split, each
     # still its own one-frame "sequence", with VDA's NYU crop and factor.
     "nyuv2": BenchSpec("nyuv2", "nyuv2/nyuv2_test.json", 10.0, (45, 471, 41, 601), 1, False),
+    # VDA's headline (Table 1) protocol: up to 500 frames per video, from the
+    # *_video_500.json manifests their extractor writes alongside the short
+    # ones (ScanNet at stride 1 here, not the 90-frame split's stride 3).
+    # Sintel is 50 frames either way and NYU's 500-frame split is an 8-scene
+    # video set we do not build. Opt-in: ~4.5x the frames of the short
+    # protocol, ScanNet alone 100 x 500.
+    "scannet_500": BenchSpec(
+        "scannet_500", "scannet/scannet_video_500.json", 10.0, (8, -8, 11, -11), 500, True, base="scannet"
+    ),
+    "kitti_500": BenchSpec(
+        "kitti_500", "kitti/kitti_video_500.json", 80.0, (0, 374, 0, 1242), 500, True, base="kitti"
+    ),
+    "bonn_500": BenchSpec("bonn_500", "bonn/bonn_video_500.json", 10.0, (0, 480, 0, 640), 500, True, base="bonn"),
 }
 
 
@@ -110,11 +128,11 @@ def load_manifest(root: Path, spec: BenchSpec, tae: bool = False) -> list[Sequen
         )
     with open(path) as f:
         data = json.load(f)
-    if spec.name not in data:
-        raise KeyError(f"{path} has keys {list(data)}, expected {spec.name!r}")
-    ds_root = Path(root) / spec.name
+    if spec.dirname not in data:
+        raise KeyError(f"{path} has keys {list(data)}, expected {spec.dirname!r}")
+    ds_root = Path(root) / spec.dirname
     sequences = []
-    for entry in data[spec.name]:
+    for entry in data[spec.dirname]:
         if len(entry) != 1:
             raise ValueError(f"{path}: one sequence per entry expected, got {list(entry)}")
         (name, frames), = entry.items()
@@ -214,7 +232,7 @@ def build_views(
     it; the caller rescales to [0,1] exactly like _prepare_batch does.
 
     depthmap is the cropped GT nearest-resized to the model resolution: it is
-    only the SOURCE of the simulated sparse prompt (simulate_sparse_depth
+    only the SOURCE of the simulated sparse depth (simulate_sparse_depth
     reads view['depthmap'] and view['valid_mask']). Scoring uses the GT at
     its own resolution (gt_stack), never this copy.
     """

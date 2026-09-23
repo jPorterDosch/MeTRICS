@@ -40,6 +40,7 @@ Run with the StreamVGGT env python (needs imageio + pypng, which SensorData uses
 import argparse
 import os
 import os.path as osp
+import shutil
 import sys
 
 sys.path.insert(0, osp.join(osp.dirname(osp.abspath(__file__)), "..", "src"))
@@ -148,6 +149,14 @@ def extract_scene(scene_dir, sens_path, as_zip=True, max_frames=None, color_at_d
         with SceneZipWriter(osp.join(scene_dir, "frames.zip")) as writer:
             sd.export_all_to_zip(writer)
         return
+    # a previous export into this dir with other options (a larger cap, native
+    # colour) would otherwise leave its extra / differently sized frames next
+    # to the new ones and pass the count check as one consistent scene
+    for sub in ("color", "depth", "pose", "intrinsic"):
+        shutil.rmtree(osp.join(scene_dir, sub), ignore_errors=True)
+    marker = osp.join(scene_dir, EXPORT_MARKER)
+    if osp.isfile(marker):
+        os.remove(marker)
     color_size = (sd.depth_height, sd.depth_width) if color_at_depth_res else None
     sd.export_color_images(
         osp.join(scene_dir, "color"), image_size=color_size, max_frames=max_frames

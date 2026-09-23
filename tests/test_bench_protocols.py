@@ -75,10 +75,10 @@ class NonFinitePredictionTest(unittest.TestCase):
         self.assertLess(pub.abs_rel, 0.05)  # but do not poison the fit
         met = P.metric_metrics(pred, gt, 10.0)
         self.assertTrue(np.isfinite(met.abs_rel))
-        prompt = np.zeros_like(gt, dtype=bool)
-        prompt[:, ::3, ::3] = True
-        prompt[0, 3, 3] = True  # a NaN pixel inside the prompt is dropped from the fit
-        spa = P.sparse_aligned_metrics(pred, np.where(prompt, gt, 0), prompt, pred, prompt, gt, 10.0)
+        sparse = np.zeros_like(gt, dtype=bool)
+        sparse[:, ::3, ::3] = True
+        sparse[0, 3, 3] = True  # a NaN pixel inside the sparse depth is dropped from the fit
+        spa = P.sparse_aligned_metrics(pred, np.where(sparse, gt, 0), sparse, pred, sparse, gt, 10.0)
         self.assertTrue(np.isfinite(spa.abs_rel))
         self.assertLess(spa.abs_rel, 0.05)
 
@@ -98,30 +98,30 @@ class SparseAlignedProtocolTest(unittest.TestCase):
         gt = _gt(seed=seed, holes=0.0)
         S, H, W = gt.shape
         rng = np.random.default_rng(seed)
-        prompt_mask = rng.uniform(size=gt.shape) < 0.1
-        prompt_depth = np.where(prompt_mask, gt, 0.0)
+        sparse_mask = rng.uniform(size=gt.shape) < 0.1
+        sparse_depth = np.where(sparse_mask, gt, 0.0)
         pred = (gt - t) / s  # so s*pred + t == gt exactly
-        return gt, pred, prompt_depth, prompt_mask
+        return gt, pred, sparse_depth, sparse_mask
 
-    def test_prompt_fit_recovers_the_affine(self):
+    def test_sparse_fit_recovers_the_affine(self):
         gt, pred, pd, pm = self._case()
         m = P.sparse_aligned_metrics(pred, pd, pm, pred, pm, gt, 10.0)
         self.assertLess(m.abs_rel, 1e-6)
         self.assertEqual(m.frames, gt.shape[0])
 
-    def test_prompt_pixels_are_held_out(self):
+    def test_sparse_pixels_are_held_out(self):
         gt, pred, pd, pm = self._case()
-        # corrupt the prediction ONLY on the prompt pixels: a scored prompt
+        # corrupt the prediction ONLY on the sparse-depth pixels: a scored sparse depth
         # would show it, a held-out one cannot
         bad = pred.copy()
         bad[pm] = 100.0
-        # the fit itself uses the prompt pixels, so keep those honest by
+        # the fit itself uses the sparse-depth pixels, so keep those honest by
         # passing the clean native prediction for the fit and the corrupted
         # one at GT resolution
         m = P.sparse_aligned_metrics(pred, pd, pm, bad, pm, gt, 10.0)
         self.assertLess(m.abs_rel, 1e-6)
 
-    def test_frame_without_prompt_is_dropped(self):
+    def test_frame_without_sparse_depth_is_dropped(self):
         gt, pred, pd, pm = self._case()
         pm[2] = False
         pd[2] = 0.0
@@ -212,6 +212,22 @@ class ManifestTest(unittest.TestCase):
             self.assertAlmostEqual(float(gt[1].mean()), 2.0, places=6)
             self.assertEqual(VB.bench_root_ok(root, ("bonn",)), [])
             self.assertEqual(VB.bench_root_ok(root, ("sintel",)), ["sintel"])
+
+    def test_500_variant_reads_base_tree_and_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spec = VB.SPECS["bonn_500"]
+            self.assertEqual(spec.dirname, "bonn")
+            self.assertEqual(spec.max_len, 500)
+            (root / "bonn").mkdir()
+            frames = [{"image": f"s/rgb/{i}.png", "gt_depth": f"s/depth/{i}.png", "factor": 5000.0} for i in range(3)]
+            with open(root / "bonn" / "bonn_video_500.json", "w") as f:
+                json.dump({"bonn": [{"s": frames}]}, f)  # keyed by the base dataset, as VDA writes it
+            seqs = VB.load_manifest(root, spec)
+            self.assertEqual(seqs[0].dataset, "bonn_500")
+            self.assertEqual(str(seqs[0].frames[0].image), str(root / "bonn" / "s/rgb/0.png"))
+            self.assertEqual(VB.bench_root_ok(root, ("bonn_500",)), [])
+            self.assertEqual(VB.bench_root_ok(root, ("kitti_500",)), ["kitti_500"])
 
     def test_bench_root_ok_checks_tae_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

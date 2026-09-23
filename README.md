@@ -367,7 +367,7 @@ NYU fixed intrinsics); `--cameras` re-attaches them to an existing tree.
 | protocol | alignment | what it answers |
 |---|---|---|
 | `published` | one scale+shift per **video**, in **disparity**, against dense GT (VDA's `eval.py`, verbatim) | the only mode in which numbers from their tables are comparable |
-| `sparse_aligned` | one scale+shift per **frame**, fitted on the **prompt pixels only**, in each model's native output space; prompt pixels held out of the score | given the same sparse sensor, who completes it best -- causal, and symmetric between models that consume the prompt and models that only see it post hoc |
+| `sparse_aligned` | one scale+shift per **frame**, fitted on the **sparse-depth pixels only**, in each model's native output space; sparse-depth pixels held out of the score | given the same sparse sensor, who completes it best -- causal, and symmetric between models that consume the sparse depth and models that only see it post hoc |
 | `metric` | none | calibration |
 
 plus two TAEs on the published-aligned depth: `tae_vda` (theirs, vendored,
@@ -379,7 +379,15 @@ they report it on); `--bench.tae-datasets scannet sintel bonn kitti` adds
 the others, scored on their main-pass predictions with the attached cameras
 (ours-only rows until the baselines are run).
 
-**Prompt.** One `TUBE_MASK` patch mask per sequence (the same pixels in every
+**500-frame variant.** VDA's headline table scores up to 500 frames per
+video; `--bench.datasets scannet_500 kitti_500 bonn_500` runs that protocol
+from the `*_video_500.json` manifests the same extractor writes (ScanNet at
+stride 1 there). Opt-in, ~4.5x the frames of the short protocol; run it on
+the final checkpoint. Sintel is 50 frames either way, and NYU's 500-frame
+split is an 8-scene video set we do not build. With `--bench.tae-datasets
+scannet_500` the long-horizon TAE comes out of the same pass.
+
+**Sparse depth.** One `TUBE_MASK` patch mask per sequence (the same pixels in every
 frame, like a static sensor pattern -- no mask flicker in the TAE), seeded by
 (dataset, sequence, density), so every mode, checkpoint and baseline gets the
 identical pixel set. Density is swept: `--bench.densities 0.01 0.05 0.4` by
@@ -410,7 +418,7 @@ across ranks under DDP); `--bench.datasets` and `--bench.densities` cut it.
 **Point clouds.** The streaming pass at `--bench.cloud-density` (5%) snapshots
 the first `--bench.clouds-per-dataset` (2) sequences of each dataset to
 `<run>/bench_clouds/<dataset>_<sequence>_d5_stream.npz` -- RGB, predicted
-depth and confidence, the prompt, GT, predicted and (where available) GT
+depth and confidence, the sparse depth, GT, predicted and (where available) GT
 cameras, 32 frames -- and renders a GLB next to each with the **GT**
 cameras (the frozen camera head reads fine-tuned tokens, so its track is
 not trusted for anything; it is stored, not used). Re-render later, with

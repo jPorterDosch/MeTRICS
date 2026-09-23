@@ -88,6 +88,13 @@ MANIFEST = {
     "scannet": "scannet/scannet_video.json",
     "nyuv2": "nyuv2/nyuv2_test.json",
 }
+# VDA's 500-frame manifests, written by the same extractors; cameras are
+# attached to these too so the *_500 benchmark variants can score TAE
+MANIFEST_500 = {
+    "kitti": "kitti/kitti_video_500.json",
+    "bonn": "bonn/bonn_video_500.json",
+    "scannet": "scannet/scannet_video_500.json",
+}
 
 
 class _RGBSafeCV2:
@@ -227,9 +234,14 @@ PREPARE = {
 
 
 def cameras_for(out: Path, name: str, raw: Path) -> dict[str, int]:
-    """GT cameras onto every manifest of a dataset (the ScanNet TAE manifest
+    """GT cameras onto every manifest of a dataset -- the short one and, where
+    VDA's extractor wrote it, the 500-frame one (the ScanNet TAE manifest
     already carries VDA's own; it is left alone)."""
-    return attach_cameras(out, name, MANIFEST[name], raw)
+    stats = attach_cameras(out, name, MANIFEST[name], raw)
+    if name in MANIFEST_500 and (out / MANIFEST_500[name]).is_file():
+        long = attach_cameras(out, name, MANIFEST_500[name], raw)
+        stats = {k: stats[k] + long[k] for k in stats}
+    return stats
 
 
 def check_manifest(out: Path, name: str) -> int:

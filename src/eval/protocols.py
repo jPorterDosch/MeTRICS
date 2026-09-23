@@ -14,10 +14,10 @@ Three protocols, kept apart because they answer different questions:
                   their tables are comparable to ours. The prediction enters
                   as disparity (VDA's native output); a depth model passes
                   1/depth -- see published_metrics.
-  sparse_aligned  One scale+shift per FRAME fitted on the PROMPT pixels only
+  sparse_aligned  One scale+shift per FRAME fitted on the SPARSE-DEPTH pixels only
                   (the sparse depth a sensor would give), scored against the
-                  dense GT with the prompt pixels held out. Causal, and
-                  symmetric across arms: a model that consumes the prompt and
+                  dense GT with the sparse-depth pixels held out. Causal, and
+                  symmetric across arms: a model that consumes the sparse depth and
                   one that only sees it post hoc get the same pixels.
   metric          No alignment at all: raw metric depth against GT.
 
@@ -224,41 +224,41 @@ def affine_fit(pred: np.ndarray, target: np.ndarray) -> tuple[float, float]:
 
 def sparse_aligned_metrics(
     pred_native: np.ndarray,
-    prompt_depth: np.ndarray,
-    prompt_mask: np.ndarray,
+    sparse_depth: np.ndarray,
+    sparse_mask: np.ndarray,
     pred_gt_res: np.ndarray,
-    prompt_mask_gt_res: np.ndarray,
+    sparse_mask_gt_res: np.ndarray,
     gt: np.ndarray,
     max_depth: float,
-    min_prompt_pixels: int = 2,
+    min_sparse_pixels: int = 2,
 ) -> FrameMetrics:
     """The `sparse_aligned` protocol.
 
-    Per frame, (s, t) is fitted on the prompt pixels at the model's own
-    resolution (pred_native / prompt_depth / prompt_mask, [S,h,w]) and applied
+    Per frame, (s, t) is fitted on the sparse-depth pixels at the model's own
+    resolution (pred_native / sparse_depth / sparse_mask, [S,h,w]) and applied
     to the prediction resized to GT resolution (pred_gt_res, [S,H,W]); the
-    frame is scored on GT-valid pixels EXCLUDING the prompt (prompt_mask_gt_res,
-    the prompt mask carried to GT resolution). Holding the prompt out matters
+    frame is scored on GT-valid pixels EXCLUDING the sparse depth (sparse_mask_gt_res,
+    the sparse depth mask carried to GT resolution). Holding the sparse depth out matters
     where the "dense" GT is itself sparse (KITTI LiDAR): scoring the pixels
     the model was handed would measure copying, not completion.
 
-    A frame with fewer than min_prompt_pixels prompt pixels cannot be aligned
+    A frame with fewer than min_sparse_pixels sparse-depth pixels cannot be aligned
     and is dropped (counted out of `frames`)."""
-    _check_seq("pred_native", pred_native, prompt_depth)
-    _check_seq("prompt_mask", prompt_mask, prompt_depth)
+    _check_seq("pred_native", pred_native, sparse_depth)
+    _check_seq("sparse_mask", sparse_mask, sparse_depth)
     _check_seq("pred_gt_res", pred_gt_res, gt)
-    _check_seq("prompt_mask_gt_res", prompt_mask_gt_res, gt)
+    _check_seq("sparse_mask_gt_res", sparse_mask_gt_res, gt)
     S = gt.shape[0]
     aligned = np.full_like(gt, DEPTH_FLOOR, dtype=np.float32)
-    valid = gt_valid_mask(gt, max_depth) & ~prompt_mask_gt_res
+    valid = gt_valid_mask(gt, max_depth) & ~sparse_mask_gt_res
     for i in range(S):
-        m = prompt_mask[i] & np.isfinite(pred_native[i])
-        if int(m.sum()) < min_prompt_pixels:
+        m = sparse_mask[i] & np.isfinite(pred_native[i])
+        if int(m.sum()) < min_sparse_pixels:
             valid[i] = False
             continue
         # design decision: the fit lives in each model's NATIVE output space
-        # (depth here); a disparity model fits 1/depth against 1/prompt
-        s, t = affine_fit(pred_native[i][m], prompt_depth[i][m])
+        # (depth here); a disparity model fits 1/depth against 1/sparse depth
+        s, t = affine_fit(pred_native[i][m], sparse_depth[i][m])
         aligned[i] = np.clip(s * _finite_or_floor(pred_gt_res[i]) + t, DEPTH_FLOOR, max_depth)
     return vda_frame_metrics(aligned, gt, valid)
 

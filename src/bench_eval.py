@@ -1,6 +1,6 @@
 """End-of-training video-depth benchmark: the Video Depth Anything datasets
 (Sintel, ScanNet, KITTI, Bonn, NYUv2 stills) scored under three protocols,
-over a sweep of prompt densities, on the per-frame KV-cache (streaming) path.
+over a sweep of sparse-depth densities, on the per-frame KV-cache (streaming) path.
 
 Streaming only, on purpose. StreamVGGT.forward -- the "offline" full-sequence
 pass -- applies the same causal mask the cache reproduces incrementally, so
@@ -16,7 +16,7 @@ val_* / final_stream series, and written to <output_dir>/bench_results.json
 with the per-sequence rows behind every mean.
 
 Protocol definitions live in eval.protocols; dataset constants and loading
-in eval.vda_benchmark. This module only orchestrates: prompt simulation,
+in eval.vda_benchmark. This module only orchestrates: sparse depth simulation,
 inference, sharding over ranks, aggregation, and the point-cloud snapshots.
 
 Cameras: TAE and the cloud snapshots use the GT cameras the preparer writes
@@ -24,7 +24,7 @@ into every manifest (benchmark_cameras.py); the model's predicted cameras
 are stored in the snapshots but never scored -- the camera head is frozen
 and reads fine-tuned tokens, so its output is not a result.
 
-Prompt: one TUBE_MASK patch mask per sequence (the same pixels in every
+Sparse depth: one TUBE_MASK patch mask per sequence (the same pixels in every
 frame, like a static sensor pattern, so no mask flicker leaks into the TAE),
 drawn from a seed fixed by (dataset, sequence, density) -- the identical
 pixel set for every mode, every checkpoint and every baseline arm.
@@ -78,7 +78,7 @@ class BenchmarkCfg:
     """Benchmark tree from datasets_preprocess/prepare_vda_benchmark.py."""
     datasets: tuple[str, ...] = ("sintel", "scannet", "kitti", "bonn", "nyuv2")
     densities: tuple[float, ...] = (0.01, 0.05, 0.40)
-    """Prompt densities (fraction of patches visible) swept per sequence. 5%
+    """Sparse depth densities (fraction of patches visible) swept per sequence. 5%
     is the training density; 40% is SPOT's real sensor."""
     tae_datasets: tuple[str, ...] = ("scannet",)
     """Datasets scored for TAE (both definitions), per density. ScanNet uses
@@ -130,13 +130,13 @@ def density_key(density: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# prompt + inference
+# sparse depth + inference
 # ---------------------------------------------------------------------------
-def _prompt_seed(base_seed: int, tag: str, density: float) -> int:
+def _sparse_seed(base_seed: int, tag: str, density: float) -> int:
     return (base_seed * 1_000_003 + zlib.crc32(tag.encode()) + int(round(density * 10_000))) % (2**31)
 
 
-def attach_prompt(
+def attach_sparse_depth(
     views: list[dict],
     density: float,
     tag: str,
@@ -144,13 +144,13 @@ def attach_prompt(
     base_seed: int,
     device: torch.device,
 ) -> float:
-    """Replace the views' sparse prompt with a fresh TUBE_MASK draw at
+    """Replace the views' sparse depth with a fresh TUBE_MASK draw at
     `density`, seeded by (tag, density), and return the realized density
     (GT holes lower it below the requested value)."""
     for v in views:
         v.pop("sparse_depth", None)
         v.pop("sparse_depth_mask", None)
-    seed = _prompt_seed(base_seed, tag, density)
+    seed = _sparse_seed(base_seed, tag, density)
     devices = [device] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=devices):
         torch.manual_seed(seed)
@@ -201,7 +201,7 @@ def predict(net, accelerator: Accelerator, views: list[dict]) -> Prediction:
 # ---------------------------------------------------------------------------
 # scoring
 # ---------------------------------------------------------------------------
-def _prompt_arrays(views: list[dict]) -> tuple[np.ndarray, np.ndarray]:
+def _sparse_arrays(views: list[dict]) -> tuple[np.ndarray, np.ndarray]:
     depth = torch.stack([v["sparse_depth"][0] for v in views]).float().cpu().numpy()
     mask = torch.stack([v["sparse_depth_mask"][0] for v in views]).bool().cpu().numpy()
     return depth, mask
@@ -216,17 +216,17 @@ def score_sequence(
     mode: str,
     density: float,
     realized: float,
-) -> dict:
+) -> tuple[dict, np.ndarray]:
     """One row: the three protocols for one (sequence, mode, density), plus
     the published-aligned depth, which score_tae_sequence takes so the
     resize + per-video least squares run once per (sequence, density)."""
     H, W = gt.shape[1:]
     pred_gt = resize_to_gt(pred.depth, (H, W))
-    prompt_depth, prompt_mask = _prompt_arrays(views)
-    prompt_mask_gt = resize_to_gt(prompt_mask.astype(np.float32), (H, W), nearest=True) > 0.5
+    sparse_depth, sparse_mask = _sparse_arrays(views)
+    sparse_mask_gt = resize_to_gt(sparse_mask.astype(np.float32), (H, W), nearest=True) > 0.5
     published, aligned = P.published_metrics(P.depth_to_disparity(pred_gt), gt, spec.max_depth)
     sparse = P.sparse_aligned_metrics(
-        pred.depth, prompt_depth, prompt_mask, pred_gt, prompt_mask_gt, gt, spec.max_depth
+        pred.depth, sparse_depth, sparse_mask, pred_gt, sparse_mask_gt, gt, spec.max_depth
     )
     metric = P.metric_metrics(pred_gt, gt, spec.max_depth)
     row = {
@@ -306,7 +306,7 @@ def save_cloud(
     n_frames: int,
 ) -> Path:
     """Everything needed to re-render the first n_frames of a sequence later
-    (render_clouds.py): RGB, predicted depth + confidence, the prompt, the GT
+    (render_clouds.py): RGB, predicted depth + confidence, the sparse depth, the GT
     at model resolution, predicted cameras and the GT cameras when the
     manifest carries them. Compressed npz, one per (sequence, density)."""
     n = min(n_frames, len(views))
@@ -422,6 +422,21 @@ def run_benchmark(
     tae_rows: list[dict] = []
     seconds: dict[str, float] = {}
     tae_skipped: dict[str, int] = {}
+    # Per-sequence failures (a corrupt frame, a CUDA OOM on a long stream)
+    # are recorded and skipped rather than raised: the ranks meet at the
+    # gather below, and a rank that died on its shard would leave the others
+    # waiting there forever -- at the end of a multi-day run.
+    failed: list[dict] = []
+
+    def _guard(tag: str, fn):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 -- see above
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            failed.append({"sequence": tag, "error": f"{type(e).__name__}: {e}"})
+            print(f"[bench] FAILED {tag}: {type(e).__name__}: {e}", flush=True)
+            return None
     for name in cfg.datasets:
         spec = SPECS[name]
         t0 = time.time()
@@ -430,51 +445,67 @@ def run_benchmark(
             seqs = seqs[: cfg.max_sequences]
         for gi in range(rank, len(seqs), world):
             seq = seqs[gi]
-            gt, views = _prepare_sequence(spec, seq, cfg.image_size, device)
             tag = f"{spec.name}/{seq.name}"
-            # TAE on the main pass for datasets without a dedicated TAE
-            # manifest (ScanNet's separate pass is below)
-            main_tae = spec.name in cfg.tae_datasets and spec.tae_json is None
-            if main_tae and not has_cameras(seq):
-                main_tae = False
-                tae_skipped[spec.name] = tae_skipped.get(spec.name, 0) + 1
-                accelerator.print(f"[bench] {tag}: missing GT camera(s); no TAE")
-            for density in cfg.densities:
-                realized = attach_prompt(views, density, tag, patch, seed, device)
-                pred = predict(net, accelerator, views)
-                row, aligned = score_sequence(spec, seq, gt, views, pred, MODE_STREAM, density, realized)
-                rows.append(row)
-                if main_tae:
-                    tae_rows.append(
-                        score_tae_sequence(spec, seq, gt, pred, MODE_STREAM, density, realized, aligned)
-                    )
-                if gi < cfg.clouds_per_dataset and density == cfg.cloud_density:
-                    path = cloud_dir / f"{spec.name}_{seq.name}_{density_key(density)}_{MODE_STREAM}.npz"
-                    save_cloud(path, spec, seq, views, pred, density, MODE_STREAM, cfg.cloud_frames)
-                    _render_cloud(path)
-                del pred
-            del views
-            accelerator.print(f"[bench] {tag}: {len(seq)} frames done ({time.time() - t0:.0f}s into {name})")
+
+            def _one_sequence(seq=seq, gi=gi, tag=tag):
+                gt, views = _prepare_sequence(spec, seq, cfg.image_size, device)
+                # TAE on the main pass for datasets without a dedicated TAE
+                # manifest (ScanNet's separate pass is below)
+                main_tae = spec.name in cfg.tae_datasets and spec.tae_json is None
+                if main_tae and not has_cameras(seq):
+                    main_tae = False
+                    tae_skipped[spec.name] = tae_skipped.get(spec.name, 0) + 1
+                    accelerator.print(f"[bench] {tag}: missing GT camera(s); no TAE")
+                new_rows, new_tae = [], []
+                for density in cfg.densities:
+                    realized = attach_sparse_depth(views, density, tag, patch, seed, device)
+                    pred = predict(net, accelerator, views)
+                    row, aligned = score_sequence(spec, seq, gt, views, pred, MODE_STREAM, density, realized)
+                    new_rows.append(row)
+                    if main_tae:
+                        new_tae.append(
+                            score_tae_sequence(spec, seq, gt, pred, MODE_STREAM, density, realized, aligned)
+                        )
+                    if gi < cfg.clouds_per_dataset and density == cfg.cloud_density:
+                        path = cloud_dir / f"{spec.name}_{seq.name}_{density_key(density)}_{MODE_STREAM}.npz"
+                        save_cloud(path, spec, seq, views, pred, density, MODE_STREAM, cfg.cloud_frames)
+                        _render_cloud(path)
+                    del pred
+                del views
+                # rows land only once the whole sequence scored, so a failure
+                # mid-sweep cannot leave a sequence with some densities and
+                # not others
+                rows.extend(new_rows)
+                tae_rows.extend(new_tae)
+                accelerator.print(f"[bench] {tag}: {len(seq)} frames done ({time.time() - t0:.0f}s into {name})")
+
+            _guard(tag, _one_sequence)
         if spec.name in cfg.tae_datasets and spec.tae_json:
             tseqs = load_manifest(cfg.root, spec, tae=True)
             if cfg.max_sequences:
                 tseqs = tseqs[: cfg.max_sequences]
             for gi in range(rank, len(tseqs), world):
                 seq = tseqs[gi]
+                tag = f"{spec.name}/tae/{seq.name}"
                 if not has_cameras(seq):
                     # ScanNet writes -inf poses where tracking failed
                     tae_skipped[spec.name] = tae_skipped.get(spec.name, 0) + 1
-                    accelerator.print(f"[bench] {spec.name}/tae/{seq.name}: missing GT pose(s); skipped")
+                    accelerator.print(f"[bench] {tag}: missing GT pose(s); skipped")
                     continue
-                gt, views = _prepare_sequence(spec, seq, cfg.image_size, device)
-                tag = f"{spec.name}/tae/{seq.name}"
-                for density in cfg.densities:
-                    realized = attach_prompt(views, density, tag, patch, seed, device)
-                    pred = predict(net, accelerator, views)
-                    tae_rows.append(score_tae_sequence(spec, seq, gt, pred, MODE_STREAM, density, realized))
-                    del pred
-                del views
-                accelerator.print(f"[bench] {tag}: {len(seq)} frames done")
+
+                def _one_tae_sequence(seq=seq, tag=tag):
+                    gt, views = _prepare_sequence(spec, seq, cfg.image_size, device)
+                    new_tae = []
+                    for density in cfg.densities:
+                        realized = attach_sparse_depth(views, density, tag, patch, seed, device)
+                        pred = predict(net, accelerator, views)
+                        new_tae.append(score_tae_sequence(spec, seq, gt, pred, MODE_STREAM, density, realized))
+                        del pred
+                    del views
+                    tae_rows.extend(new_tae)
+                    accelerator.print(f"[bench] {tag}: {len(seq)} frames done")
+
+                _guard(tag, _one_tae_sequence)
         if device.type == "cuda":
             torch.cuda.empty_cache()
         seconds[name] = time.time() - t0
@@ -490,12 +521,14 @@ def run_benchmark(
         for part in skipped_all:
             for k, v in part.items():
                 tae_skipped[k] = tae_skipped.get(k, 0) + v
+        failed = [f for part in gather_object([failed]) for f in part]
 
     result = aggregate(rows, tae_rows)
     for name, sec in seconds.items():
         result[f"{name}/seconds"] = float(sec)
     for name, n in tae_skipped.items():
         result[f"{name}/tae_skipped_sequences"] = float(n)
+    result["failed_sequences"] = float(len(failed))
 
     if accelerator.is_main_process:
         accelerator.log({f"final_bench/{k}": v for k, v in result.items()}, step=step)
@@ -508,12 +541,15 @@ def run_benchmark(
                     "aggregate": result,
                     "rows": rows,
                     "tae_rows": tae_rows,
+                    "failed": failed,
                 },
                 f,
                 indent=2,
                 sort_keys=True,
             )
         accelerator.print(f"[bench] wrote {out}")
+        if failed:
+            accelerator.print(f"[bench] {len(failed)} sequence(s) FAILED and were skipped -- see bench_results.json")
         for k in sorted(result):
             if k.endswith(("published_abs_rel", "sparse_aligned_abs_rel", "metric_abs_rel", "tae_vda", "tae_ours")):
                 accelerator.print(f"[bench] {k}: {result[k]:.4f}")
