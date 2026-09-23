@@ -33,10 +33,9 @@ pixel set for every mode, every checkpoint and every baseline arm.
 from __future__ import annotations
 
 import json
-import os
 import time
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -99,7 +98,9 @@ class BenchmarkCfg:
     def validate(self) -> "BenchmarkCfg":
         unknown = [d for d in self.datasets if d not in SPECS]
         if unknown:
-            raise ValueError(f"bench.datasets has unknown entries {unknown}; known: {list(SPECS)}")
+            raise ValueError(
+                f"bench.datasets has unknown entries {unknown}; known: {list(SPECS)}"
+            )
         if not self.datasets:
             raise ValueError("bench.datasets is empty")
         if not self.densities:
@@ -109,18 +110,26 @@ class BenchmarkCfg:
                 raise ValueError(f"bench.densities entries must be in (0, 1], got {d}")
         bad_tae = [d for d in self.tae_datasets if d not in SPECS or not SPECS[d].video]
         if bad_tae:
-            raise ValueError(f"bench.tae_datasets must be video datasets from {list(SPECS)}, got {bad_tae}")
+            raise ValueError(
+                f"bench.tae_datasets must be video datasets from {list(SPECS)}, got {bad_tae}"
+            )
         if self.clouds_per_dataset > 0 and self.cloud_density not in self.densities:
             raise ValueError(
                 f"bench.cloud_density {self.cloud_density} is not one of the swept "
                 f"densities {self.densities}"
             )
         if self.cloud_frames <= 0:
-            raise ValueError(f"bench.cloud_frames must be positive, got {self.cloud_frames}")
+            raise ValueError(
+                f"bench.cloud_frames must be positive, got {self.cloud_frames}"
+            )
         if self.image_size % 14 != 0:
-            raise ValueError(f"bench.image_size must be a multiple of 14, got {self.image_size}")
+            raise ValueError(
+                f"bench.image_size must be a multiple of 14, got {self.image_size}"
+            )
         if self.max_sequences < 0:
-            raise ValueError(f"bench.max_sequences must be >= 0, got {self.max_sequences}")
+            raise ValueError(
+                f"bench.max_sequences must be >= 0, got {self.max_sequences}"
+            )
         return self
 
 
@@ -133,7 +142,9 @@ def density_key(density: float) -> str:
 # sparse depth + inference
 # ---------------------------------------------------------------------------
 def _sparse_seed(base_seed: int, tag: str, density: float) -> int:
-    return (base_seed * 1_000_003 + zlib.crc32(tag.encode()) + int(round(density * 10_000))) % (2**31)
+    return (
+        base_seed * 1_000_003 + zlib.crc32(tag.encode()) + int(round(density * 10_000))
+    ) % (2**31)
 
 
 def attach_sparse_depth(
@@ -189,10 +200,14 @@ def predict(net, accelerator: Accelerator, views: list[dict]) -> Prediction:
             use_amp=True,
         )
     preds = result["pred"]
-    depth = torch.stack([p["depth"][0] for p in preds]).squeeze(-1).float().cpu().numpy()
+    depth = (
+        torch.stack([p["depth"][0] for p in preds]).squeeze(-1).float().cpu().numpy()
+    )
     conf = torch.stack([p["depth_conf"][0] for p in preds]).float().cpu().numpy()
     h, w = depth.shape[-2:]
-    enc = torch.stack([p["camera_pose"].detach().float().cpu() for p in preds], dim=1)  # [1,S,9]
+    enc = torch.stack(
+        [p["camera_pose"].detach().float().cpu() for p in preds], dim=1
+    )  # [1,S,9]
     extri, intri = pose_encoding_to_extri_intri(enc, (h, w))
     del result, preds
     return Prediction(depth, conf, extri[0].numpy(), intri[0].numpy())
@@ -223,10 +238,20 @@ def score_sequence(
     H, W = gt.shape[1:]
     pred_gt = resize_to_gt(pred.depth, (H, W))
     sparse_depth, sparse_mask = _sparse_arrays(views)
-    sparse_mask_gt = resize_to_gt(sparse_mask.astype(np.float32), (H, W), nearest=True) > 0.5
-    published, aligned = P.published_metrics(P.depth_to_disparity(pred_gt), gt, spec.max_depth)
+    sparse_mask_gt = (
+        resize_to_gt(sparse_mask.astype(np.float32), (H, W), nearest=True) > 0.5
+    )
+    published, aligned = P.published_metrics(
+        P.depth_to_disparity(pred_gt), gt, spec.max_depth
+    )
     sparse = P.sparse_aligned_metrics(
-        pred.depth, sparse_depth, sparse_mask, pred_gt, sparse_mask_gt, gt, spec.max_depth
+        pred.depth,
+        sparse_depth,
+        sparse_mask,
+        pred_gt,
+        sparse_mask_gt,
+        gt,
+        spec.max_depth,
     )
     metric = P.metric_metrics(pred_gt, gt, spec.max_depth)
     row = {
@@ -271,7 +296,9 @@ def score_tae_sequence(
     H, W = gt.shape[1:]
     if aligned is None:
         pred_gt = resize_to_gt(pred.depth, (H, W))
-        _, aligned = P.published_metrics(P.depth_to_disparity(pred_gt), gt, spec.max_depth)
+        _, aligned = P.published_metrics(
+            P.depth_to_disparity(pred_gt), gt, spec.max_depth
+        )
     Ks_raw = [fr.K for fr in seq.frames]
     poses = [fr.pose for fr in seq.frames]
     if any(k is None for k in Ks_raw) or any(p is None for p in poses):
@@ -315,10 +342,22 @@ def save_cloud(
         "rgb": rgb.permute(0, 2, 3, 1).to(torch.uint8).cpu().numpy(),
         "pred_depth": pred.depth[:n].astype(np.float32),
         "pred_conf": pred.conf[:n].astype(np.float32),
-        "sparse_depth": torch.stack([v["sparse_depth"][0] for v in views[:n]]).float().cpu().numpy(),
-        "sparse_mask": torch.stack([v["sparse_depth_mask"][0] for v in views[:n]]).bool().cpu().numpy(),
-        "gt_depth": torch.stack([v["depthmap"][0] for v in views[:n]]).float().cpu().numpy(),
-        "gt_valid": torch.stack([v["valid_mask"][0] for v in views[:n]]).bool().cpu().numpy(),
+        "sparse_depth": torch.stack([v["sparse_depth"][0] for v in views[:n]])
+        .float()
+        .cpu()
+        .numpy(),
+        "sparse_mask": torch.stack([v["sparse_depth_mask"][0] for v in views[:n]])
+        .bool()
+        .cpu()
+        .numpy(),
+        "gt_depth": torch.stack([v["depthmap"][0] for v in views[:n]])
+        .float()
+        .cpu()
+        .numpy(),
+        "gt_valid": torch.stack([v["valid_mask"][0] for v in views[:n]])
+        .bool()
+        .cpu()
+        .numpy(),
         "K_pred": pred.K[:n].astype(np.float32),
         "w2c_pred": pred.w2c[:n].astype(np.float32),
         "frames": np.array([str(fr.image) for fr in seq.frames[:n]]),
@@ -328,8 +367,15 @@ def save_cloud(
         "mode": np.array(mode),
     }
     if all("camera_intrinsics" in v and "camera_pose" in v for v in views[:n]):
-        payload["K_gt"] = torch.stack([v["camera_intrinsics"][0] for v in views[:n]]).float().cpu().numpy()
-        payload["pose_gt"] = torch.stack([v["camera_pose"][0] for v in views[:n]]).float().cpu().numpy()
+        payload["K_gt"] = (
+            torch.stack([v["camera_intrinsics"][0] for v in views[:n]])
+            .float()
+            .cpu()
+            .numpy()
+        )
+        payload["pose_gt"] = (
+            torch.stack([v["camera_pose"][0] for v in views[:n]]).float().cpu().numpy()
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, **payload)
     return path
@@ -360,7 +406,9 @@ def aggregate(rows: list[dict], tae_rows: list[dict]) -> dict[str, float]:
     count, realized density and both TAEs. NaN where nothing scored."""
     groups: dict[tuple[str, str, str], list[dict]] = {}
     for r in rows:
-        groups.setdefault((r["dataset"], r["mode"], density_key(r["density"])), []).append(r)
+        groups.setdefault(
+            (r["dataset"], r["mode"], density_key(r["density"])), []
+        ).append(r)
     out: dict[str, float] = {}
     for (ds, mode, dk), rs in sorted(groups.items()):
         base = f"{ds}/{mode}/{dk}"
@@ -372,7 +420,9 @@ def aggregate(rows: list[dict], tae_rows: list[dict]) -> dict[str, float]:
             out[f"{base}/{proto}_frames"] = _mean([r[proto]["frames"] for r in rs])
     tgroups: dict[tuple[str, str, str], list[dict]] = {}
     for r in tae_rows:
-        tgroups.setdefault((r["dataset"], r["mode"], density_key(r["density"])), []).append(r)
+        tgroups.setdefault(
+            (r["dataset"], r["mode"], density_key(r["density"])), []
+        ).append(r)
     for (ds, mode, dk), rs in sorted(tgroups.items()):
         base = f"{ds}/{mode}/{dk}"
         out[f"{base}/tae_n_sequences"] = float(len(rs))
@@ -384,7 +434,9 @@ def aggregate(rows: list[dict], tae_rows: list[dict]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
-def _prepare_sequence(spec: BenchSpec, seq: Sequence, size: int, device) -> tuple[np.ndarray, list[dict]]:
+def _prepare_sequence(
+    spec: BenchSpec, seq: Sequence, size: int, device
+) -> tuple[np.ndarray, list[dict]]:
     gt = gt_stack(seq, spec)
     views = build_views(seq, spec, gt, size, device)
     for v in views:  # ImgNorm [-1,1] -> [0,1], as _prepare_batch does for training
@@ -437,6 +489,7 @@ def run_benchmark(
             failed.append({"sequence": tag, "error": f"{type(e).__name__}: {e}"})
             print(f"[bench] FAILED {tag}: {type(e).__name__}: {e}", flush=True)
             return None
+
     for name in cfg.datasets:
         spec = SPECS[name]
         t0 = time.time()
@@ -458,17 +511,42 @@ def run_benchmark(
                     accelerator.print(f"[bench] {tag}: missing GT camera(s); no TAE")
                 new_rows, new_tae = [], []
                 for density in cfg.densities:
-                    realized = attach_sparse_depth(views, density, tag, patch, seed, device)
+                    realized = attach_sparse_depth(
+                        views, density, tag, patch, seed, device
+                    )
                     pred = predict(net, accelerator, views)
-                    row, aligned = score_sequence(spec, seq, gt, views, pred, MODE_STREAM, density, realized)
+                    row, aligned = score_sequence(
+                        spec, seq, gt, views, pred, MODE_STREAM, density, realized
+                    )
                     new_rows.append(row)
                     if main_tae:
                         new_tae.append(
-                            score_tae_sequence(spec, seq, gt, pred, MODE_STREAM, density, realized, aligned)
+                            score_tae_sequence(
+                                spec,
+                                seq,
+                                gt,
+                                pred,
+                                MODE_STREAM,
+                                density,
+                                realized,
+                                aligned,
+                            )
                         )
                     if gi < cfg.clouds_per_dataset and density == cfg.cloud_density:
-                        path = cloud_dir / f"{spec.name}_{seq.name}_{density_key(density)}_{MODE_STREAM}.npz"
-                        save_cloud(path, spec, seq, views, pred, density, MODE_STREAM, cfg.cloud_frames)
+                        path = (
+                            cloud_dir
+                            / f"{spec.name}_{seq.name}_{density_key(density)}_{MODE_STREAM}.npz"
+                        )
+                        save_cloud(
+                            path,
+                            spec,
+                            seq,
+                            views,
+                            pred,
+                            density,
+                            MODE_STREAM,
+                            cfg.cloud_frames,
+                        )
                         _render_cloud(path)
                     del pred
                 del views
@@ -477,7 +555,9 @@ def run_benchmark(
                 # not others
                 rows.extend(new_rows)
                 tae_rows.extend(new_tae)
-                accelerator.print(f"[bench] {tag}: {len(seq)} frames done ({time.time() - t0:.0f}s into {name})")
+                accelerator.print(
+                    f"[bench] {tag}: {len(seq)} frames done ({time.time() - t0:.0f}s into {name})"
+                )
 
             _guard(tag, _one_sequence)
         if spec.name in cfg.tae_datasets and spec.tae_json:
@@ -497,9 +577,15 @@ def run_benchmark(
                     gt, views = _prepare_sequence(spec, seq, cfg.image_size, device)
                     new_tae = []
                     for density in cfg.densities:
-                        realized = attach_sparse_depth(views, density, tag, patch, seed, device)
+                        realized = attach_sparse_depth(
+                            views, density, tag, patch, seed, device
+                        )
                         pred = predict(net, accelerator, views)
-                        new_tae.append(score_tae_sequence(spec, seq, gt, pred, MODE_STREAM, density, realized))
+                        new_tae.append(
+                            score_tae_sequence(
+                                spec, seq, gt, pred, MODE_STREAM, density, realized
+                            )
+                        )
                         del pred
                     del views
                     tae_rows.extend(new_tae)
@@ -549,8 +635,18 @@ def run_benchmark(
             )
         accelerator.print(f"[bench] wrote {out}")
         if failed:
-            accelerator.print(f"[bench] {len(failed)} sequence(s) FAILED and were skipped -- see bench_results.json")
+            accelerator.print(
+                f"[bench] {len(failed)} sequence(s) FAILED and were skipped -- see bench_results.json"
+            )
         for k in sorted(result):
-            if k.endswith(("published_abs_rel", "sparse_aligned_abs_rel", "metric_abs_rel", "tae_vda", "tae_ours")):
+            if k.endswith(
+                (
+                    "published_abs_rel",
+                    "sparse_aligned_abs_rel",
+                    "metric_abs_rel",
+                    "tae_vda",
+                    "tae_ours",
+                )
+            ):
                 accelerator.print(f"[bench] {k}: {result[k]:.4f}")
     return result

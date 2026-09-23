@@ -59,7 +59,9 @@ def render_npz(
             pose = _c2w_from_w2c(d["w2c_pred"])
         elif cameras == "gt":
             if not has_gt:
-                raise ValueError(f"{path.name} carries no GT cameras; use --cameras pred")
+                raise ValueError(
+                    f"{path.name} carries no GT cameras; use --cameras pred"
+                )
             K = d["K_gt"]
             pose = d["pose_gt"]
         else:
@@ -73,7 +75,10 @@ def render_npz(
         mask_to_gt=mask_to_gt,
     )
     scene = predictions_to_glb(
-        predictions, conf_thres=0.0, show_cam=True, prediction_mode="Depthmap and Camera"
+        predictions,
+        conf_thres=0.0,
+        show_cam=True,
+        prediction_mode="Depthmap and Camera",
     )
     out_dir = Path(out_dir) if out_dir is not None else path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +89,9 @@ def render_npz(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("npz", nargs="+", help="snapshot files from <run>/bench_clouds/")
     ap.add_argument("--cameras", choices=["auto", "pred", "gt"], default="auto")
     ap.add_argument("--mask-to-gt", action="store_true")

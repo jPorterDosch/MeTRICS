@@ -60,7 +60,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark_cameras import attach_cameras  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-VENDORED = REPO / "third_party" / "video_depth_anything" / "benchmark" / "dataset_extract"
+VENDORED = (
+    REPO / "third_party" / "video_depth_anything" / "benchmark" / "dataset_extract"
+)
 if not VENDORED.is_dir():
     raise SystemExit(f"vendored VDA benchmark missing: {VENDORED}")
 sys.path.insert(0, str(VENDORED))
@@ -112,9 +114,17 @@ class _RGBSafeCV2:
 
 def install_shims() -> None:
     shim = _RGBSafeCV2()
-    for mod in (eval_utils, dataset_extract_scannet, dataset_extract_sintel, dataset_extract_kitti, dataset_extract_bonn):
+    for mod in (
+        eval_utils,
+        dataset_extract_scannet,
+        dataset_extract_sintel,
+        dataset_extract_kitti,
+        dataset_extract_bonn,
+    ):
         mod.cv2 = shim
-    dataset_extract_bonn.get_sorted_files = lambda root, suffix: eval_utils.get_sorted_files(root, suffix)
+    dataset_extract_bonn.get_sorted_files = lambda root, suffix: (
+        eval_utils.get_sorted_files(root, suffix)
+    )
 
 
 def _require(path: Path, what: str) -> Path:
@@ -135,7 +145,9 @@ def prepare_sintel(raw: Path, out: Path) -> None:
     for seq_name in sorted(os.listdir(root)):
         names = eval_utils.get_sorted_files(str(root / seq_name), suffix=".png")
         for fn in names:
-            depth = dataset_extract_sintel.depth_read(str(depth_root / seq_name / (fn[:-3] + "dpt")))
+            depth = dataset_extract_sintel.depth_read(
+                str(depth_root / seq_name / (fn[:-3] + "dpt"))
+            )
             img = Image.open(root / seq_name / fn).convert("RGB")
             out_img = out / name / seq_name / "clean" / fn
             out_depth = out / name / seq_name / "depth" / (fn[:-3] + "png")
@@ -145,10 +157,16 @@ def prepare_sintel(raw: Path, out: Path) -> None:
             # their script: depth.astype(np.uint16). Intended (per the factor
             # gen_json assigns): metres * 65535/650, saturating at 650 m --
             # sky is ~1e4 m and outside the 70 m protocol range either way.
-            scaled = np.clip(np.round(depth.astype(np.float64) * SINTEL_FACTOR), 0, 65535)
+            scaled = np.clip(
+                np.round(depth.astype(np.float64) * SINTEL_FACTOR), 0, 65535
+            )
             cv2.imwrite(str(out_depth), scaled.astype(np.uint16))
     eval_utils.gen_json(
-        root_path=str(out / name), dataset=name, start_id=0, end_id=100, step=1,
+        root_path=str(out / name),
+        dataset=name,
+        start_id=0,
+        end_id=100,
+        step=1,
         save_path=str(out / MANIFEST[name]),
     )
 
@@ -157,8 +175,11 @@ def prepare_kitti(raw: Path, out: Path) -> None:
     root = _require(raw / "kitti", "KITTI raw drives")
     depth_root = _require(raw / "kitti" / "val", "KITTI data_depth_annotated val")
     dataset_extract_kitti.extract_kitti(
-        root=str(root), depth_root=str(depth_root), sample_len=-1,
-        saved_dir=str(out) + "/", datatset_name="kitti",
+        root=str(root),
+        depth_root=str(depth_root),
+        sample_len=-1,
+        saved_dir=str(out) + "/",
+        datatset_name="kitti",
     )
 
 
@@ -173,19 +194,34 @@ def prepare_bonn(raw: Path, out: Path) -> None:
         if not link.exists():
             os.symlink(target, link)
     dataset_extract_bonn.extract_bonn(
-        root=str(selected), depth_root=str(selected), saved_dir=str(out) + "/",
-        sample_len=-1, datatset_name="bonn",
+        root=str(selected),
+        depth_root=str(selected),
+        saved_dir=str(out) + "/",
+        sample_len=-1,
+        datatset_name="bonn",
     )
 
 
 def prepare_scannet(raw: Path, out: Path) -> None:
-    root = _require(raw / "scannet" / "scans_test", "ScanNet scans_test export (extract_scannet_sens.py --out-root)")
+    root = _require(
+        raw / "scannet" / "scans_test",
+        "ScanNet scans_test export (extract_scannet_sens.py --out-root)",
+    )
     scenes = sorted(os.listdir(root))
-    incomplete = [s for s in scenes if not (root / s / "intrinsic" / "intrinsic_depth.txt").is_file()]
+    incomplete = [
+        s
+        for s in scenes
+        if not (root / s / "intrinsic" / "intrinsic_depth.txt").is_file()
+    ]
     if incomplete:
-        raise FileNotFoundError(f"{len(incomplete)} ScanNet scenes lack an export under {root}: {incomplete[:5]}")
+        raise FileNotFoundError(
+            f"{len(incomplete)} ScanNet scenes lack an export under {root}: {incomplete[:5]}"
+        )
     dataset_extract_scannet.extract_scannet(
-        root=str(root), sample_len=-1, datatset_name="scannet", saved_dir=str(out) + "/",
+        root=str(root),
+        sample_len=-1,
+        datatset_name="scannet",
+        saved_dir=str(out) + "/",
     )
 
 
@@ -215,11 +251,15 @@ def prepare_nyuv2(raw: Path, out: Path, expect: int = 654) -> None:
             # RGB pre-cropped like copy_crop_files; depth full-size, the eval
             # crops it (VDA's eval.py a/b/c/d), exactly as for their nyuv2
             Image.fromarray(rgb[a:b, c:d]).save(out_img)
-            scaled = np.clip(np.round(depth.astype(np.float64) * NYU_FACTOR), 0, 65535).astype(np.uint16)
+            scaled = np.clip(
+                np.round(depth.astype(np.float64) * NYU_FACTOR), 0, 65535
+            ).astype(np.uint16)
             cv2.imwrite(str(out_depth), scaled)
             rel_img = str(out_img.relative_to(out / name))
             rel_depth = str(out_depth.relative_to(out / name))
-            entries.append({seq: [{"image": rel_img, "gt_depth": rel_depth, "factor": NYU_FACTOR}]})
+            entries.append(
+                {seq: [{"image": rel_img, "gt_depth": rel_depth, "factor": NYU_FACTOR}]}
+            )
     with open(out / MANIFEST[name], "w") as f:
         json.dump({name: entries}, f, indent=4)
 
@@ -254,7 +294,9 @@ def check_manifest(out: Path, name: str) -> int:
     for entry in seqs:
         for seq_name, frames in entry.items():
             if not frames:
-                raise ValueError(f"{path}: sequence {seq_name!r} lists no frames (wrong tree layout?)")
+                raise ValueError(
+                    f"{path}: sequence {seq_name!r} lists no frames (wrong tree layout?)"
+                )
             for fr in frames:
                 for key in ("image", "gt_depth"):
                     if not (out / name / fr[key]).is_file():
@@ -265,19 +307,26 @@ def check_manifest(out: Path, name: str) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     # no `choices`: argparse validates the empty default of nargs="*" against
     # them and rejects it, so the check is done by hand below
     ap.add_argument("datasets", nargs="*", help=f"any of {list(PREPARE)}; default: all")
     ap.add_argument("--raw", default=os.environ.get("EVAL_RAW", DEFAULT_RAW))
     ap.add_argument("--out", default=os.environ.get("EVAL_OUT", DEFAULT_OUT))
-    ap.add_argument("--force", action="store_true", help="rebuild a dataset whose manifest exists")
     ap.add_argument(
-        "--cameras", action="store_true",
+        "--force", action="store_true", help="rebuild a dataset whose manifest exists"
+    )
+    ap.add_argument(
+        "--cameras",
+        action="store_true",
         help="only (re)attach GT cameras to the existing manifests; no extraction",
     )
     ap.add_argument(
-        "--nyu-expect", type=int, default=654,
+        "--nyu-expect",
+        type=int,
+        default=654,
         help="NYU test-split size the .mat must yield (smoke tests on a stub .mat lower it)",
     )
     args = ap.parse_args()
@@ -294,7 +343,10 @@ def main() -> int:
         manifest = out / MANIFEST[name]
         if args.cameras:
             if not manifest.is_file():
-                print(f"== {name}: no manifest to attach cameras to ({manifest})", file=sys.stderr)
+                print(
+                    f"== {name}: no manifest to attach cameras to ({manifest})",
+                    file=sys.stderr,
+                )
                 failed.append(name)
                 continue
             try:
@@ -304,7 +356,9 @@ def main() -> int:
                 print(f"== {name}: cameras FAILED: {e!r}", file=sys.stderr, flush=True)
             continue
         if manifest.is_file() and not args.force:
-            print(f"== {name}: manifest exists ({check_manifest(out, name)} sequences), skipping")
+            print(
+                f"== {name}: manifest exists ({check_manifest(out, name)} sequences), skipping"
+            )
             continue
         print(f"== {name}: extracting into {out / name}", flush=True)
         try:
@@ -312,7 +366,10 @@ def main() -> int:
                 prepare_nyuv2(raw, out, expect=args.nyu_expect)
             else:
                 PREPARE[name](raw, out)
-            print(f"== {name}: {check_manifest(out, name)} sequences -> {manifest}", flush=True)
+            print(
+                f"== {name}: {check_manifest(out, name)} sequences -> {manifest}",
+                flush=True,
+            )
             print(f"== {name}: cameras {cameras_for(out, name, raw)}", flush=True)
         except Exception as e:  # keep going: one dataset's raw layout problem should not cost the others
             failed.append(name)

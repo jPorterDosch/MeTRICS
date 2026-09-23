@@ -104,9 +104,7 @@ class SensorData:
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         n = self._frame_count(max_frames)
-        print(
-            "exporting", n // frame_skip, " depth frames to", output_path
-        )
+        print("exporting", n // frame_skip, " depth frames to", output_path)
         for f in range(0, n, frame_skip):
             depth_data = self.frames[f].decompress_depth(self.depth_compression_type)
             # frombuffer replaces the deprecated fromstring(binary): identical
@@ -139,9 +137,7 @@ class SensorData:
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         n = self._frame_count(max_frames)
-        print(
-            "exporting", n // frame_skip, "color frames to", output_path
-        )
+        print("exporting", n // frame_skip, "color frames to", output_path)
         for f in range(0, n, frame_skip):
             color = self.frames[f].decompress_color(self.color_compression_type)
             if image_size is not None:
@@ -163,9 +159,7 @@ class SensorData:
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         n = self._frame_count(max_frames)
-        print(
-            "exporting", n // frame_skip, "camera poses to", output_path
-        )
+        print("exporting", n // frame_skip, "camera poses to", output_path)
         for f in range(0, n, frame_skip):
             self.save_mat_to_file(
                 self.frames[f].camera_to_world,

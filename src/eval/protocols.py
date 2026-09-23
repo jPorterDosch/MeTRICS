@@ -95,6 +95,7 @@ def _finite_or_floor(pred: np.ndarray) -> np.ndarray:
     excluded from every fit and scored as DEPTH_FLOOR, i.e. as an error."""
     return np.where(np.isfinite(pred), pred, DEPTH_FLOOR)
 
+
 METRIC_NAMES = ("abs_rel", "rmse", "delta1")
 
 
@@ -199,10 +200,14 @@ def depth_to_disparity(depth: np.ndarray) -> np.ndarray:
     return 1.0 / np.clip(depth.astype(np.float64), DEPTH_FLOOR, None)
 
 
-def metric_metrics(pred_depth: np.ndarray, gt: np.ndarray, max_depth: float) -> FrameMetrics:
+def metric_metrics(
+    pred_depth: np.ndarray, gt: np.ndarray, max_depth: float
+) -> FrameMetrics:
     """The `metric` protocol: no alignment, raw metric depth against GT."""
     _check_seq("pred_depth", pred_depth, gt)
-    clipped = np.clip(_finite_or_floor(pred_depth), DEPTH_FLOOR, max_depth).astype(np.float32)
+    clipped = np.clip(_finite_or_floor(pred_depth), DEPTH_FLOOR, max_depth).astype(
+        np.float32
+    )
     return vda_frame_metrics(clipped, gt, gt_valid_mask(gt, max_depth))
 
 
@@ -259,11 +264,15 @@ def sparse_aligned_metrics(
         # design decision: the fit lives in each model's NATIVE output space
         # (depth here); a disparity model fits 1/depth against 1/sparse depth
         s, t = affine_fit(pred_native[i][m], sparse_depth[i][m])
-        aligned[i] = np.clip(s * _finite_or_floor(pred_gt_res[i]) + t, DEPTH_FLOOR, max_depth)
+        aligned[i] = np.clip(
+            s * _finite_or_floor(pred_gt_res[i]) + t, DEPTH_FLOOR, max_depth
+        )
     return vda_frame_metrics(aligned, gt, valid)
 
 
-def _relative_pose(pose_a: np.ndarray, pose_b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _relative_pose(
+    pose_a: np.ndarray, pose_b: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     """T_b_a = inv(pose_b) @ pose_a for cam2world poses, as (R, t)."""
     T = np.linalg.inv(pose_b) @ pose_a
     return T[:3, :3], T[:3, 3]
@@ -302,8 +311,12 @@ def tae_vda(
         R_2_1, t_2_1 = _relative_pose(poses[i], poses[i + 1])
         R_1_2, t_1_2 = _relative_pose(poses[i + 1], poses[i])
         K = np.asarray(Ks[i], dtype=np.float64)
-        e1 = mod.tae_torch(d1, d2, torch.from_numpy(R_2_1).double().to(device), t_2_1, K, ones)
-        e2 = mod.tae_torch(d2, d1, torch.from_numpy(R_1_2).double().to(device), t_1_2, K, ones)
+        e1 = mod.tae_torch(
+            d1, d2, torch.from_numpy(R_2_1).double().to(device), t_2_1, K, ones
+        )
+        e2 = mod.tae_torch(
+            d2, d1, torch.from_numpy(R_1_2).double().to(device), t_1_2, K, ones
+        )
         error_sum += float(e1) + float(e2)
     return error_sum / (2 * (S - 1)) * 100.0
 

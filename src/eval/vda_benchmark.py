@@ -39,7 +39,9 @@ class BenchSpec:
     tae_json: str | None = None  # manifest with K/pose (ScanNet only)
     tae_scenes: int = 0  # VDA: eval_scenes_num
     tae_range: tuple[int, int] = (0, 0)  # VDA: start_idx, end_idx
-    base: str | None = None  # tree dir + json key when they differ from name (the *_500 variants)
+    base: str | None = (
+        None  # tree dir + json key when they differ from name (the *_500 variants)
+    )
 
     @property
     def dirname(self) -> str:
@@ -47,7 +49,9 @@ class BenchSpec:
 
 
 SPECS: dict[str, BenchSpec] = {
-    "sintel": BenchSpec("sintel", "sintel/sintel_video.json", 70.0, (0, 436, 0, 1024), 100, True),
+    "sintel": BenchSpec(
+        "sintel", "sintel/sintel_video.json", 70.0, (0, 436, 0, 1024), 100, True
+    ),
     "scannet": BenchSpec(
         "scannet",
         "scannet/scannet_video.json",
@@ -59,12 +63,18 @@ SPECS: dict[str, BenchSpec] = {
         tae_scenes=20,
         tae_range=(10, 180),
     ),
-    "kitti": BenchSpec("kitti", "kitti/kitti_video.json", 80.0, (0, 374, 0, 1242), 110, True),
-    "bonn": BenchSpec("bonn", "bonn/bonn_video.json", 10.0, (0, 480, 0, 640), 110, True),
+    "kitti": BenchSpec(
+        "kitti", "kitti/kitti_video.json", 80.0, (0, 374, 0, 1242), 110, True
+    ),
+    "bonn": BenchSpec(
+        "bonn", "bonn/bonn_video.json", 10.0, (0, 480, 0, 640), 110, True
+    ),
     # not a VDA dataset block: their eval has only the 8-scene 500-frame
     # nyuv2 video split. This is the standard 654-still test split, each
     # still its own one-frame "sequence", with VDA's NYU crop and factor.
-    "nyuv2": BenchSpec("nyuv2", "nyuv2/nyuv2_test.json", 10.0, (45, 471, 41, 601), 1, False),
+    "nyuv2": BenchSpec(
+        "nyuv2", "nyuv2/nyuv2_test.json", 10.0, (45, 471, 41, 601), 1, False
+    ),
     # VDA's headline (Table 1) protocol: up to 500 frames per video, from the
     # *_video_500.json manifests their extractor writes alongside the short
     # ones (ScanNet at stride 1 here, not the 90-frame split's stride 3).
@@ -72,12 +82,32 @@ SPECS: dict[str, BenchSpec] = {
     # video set we do not build. Opt-in: ~4.5x the frames of the short
     # protocol, ScanNet alone 100 x 500.
     "scannet_500": BenchSpec(
-        "scannet_500", "scannet/scannet_video_500.json", 10.0, (8, -8, 11, -11), 500, True, base="scannet"
+        "scannet_500",
+        "scannet/scannet_video_500.json",
+        10.0,
+        (8, -8, 11, -11),
+        500,
+        True,
+        base="scannet",
     ),
     "kitti_500": BenchSpec(
-        "kitti_500", "kitti/kitti_video_500.json", 80.0, (0, 374, 0, 1242), 500, True, base="kitti"
+        "kitti_500",
+        "kitti/kitti_video_500.json",
+        80.0,
+        (0, 374, 0, 1242),
+        500,
+        True,
+        base="kitti",
     ),
-    "bonn_500": BenchSpec("bonn_500", "bonn/bonn_video_500.json", 10.0, (0, 480, 0, 640), 500, True, base="bonn"),
+    "bonn_500": BenchSpec(
+        "bonn_500",
+        "bonn/bonn_video_500.json",
+        10.0,
+        (0, 480, 0, 640),
+        500,
+        True,
+        base="bonn",
+    ),
 }
 
 
@@ -134,8 +164,10 @@ def load_manifest(root: Path, spec: BenchSpec, tae: bool = False) -> list[Sequen
     sequences = []
     for entry in data[spec.dirname]:
         if len(entry) != 1:
-            raise ValueError(f"{path}: one sequence per entry expected, got {list(entry)}")
-        (name, frames), = entry.items()
+            raise ValueError(
+                f"{path}: one sequence per entry expected, got {list(entry)}"
+            )
+        ((name, frames),) = entry.items()
         if tae:
             lo, hi = spec.tae_range
             frames = frames[lo:hi]
@@ -179,7 +211,9 @@ def read_gt(frame: Frame, crop: tuple[int, int, int, int]) -> np.ndarray:
     if raw is None:
         raise FileNotFoundError(f"cannot read GT depth {frame.depth}")
     if raw.ndim != 2:
-        raise ValueError(f"{frame.depth}: expected a single-channel depth png, got {raw.shape}")
+        raise ValueError(
+            f"{frame.depth}: expected a single-channel depth png, got {raw.shape}"
+        )
     depth = raw.astype(np.float64) / frame.factor
     ys, xs = crop_slices(crop)
     depth = depth[ys, xs]
@@ -201,7 +235,10 @@ def gt_stack(seq: Sequence, spec: BenchSpec) -> np.ndarray:
 
 
 def scaled_intrinsics(
-    K: np.ndarray, crop: tuple[int, int, int, int], from_hw: tuple[int, int], to_hw: tuple[int, int]
+    K: np.ndarray,
+    crop: tuple[int, int, int, int],
+    from_hw: tuple[int, int],
+    to_hw: tuple[int, int],
 ) -> np.ndarray:
     """K for the model-resolution frame: principal point shifted by the crop
     origin, then scaled from the cropped GT size to the model size."""
@@ -237,7 +274,9 @@ def build_views(
     its own resolution (gt_stack), never this copy.
     """
     if len(seq.frames) != gt.shape[0]:
-        raise ValueError(f"{seq.name}: {len(seq.frames)} frames but gt has {gt.shape[0]}")
+        raise ValueError(
+            f"{seq.name}: {len(seq.frames)} frames but gt has {gt.shape[0]}"
+        )
     views = []
     H, W = gt.shape[1:]
     crop = spec.crop if seq.rgb_uncropped else None
@@ -260,13 +299,18 @@ def build_views(
                 scaled_intrinsics(fr.K, spec.crop, (H, W), (h, w)).astype(np.float32)
             )[None].to(device)
         if fr.pose is not None:
-            view["camera_pose"] = torch.from_numpy(fr.pose.astype(np.float32))[None].to(device)
+            view["camera_pose"] = torch.from_numpy(fr.pose.astype(np.float32))[None].to(
+                device
+            )
         views.append(view)
     return views
 
 
 def load_rgb(
-    path: Path, size: int, crop: tuple[int, int, int, int] | None, gt_hw: tuple[int, int]
+    path: Path,
+    size: int,
+    crop: tuple[int, int, int, int] | None,
+    gt_hw: tuple[int, int],
 ) -> torch.Tensor:
     """One RGB as the model input [1,3,h,w] in [-1,1]: dust3r's
     load_images_for_eval(size, crop=False) math (long side -> size, both
@@ -297,13 +341,16 @@ def load_rgb(
     return ImgNorm(img)[None]
 
 
-def resize_to_gt(pred: np.ndarray, hw: tuple[int, int], nearest: bool = False) -> np.ndarray:
+def resize_to_gt(
+    pred: np.ndarray, hw: tuple[int, int], nearest: bool = False
+) -> np.ndarray:
     """[S,h,w] -> [S,H,W], bilinear like VDA's get_infer (cv2 default), or
     nearest for masks."""
     H, W = hw
     interp = cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR
     out = np.stack(
-        [cv2.resize(p.astype(np.float32), (W, H), interpolation=interp) for p in pred], axis=0
+        [cv2.resize(p.astype(np.float32), (W, H), interpolation=interp) for p in pred],
+        axis=0,
     )
     return out.astype(bool) if nearest and pred.dtype == bool else out
 

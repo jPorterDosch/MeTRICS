@@ -77,8 +77,12 @@ class NonFinitePredictionTest(unittest.TestCase):
         self.assertTrue(np.isfinite(met.abs_rel))
         sparse = np.zeros_like(gt, dtype=bool)
         sparse[:, ::3, ::3] = True
-        sparse[0, 3, 3] = True  # a NaN pixel inside the sparse depth is dropped from the fit
-        spa = P.sparse_aligned_metrics(pred, np.where(sparse, gt, 0), sparse, pred, sparse, gt, 10.0)
+        sparse[0, 3, 3] = (
+            True  # a NaN pixel inside the sparse depth is dropped from the fit
+        )
+        spa = P.sparse_aligned_metrics(
+            pred, np.where(sparse, gt, 0), sparse, pred, sparse, gt, 10.0
+        )
         self.assertTrue(np.isfinite(spa.abs_rel))
         self.assertLess(spa.abs_rel, 0.05)
 
@@ -132,9 +136,31 @@ class SparseAlignedProtocolTest(unittest.TestCase):
         gt, pred, pd, pm = self._case()
         S, H, W = gt.shape
         # native at half resolution: fit there, score at full
-        pred_n = np.stack([cv2.resize(p, (W // 2, H // 2), interpolation=cv2.INTER_NEAREST) for p in pred])
-        pd_n = np.stack([cv2.resize(p, (W // 2, H // 2), interpolation=cv2.INTER_NEAREST) for p in pd])
-        pm_n = np.stack([cv2.resize(p.astype(np.float32), (W // 2, H // 2), interpolation=cv2.INTER_NEAREST) for p in pm]) > 0.5
+        pred_n = np.stack(
+            [
+                cv2.resize(p, (W // 2, H // 2), interpolation=cv2.INTER_NEAREST)
+                for p in pred
+            ]
+        )
+        pd_n = np.stack(
+            [
+                cv2.resize(p, (W // 2, H // 2), interpolation=cv2.INTER_NEAREST)
+                for p in pd
+            ]
+        )
+        pm_n = (
+            np.stack(
+                [
+                    cv2.resize(
+                        p.astype(np.float32),
+                        (W // 2, H // 2),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    for p in pm
+                ]
+            )
+            > 0.5
+        )
         pm_gt = VB.resize_to_gt(pm_n.astype(np.float32), (H, W), nearest=True) > 0.5
         m = P.sparse_aligned_metrics(pred_n, pd_n, pm_n, pred, pm_gt, gt, 10.0)
         self.assertLess(m.abs_rel, 1e-6)
@@ -190,7 +216,9 @@ class ManifestTest(unittest.TestCase):
     def test_manifest_gt_factor_crop_and_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            spec = VB.BenchSpec("bonn", "bonn/bonn_video.json", 10.0, (1, 5, 2, 8), 2, True)
+            spec = VB.BenchSpec(
+                "bonn", "bonn/bonn_video.json", 10.0, (1, 5, 2, 8), 2, True
+            )
             seq_dir = root / "bonn" / "seq_a"
             (seq_dir / "rgb").mkdir(parents=True)
             (seq_dir / "depth").mkdir(parents=True)
@@ -198,10 +226,18 @@ class ManifestTest(unittest.TestCase):
             for i in range(3):
                 rgb = np.zeros((6, 10, 3), np.uint8)
                 cv2.imwrite(str(seq_dir / "rgb" / f"{i}.png"), rgb)
-                depth = np.full((6, 10), 5000 * (i + 1), np.uint16)  # (i+1) metres at factor 5000
+                depth = np.full(
+                    (6, 10), 5000 * (i + 1), np.uint16
+                )  # (i+1) metres at factor 5000
                 depth[0, 0] = 0
                 cv2.imwrite(str(seq_dir / "depth" / f"{i}.png"), depth)
-                frames.append({"image": f"seq_a/rgb/{i}.png", "gt_depth": f"seq_a/depth/{i}.png", "factor": 5000.0})
+                frames.append(
+                    {
+                        "image": f"seq_a/rgb/{i}.png",
+                        "gt_depth": f"seq_a/depth/{i}.png",
+                        "factor": 5000.0,
+                    }
+                )
             with open(root / "bonn" / "bonn_video.json", "w") as f:
                 json.dump({"bonn": [{"seq_a": frames}]}, f)
             seqs = VB.load_manifest(root, spec)
@@ -220,12 +256,23 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(spec.dirname, "bonn")
             self.assertEqual(spec.max_len, 500)
             (root / "bonn").mkdir()
-            frames = [{"image": f"s/rgb/{i}.png", "gt_depth": f"s/depth/{i}.png", "factor": 5000.0} for i in range(3)]
+            frames = [
+                {
+                    "image": f"s/rgb/{i}.png",
+                    "gt_depth": f"s/depth/{i}.png",
+                    "factor": 5000.0,
+                }
+                for i in range(3)
+            ]
             with open(root / "bonn" / "bonn_video_500.json", "w") as f:
-                json.dump({"bonn": [{"s": frames}]}, f)  # keyed by the base dataset, as VDA writes it
+                json.dump(
+                    {"bonn": [{"s": frames}]}, f
+                )  # keyed by the base dataset, as VDA writes it
             seqs = VB.load_manifest(root, spec)
             self.assertEqual(seqs[0].dataset, "bonn_500")
-            self.assertEqual(str(seqs[0].frames[0].image), str(root / "bonn" / "s/rgb/0.png"))
+            self.assertEqual(
+                str(seqs[0].frames[0].image), str(root / "bonn" / "s/rgb/0.png")
+            )
             self.assertEqual(VB.bench_root_ok(root, ("bonn_500",)), [])
             self.assertEqual(VB.bench_root_ok(root, ("kitti_500",)), ["kitti_500"])
 
@@ -235,7 +282,9 @@ class ManifestTest(unittest.TestCase):
             (root / "scannet").mkdir()
             (root / "scannet" / "scannet_video.json").write_text("{}")
             self.assertEqual(VB.bench_root_ok(root, ("scannet",)), [])
-            self.assertEqual(VB.bench_root_ok(root, ("scannet",), ("scannet",)), ["scannet/tae"])
+            self.assertEqual(
+                VB.bench_root_ok(root, ("scannet",), ("scannet",)), ["scannet/tae"]
+            )
             (root / "scannet" / "scannet_video_tae.json").write_text("{}")
             self.assertEqual(VB.bench_root_ok(root, ("scannet",), ("scannet",)), [])
 
@@ -260,7 +309,8 @@ class BenchmarkCfgAndAggregateTest(unittest.TestCase):
     def test_has_cameras_rejects_nonfinite_pose(self):
         K = np.eye(3)
         good = VB.Frame(Path("a"), Path("b"), 1.0, K, np.eye(4))
-        bad_pose = np.eye(4); bad_pose[0, 3] = -np.inf
+        bad_pose = np.eye(4)
+        bad_pose[0, 3] = -np.inf
         bad = VB.Frame(Path("a"), Path("b"), 1.0, K, bad_pose)
         none = VB.Frame(Path("a"), Path("b"), 1.0, K, None)
         self.assertTrue(bench_eval.has_cameras(VB.Sequence("x", "s", [good, good])))
@@ -276,13 +326,35 @@ class BenchmarkCfgAndAggregateTest(unittest.TestCase):
         def row(seq, mode, d, absrel):
             m = {"abs_rel": absrel, "rmse": 1.0, "delta1": 0.5, "frames": 10.0}
             return {
-                "dataset": "bonn", "sequence": seq, "mode": mode, "density": d,
-                "realized_density": d * 0.9, "frames": 10,
-                "published": dict(m), "sparse_aligned": dict(m), "metric": dict(m),
+                "dataset": "bonn",
+                "sequence": seq,
+                "mode": mode,
+                "density": d,
+                "realized_density": d * 0.9,
+                "frames": 10,
+                "published": dict(m),
+                "sparse_aligned": dict(m),
+                "metric": dict(m),
             }
-        rows = [row("a", "stream", 0.05, 0.1), row("b", "stream", 0.05, 0.3), row("a", "stream", 0.4, float("nan"))]
-        tae = [{"dataset": "bonn", "sequence": "a", "mode": "stream", "density": 0.05,
-                "realized_density": 0.04, "frames": 10, "tae_vda": 2.0, "tae_ours": 0.02, "tae_ours_sq": 0.001}]
+
+        rows = [
+            row("a", "stream", 0.05, 0.1),
+            row("b", "stream", 0.05, 0.3),
+            row("a", "stream", 0.4, float("nan")),
+        ]
+        tae = [
+            {
+                "dataset": "bonn",
+                "sequence": "a",
+                "mode": "stream",
+                "density": 0.05,
+                "realized_density": 0.04,
+                "frames": 10,
+                "tae_vda": 2.0,
+                "tae_ours": 0.02,
+                "tae_ours_sq": 0.001,
+            }
+        ]
         out = bench_eval.aggregate(rows, tae)
         self.assertAlmostEqual(out["bonn/stream/d5/published_abs_rel"], 0.2)
         self.assertEqual(out["bonn/stream/d5/n_sequences"], 2.0)

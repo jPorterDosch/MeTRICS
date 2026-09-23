@@ -125,7 +125,11 @@ def already_extracted(scene_dir, as_zip=True, options=None):
         # mere existence of the final name means the archive is complete
         return osp.isfile(osp.join(scene_dir, "frames.zip"))
     marker = osp.join(scene_dir, EXPORT_MARKER)
-    recorded = open(marker).read().strip() if osp.isfile(marker) else export_options(None, False)
+    recorded = (
+        open(marker).read().strip()
+        if osp.isfile(marker)
+        else export_options(None, False)
+    )
     if options is not None and recorded != options:
         return False
     intr = osp.join(scene_dir, "intrinsic", "intrinsic_depth.txt")
@@ -139,7 +143,9 @@ def already_extracted(scene_dir, as_zip=True, options=None):
     return nc > 0 and nc == len(os.listdir(depth)) == npose
 
 
-def extract_scene(scene_dir, sens_path, as_zip=True, max_frames=None, color_at_depth_res=False):
+def extract_scene(
+    scene_dir, sens_path, as_zip=True, max_frames=None, color_at_depth_res=False
+):
     """Export color/depth/pose/intrinsic from one .sens into scene_dir (the
     .sens's own directory unless --out-root redirected it)."""
     sd = SensorData(sens_path)
@@ -174,8 +180,14 @@ def main():
     if args.max_frames is not None and (args.out_root is None or not args.extracted):
         raise SystemExit("--max-frames needs --out-root and --extracted (see --help)")
     if args.color_at_depth_res and (args.out_root is None or not args.extracted):
-        raise SystemExit("--color-at-depth-res needs --out-root and --extracted (see --help)")
-    options = export_options(args.max_frames, args.color_at_depth_res) if args.extracted else None
+        raise SystemExit(
+            "--color-at-depth-res needs --out-root and --extracted (see --help)"
+        )
+    options = (
+        export_options(args.max_frames, args.color_at_depth_res)
+        if args.extracted
+        else None
+    )
 
     # enumerate every scene that actually has a .sens; the export target is the
     # scene's own dir unless --out-root redirects it
@@ -221,7 +233,9 @@ def main():
         try:
             print(f"[{done + failed + 1}] extract {split}/{scene}", flush=True)
             os.makedirs(scene_dir, exist_ok=True)
-            extract_scene(scene_dir, sens, as_zip, args.max_frames, args.color_at_depth_res)
+            extract_scene(
+                scene_dir, sens, as_zip, args.max_frames, args.color_at_depth_res
+            )
             done += 1
         except Exception as e:  # one bad .sens shouldn't kill the shard
             failed += 1
