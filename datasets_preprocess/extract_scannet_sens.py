@@ -74,40 +74,102 @@ def get_parser():
         help="write loose per-frame files instead of one frames.zip per scene "
         "(the original layout; ~one inode per frame)",
     )
+    p.add_argument(
+        "--out-root",
+        default=None,
+        help="write <out-root>/<split>/<scene>/ instead of in place next to the "
+        ".sens -- for a raw tree you cannot write into (the shared scans_test "
+        "is owned by another user), or for a partial export that must not be "
+        "mistaken for a complete one by preprocess_scannet.py",
+    )
+    p.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="export only the first N frames of each scan (default: all). The "
+        "video-depth benchmark reads a scan's first 510 frames; exporting the "
+        "other ~90%% of a 100-scene split costs ~100 GB and ~600k inodes for "
+        "nothing. Requires --out-root: a truncated in-place export would be "
+        "picked up by preprocess_scannet.py as the whole scan",
+    )
+    p.add_argument(
+        "--color-at-depth-res",
+        action="store_true",
+        help="export colour resized (INTER_AREA) to the depth image size "
+        "(640x480) instead of the native 1296x968. The video-depth benchmark "
+        "applies one pixel crop ([8:-8, 11:-11]) to both, so they must share "
+        "a size for the crop to mean the same field of view; the model runs "
+        "at 518 wide either way. Requires --out-root and --extracted",
+    )
     return p
 
 
-def already_extracted(scene_dir, as_zip=True):
-    """True if this scene already has a complete-looking extraction (skip it)."""
+# Written next to a loose export to record how it was cut; an export with a
+# different cap (or colour size) is not "complete" for a run asking otherwise.
+EXPORT_MARKER = ".export_options"
+
+
+def export_options(max_frames, color_at_depth_res):
+    return f"max_frames={max_frames if max_frames is not None else 'all'} color_at_depth_res={color_at_depth_res}"
+
+
+def already_extracted(scene_dir, as_zip=True, options=None):
+    """True if this scene already has a complete-looking extraction (skip it).
+    `options` is export_options(...) of the current run: a loose export
+    whose marker records different options (a 510-frame cut for a run that
+    wants every frame) does not count. A marker-less loose tree predates the
+    marker and was always a full-frame native-colour export."""
     if as_zip:
         # SceneZipWriter renames .tmp -> final only on clean exit, so the
         # mere existence of the final name means the archive is complete
         return osp.isfile(osp.join(scene_dir, "frames.zip"))
+    marker = osp.join(scene_dir, EXPORT_MARKER)
+    recorded = open(marker).read().strip() if osp.isfile(marker) else export_options(None, False)
+    if options is not None and recorded != options:
+        return False
     intr = osp.join(scene_dir, "intrinsic", "intrinsic_depth.txt")
-    color, depth = osp.join(scene_dir, "color"), osp.join(scene_dir, "depth")
+    color, depth, pose = (osp.join(scene_dir, d) for d in ("color", "depth", "pose"))
     if not (osp.isfile(intr) and osp.isdir(color) and osp.isdir(depth)):
         return False
     nc = len(os.listdir(color))
-    return nc > 0 and nc == len(os.listdir(depth))
+    # poses are exported after color and depth, so a run killed between the
+    # two would otherwise pass as complete with an empty pose/ dir
+    npose = len(os.listdir(pose)) if osp.isdir(pose) else 0
+    return nc > 0 and nc == len(os.listdir(depth)) == npose
 
 
-def extract_scene(scene_dir, sens_path, as_zip=True):
-    """Export color/depth/pose/intrinsic from one .sens, in place."""
+def extract_scene(scene_dir, sens_path, as_zip=True, max_frames=None, color_at_depth_res=False):
+    """Export color/depth/pose/intrinsic from one .sens into scene_dir (the
+    .sens's own directory unless --out-root redirected it)."""
     sd = SensorData(sens_path)
     if as_zip:
+        if max_frames is not None or color_at_depth_res:
+            raise ValueError("--max-frames / --color-at-depth-res need --extracted")
         with SceneZipWriter(osp.join(scene_dir, "frames.zip")) as writer:
             sd.export_all_to_zip(writer)
         return
-    sd.export_color_images(osp.join(scene_dir, "color"))
-    sd.export_depth_images(osp.join(scene_dir, "depth"))
-    sd.export_poses(osp.join(scene_dir, "pose"))
+    color_size = (sd.depth_height, sd.depth_width) if color_at_depth_res else None
+    sd.export_color_images(
+        osp.join(scene_dir, "color"), image_size=color_size, max_frames=max_frames
+    )
+    sd.export_depth_images(osp.join(scene_dir, "depth"), max_frames=max_frames)
+    sd.export_poses(osp.join(scene_dir, "pose"), max_frames=max_frames)
     sd.export_intrinsics(osp.join(scene_dir, "intrinsic"))
+    # last, so a run killed mid-export leaves no marker and is redone
+    with open(osp.join(scene_dir, EXPORT_MARKER), "w") as f:
+        f.write(export_options(max_frames, color_at_depth_res) + "\n")
 
 
 def main():
     args = get_parser().parse_args()
+    if args.max_frames is not None and (args.out_root is None or not args.extracted):
+        raise SystemExit("--max-frames needs --out-root and --extracted (see --help)")
+    if args.color_at_depth_res and (args.out_root is None or not args.extracted):
+        raise SystemExit("--color-at-depth-res needs --out-root and --extracted (see --help)")
+    options = export_options(args.max_frames, args.color_at_depth_res) if args.extracted else None
 
-    # enumerate every scene that actually has a .sens
+    # enumerate every scene that actually has a .sens; the export target is the
+    # scene's own dir unless --out-root redirects it
     jobs = []
     for split in args.splits:
         split_dir = osp.join(args.raw_root, split)
@@ -118,7 +180,12 @@ def main():
             scene_dir = osp.join(split_dir, scene)
             sens = osp.join(scene_dir, f"{scene}.sens")
             if osp.isdir(scene_dir) and osp.isfile(sens):
-                jobs.append((split, scene, scene_dir, sens))
+                out_dir = (
+                    scene_dir
+                    if args.out_root is None
+                    else osp.join(args.out_root, split, scene)
+                )
+                jobs.append((split, scene, out_dir, sens))
 
     # A shard id at or above the shard count selects nothing (i % n < n
     # always), which would silently extract zero scenes and exit 0.
@@ -136,15 +203,16 @@ def main():
     as_zip = not args.extracted
     done = skipped = failed = 0
     for split, scene, scene_dir, sens in jobs:
-        if already_extracted(scene_dir, as_zip):
+        if already_extracted(scene_dir, as_zip, options):
             skipped += 1
             continue
         if args.dry_run:
-            print(f"WOULD EXTRACT {split}/{scene}")
+            print(f"WOULD EXTRACT {split}/{scene} -> {scene_dir}")
             continue
         try:
             print(f"[{done + failed + 1}] extract {split}/{scene}", flush=True)
-            extract_scene(scene_dir, sens, as_zip)
+            os.makedirs(scene_dir, exist_ok=True)
+            extract_scene(scene_dir, sens, as_zip, args.max_frames, args.color_at_depth_res)
             done += 1
         except Exception as e:  # one bad .sens shouldn't kill the shard
             failed += 1

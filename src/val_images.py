@@ -23,6 +23,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from streamvggt.utils.geometry import unproject_depth_map_to_point_map
+
 
 def clip_dataset_label(views: list[dict], b: int) -> str:
     """Dataset label of clip b (all views in a clip come from one scene, hence
@@ -224,3 +226,52 @@ def render_panel(
     )
     fig.colorbar(sm, ax=axes[1:].tolist(), fraction=0.046, label="depth (m)")
     return fig
+
+
+def clip_predictions(
+    img: torch.Tensor,
+    depth: torch.Tensor,
+    valid: torch.Tensor,
+    K: torch.Tensor,
+    pose: torch.Tensor,
+    mask_to_gt: bool = True,
+) -> dict:
+    """Assemble the numpy `predictions` dict predictions_to_glb consumes, for a
+    single clip. Inputs are the per-clip slices of _stack_depth_batch plus the
+    images: img [S,3,H,W] in [0,1], depth [S,H,W], valid [S,H,W] bool,
+    K [S,3,3], pose [S,4,4] cam2world.
+
+    Both the unprojector and predictions_to_glb want world->cam extrinsics of
+    shape [S,3,4] -- depth_to_world_coords_points is documented "cam from
+    world", and the glb builder inverts extrinsic to place the camera frustums
+    -- so we invert the cam2world pose ONCE and hand the same array to both;
+    point cloud and cameras then live in one frame. Invalid pixels get zero
+    confidence, which predictions_to_glb's conf>1e-5 filter drops (paired with
+    conf_thres=0.0, so no valid pixels are thresholded out).
+
+    mask_to_gt=True (default) keeps only pixels with GT depth, which is what the
+    training-time export wants: the cloud then covers exactly the pixels the
+    logged metrics are computed over. Pass False for inference/visualization of
+    a depth-COMPLETION model -- the prediction in GT holes (sensor dropouts,
+    transparent/specular surfaces) is the completion output, and masking to GT
+    hides precisely the part you cannot read off the metrics. isfinite is
+    applied either way: a NaN/Inf would survive the conf>1e-5 filter and poison
+    the np.percentile scene scale (-> NaN camera sizing for the whole clip)."""
+    world2cam = np.linalg.inv(pose.numpy())[:, :3, :4].astype(np.float32)  # [S,3,4]
+    # the unprojector does a hard np.squeeze(-1) per frame, so it needs the
+    # trailing singleton (_stack_depth_batch already dropped it -> [S,H,W])
+    world_points = unproject_depth_map_to_point_map(
+        depth.numpy()[..., None], world2cam, K.numpy()
+    )  # [S,H,W,3]
+    # confidence = GT-valid AND finite prediction. Dropping non-finite pixels
+    # matters: a NaN/Inf predicted depth (bad/early ckpt) at a GT-valid pixel
+    # would survive predictions_to_glb's conf>1e-5 filter and poison the
+    # np.percentile scene-scale (-> NaN camera sizing for the whole clip).
+    finite = torch.isfinite(depth)
+    conf = ((valid & finite) if mask_to_gt else finite).numpy().astype(np.float32)
+    return {
+        "world_points_from_depth": world_points,
+        "depth_conf": conf,
+        "images": img.numpy(),
+        "extrinsic": world2cam,
+    }
