@@ -83,13 +83,21 @@ WANDB_ENTITY = "sparse_representation_learning"
 # so a mixture entry is a dataset name rather than a repeated absolute path.
 _DATA_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/processed")
 
-# ARKitScenes is NOT under _DATA_ROOT: metrics_data/processed is owned by hqi
-# with mode drwxr-sr-x, so this uid cannot create directories in it (the
-# preprocess job failed with EACCES doing exactly that). Its two trees are
-# written to a sibling root instead, via METRICS_PROCESSED_ROOT. Fold this back
-# into _DATA_ROOT once processed/ is group-writable -- both are on the same
-# Lustre mount, so the move is metadata-only.
-_ARKIT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd")
+# Everything rebuilt as video lives HERE, not under _DATA_ROOT:
+# metrics_data/processed is owned by hqi with mode drwxr-sr-x, so this uid
+# cannot create directories in it (the preprocess job failed with EACCES doing
+# exactly that), and its trees are written to a sibling root via
+# METRICS_PROCESSED_ROOT. Fold this back into _DATA_ROOT once processed/ is
+# group-writable -- both are on the same Lustre mount, so the move is
+# metadata-only.
+#
+# _DATA_ROOT still holds the PRE-REBUILD ScanNet++: 228 scenes of ~143 thinned
+# iPhone frames plus DSLR stills, against ~637 contiguous iPhone frames per
+# scene here. Both paths exist and both load, so pointing ScanNet++ at
+# _DATA_ROOT trains on the old selection with nothing to show for it but a
+# smaller dataset -- which is why the two roots are named for what they hold
+# rather than for which dataset lives in them.
+_REBUILT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd")
 
 # The training aspect-ratio list (config/train.yaml verbatim). Shared by every
 # dataset in a mixture -- CatDataset requires agreement -- and not specific to
@@ -181,11 +189,11 @@ class FinetuneDepthCfg:
     train_dataset: MultiDatasetConfig = field(
         default_factory=lambda: MultiDatasetConfig(
             root=(
-                _DATA_ROOT / "processed_scannetpp",
+                _REBUILT_ROOT / "processed_scannetpp",
                 _DATA_ROOT / "processed_tartanair",
                 _DATA_ROOT / "processed_scannet",
-                _ARKIT_ROOT / "processed_arkitscenes",
-                _ARKIT_ROOT / "processed_arkitscenes_highres",
+                _REBUILT_ROOT / "processed_arkitscenes",
+                _REBUILT_ROOT / "processed_arkitscenes_highres",
             ),
             dataset=(
                 DatasetName.SCANNETPP,
@@ -200,7 +208,7 @@ class FinetuneDepthCfg:
                 None,
                 None,
                 None,
-                _ARKIT_ROOT / "processed_arkitscenes_highres",
+                _REBUILT_ROOT / "processed_arkitscenes_highres",
                 None,
             ),
             num_views=10,

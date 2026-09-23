@@ -57,7 +57,15 @@ ARM_FLAGS=(
 
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 DATA=/lustre/isaac24/proj/UTK0516/metrics_data/processed
-ARKIT_OUT="${ARKIT_OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
+# The datasets rebuilt as video are NOT under $DATA: metrics_data/processed is
+# hqi-owned with mode drwxr-sr-x, so this uid cannot mkdir in it and the
+# preprocess jobs ran with METRICS_PROCESSED_ROOT pointed at this sibling.
+#
+# $DATA still holds the PRE-REBUILD ScanNet++ (~143 thinned iPhone frames per
+# scene plus DSLR stills, against ~637 contiguous iPhone frames here). Both
+# load, so reading ScanNet++ from $DATA silently trains on the old selection.
+REBUILT="${REBUILT:-/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd}"
+ARKIT_OUT="${ARKIT_OUT:-$REBUILT}"
 # same exp_group as train_all_datasets.sh, so the four cells sit side by side
 EXP_GROUP=metric_all_datasets
 CKPT_DIR="${CKPT_DIR:-/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd}"
@@ -79,7 +87,7 @@ else
 fi
 
 [ -f "$PRETRAINED" ] || { echo "[fatal] missing $PRETRAINED"; exit 1; }
-for d in "$DATA/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/processed_scannet" \
+for d in "$REBUILT/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/processed_scannet" \
          "$ARKIT_OUT/processed_arkitscenes" "$ARKIT_OUT/processed_arkitscenes_highres"; do
     [ -d "$d" ] || { echo "[fatal] missing dataset root: $d"; exit 1; }
 done
@@ -101,7 +109,7 @@ for i in "${!ARM_NAMES[@]}"; do
         --train.train-heads DEPTH \
         --loss.depth-log-space \
         --loss.depth-alpha 0.02 \
-        --train-dataset.root "$DATA/processed_scannetpp" \
+        --train-dataset.root "$REBUILT/processed_scannetpp" \
                              "$DATA/processed_tartanair" \
                              "$DATA/processed_scannet" \
                              "$ARKIT_OUT/processed_arkitscenes" \

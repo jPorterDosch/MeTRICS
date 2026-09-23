@@ -57,16 +57,22 @@
 # 404s), so 228 scenes are processed and the missing one is reported once per
 # task rather than aborting the run.
 #
-# Sizing, measured on 036bce3393 (150 DSLR + 131 iPhone images, 112 MB mesh):
-#   time  5m43s for the scene, of which ~170 s is decoding the two mkvs and
-#         ~0.5 s per image is ray casting. Over 228 scenes / 63,846
-#         renderable images that is ~22 core-hours, so ~55 min per task at
-#         24 ways. The 12 h wall is slack, not need.
-#   size  132 MB of frames.zip for 281 images (~470 KB each: a 1035x690 or
-#         920x690 jpg plus a uint16 depth png), so ~29 GiB for the set.
+# Sizing, measured on 036bce3393 (637 registered iPhone frames, 112 MB mesh)
+# after the switch to iPhone-only conversion at every registered frame:
+#   time  11m18s for the scene, ~1.06 s per frame, dominated by ray casting.
+#         Over 228 scenes that is ~43 core-hours, so ~1h50 per task at 24
+#         ways -- still inside the 12 h wall, with room for the scenes that
+#         register more frames than this one.
+#   size  252 MB of frames.zip for 637 frames (~400 KB each: a 920x690 jpg
+#         plus a uint16 depth png), so ~57 GiB for the set -- up from ~29 GiB,
+#         since ~4.5x more iPhone frames are kept and no DSLR stills are.
 #   mem   2.5 GB peak RSS. Dominated by the mesh and its Embree BVH, so it
 #         scales with mesh size: this one is 112 MB against a worst case of
 #         256 MB (47b37eb6f9), hence 16G rather than 8G.
+#
+# The output differs from the current tree for every scene, so this cannot
+# resume over it: point METRICS_PROCESSED_ROOT (or --output_dir) at a new
+# directory, which also keeps the tree in use readable while it runs.
 
 set -eu
 

@@ -15,6 +15,7 @@ import cv2
 from tqdm import tqdm
 from multiprocessing import Pool
 
+sys.path.insert(0, osp.dirname(osp.abspath(__file__)))
 sys.path.insert(0, osp.join(osp.dirname(osp.abspath(__file__)), "..", "src"))
 from streamvggt.datasets.utils.zipio import (  # noqa: E402
     SceneZipWriter,
@@ -22,6 +23,14 @@ from streamvggt.datasets.utils.zipio import (  # noqa: E402
     listdir as zlistdir,
     read_bytes,
 )
+from preprocess_arkitscenes import frame_timestamp  # noqa: E402
+
+# How far a laser-GT depth frame may sit from the RGB frame it is paired with,
+# as a fraction of the RGB frame period (0.6 -> 20 ms at 30 fps). Scales with
+# the capture rate, admits this release's uniform ~16 ms depth/RGB offset, and
+# still rejects anything that is not the nearest frame. Protocol parameter: it
+# decides which frames exist and how far depth may sit from its image.
+MATCH_WINDOW_FRAMES = 0.6
 
 
 def get_parser():
@@ -76,7 +85,12 @@ def read_traj(traj_path):
         traj_lines = f.readlines()
         for line in traj_lines:
             tokens = line.split()
-            assert len(tokens) == 7
+            if len(tokens) != 7:
+                raise ValueError(
+                    f"{traj_path}: expected 7 fields per pose line "
+                    f"(timestamp + 3 angle-axis + 3 translation), got "
+                    f"{len(tokens)}: {line[:120]!r}"
+                )
             traj_timestamp = float(tokens[0])
 
             timestamps_decimal_value = value_to_decimal(traj_timestamp, 3)
@@ -107,6 +121,7 @@ def read_traj(traj_path):
 def main(rootdir, outdir):
     os.makedirs(outdir, exist_ok=True)
     subdirs = ["Validation", "Training"]
+    failed_total = []
     for subdir in subdirs:
         outsubdir = osp.join(outdir, subdir)
         os.makedirs(outsubdir, exist_ok=True)
@@ -122,7 +137,7 @@ def main(rootdir, outdir):
             results = list(
                 tqdm(
                     pool.imap(
-                        process_scene,
+                        process_scene_isolated,
                         [
                             (rootdir, outdir, subdir, scene_subdir)
                             for scene_subdir in scene_dirs
@@ -132,11 +147,51 @@ def main(rootdir, outdir):
                 )
             )
 
-        # Filter None results and other post-processing
-        valid_scenes = [result for result in results if result is not None]
+        failed = [scene for status, scene in results if status == "failed"]
+        valid_scenes = [scene for status, scene in results if status == "ok"]
+        if failed:
+            failed_total.extend(failed)
+            print(
+                f"{len(failed)} scene(s) failed in {subdir}: "
+                + ", ".join(failed[:10])
+                + (", ..." if len(failed) > 10 else ""),
+                file=sys.stderr,
+            )
+        # written even when scenes failed: it lists what DID convert, and the
+        # non-zero exit below keeps a lossy pass from looking successful
         outlistfile = osp.join(outsubdir, "scene_list.json")
         with open(outlistfile, "w") as f:
             json.dump(valid_scenes, f)
+
+    # Exit non-zero so Slurm marks the job FAILED -- the same contract as
+    # preprocess_arkitscenes.py and preprocess_scannetpp.py.
+    if failed_total:
+        raise SystemExit(
+            f"{len(failed_total)} scene(s) failed to convert; rerun to retry "
+            "them (converted scenes are skipped)"
+        )
+
+
+def process_scene_isolated(args):
+    """process_scene, with one scene's failure contained to that scene.
+
+    Scenes run under Pool.imap, where an exception escaping any one worker
+    propagates out of the map and aborts the whole split -- before
+    scene_list.json is written, and in a way no rerun can get past: the
+    failing scene never writes scene_metadata.npz, so the resume check retries
+    it first and dies at the same place every time. Caught here instead, the
+    scene is reported and the rest of the pass completes.
+
+    returns ("ok", scene), ("skipped", scene) for a scene with nothing usable,
+    or ("failed", scene).
+    """
+    scene_subdir = args[3]
+    try:
+        result = process_scene(args)
+    except Exception as e:
+        print(f"FAILED {scene_subdir}: {e}", file=sys.stderr, flush=True)
+        return "failed", scene_subdir
+    return ("ok" if result is not None else "skipped"), scene_subdir
 
 
 def process_scene(args):
@@ -188,16 +243,95 @@ def process_scene(args):
             key=lambda x: float(x[1]),
         )
 
+        # Pair each laser-GT depth frame with the RGB frame nearest in time.
+        #
+        # This replaces a +/-1 ms name probe inherited from CUT3R, which built
+        # its candidate names without :.3f ("427.29499999999996") and so only
+        # ever matched an exact name. Depth and RGB timestamps in this release
+        # are either identical or uniformly ~16 ms apart -- one frame at 60 Hz,
+        # a capture-pipeline offset rather than jitter -- so whole scenes
+        # matched nothing: 809 of 2,233 eligible scenes produced output on the
+        # 2026-09-09 run, selected by device timing rather than by content.
+        #
+        # The window is a fraction of the RGB frame period so it scales with
+        # the capture rate: at 30 fps it admits the ~16 ms offset while still
+        # rejecting a frame that is not the nearest one. It is a protocol
+        # parameter -- it decides which frames exist and how far the depth can
+        # sit from its image -- so it is named, and the offsets actually used
+        # are reported per scene.
+        rgb_by_timestamp = {
+            frame_timestamp(name): name for name in img_files if name.endswith(".png")
+        }
+        rgb_timestamps = np.array(sorted(rgb_by_timestamp))
+        if rgb_timestamps.size < 2:
+            print(f"Skipping {scene_subdir}: {rgb_timestamps.size} RGB frames")
+            return None
+        match_window = MATCH_WINDOW_FRAMES * float(np.median(np.diff(rgb_timestamps)))
+
         selected_depths = []
         timestamps_selected = []
+        offsets = []
+        unmatched = 0
+        outside_span = 0
+        contested = 0
+        # The match must be one-to-one. A frame is named for its RGB
+        # timestamp and both zip members use that name, so two depth frames
+        # claiming the same RGB frame would write duplicate zip members and
+        # put the same timestamp in the metadata twice -- which later makes a
+        # run's median step 0 and takes the whole dataset down with a
+        # "median frame step must be positive" ValueError from the loader.
+        # Depth is sparser than RGB in this release (277 frames over 91 s
+        # against 2,808), so the nearer claim wins and the other is dropped
+        # rather than silently overwriting it.
+        claimed = {}
         timestamp_min = timestamps.min()
         timestamp_max = timestamps.max()
         for basename, frame_id in all_depths:
             frame_id = float(frame_id)
-            if frame_id < timestamp_min or frame_id > timestamp_max:
+            nearest = rgb_timestamps[np.abs(rgb_timestamps - frame_id).argmin()]
+            # The POSE is interpolated at `nearest`, so `nearest` is what has
+            # to lie inside the trajectory span -- not the depth timestamp it
+            # was matched from, which can sit up to match_window away. Testing
+            # the wrong one lets a boundary frame through to interp1d, whose
+            # bounds_error default raises, and process_scene runs under
+            # Pool.imap with no per-scene guard: one frame in one of ~2,200
+            # scenes would abort the whole pass.
+            if nearest < timestamp_min or nearest > timestamp_max:
+                outside_span += 1
                 continue
-            selected_depths.append((basename, frame_id))
-            timestamps_selected.append(frame_id)
+            offset = abs(nearest - frame_id)
+            if offset > match_window:
+                unmatched += 1
+                continue
+            if nearest in claimed:
+                contested += 1
+                if claimed[nearest][0] <= offset:
+                    continue
+            claimed[nearest] = (offset, basename)
+
+        for nearest in sorted(claimed):
+            offset, basename = claimed[nearest]
+            offsets.append(offset)
+            # the pose is interpolated at the RGB timestamp, since that is the
+            # frame the depth is being attached to
+            selected_depths.append((basename, rgb_by_timestamp[nearest]))
+            timestamps_selected.append(float(nearest))
+        # printed unconditionally: a scene where NOTHING matched is exactly
+        # the case worth seeing, and it is the one the old +/-1 ms probe hit
+        # on 1,424 of 2,233 scenes
+        print(
+            f"{scene_subdir}: matched {len(offsets)} of {len(all_depths)} depth "
+            "frames "
+            + (
+                f"(median offset {np.median(offsets) * 1e3:.1f} ms, "
+                f"max {max(offsets) * 1e3:.1f} ms), "
+                if offsets
+                else ""
+            )
+            + f"{unmatched} beyond {match_window * 1e3:.1f} ms, "
+            f"{outside_span} outside the trajectory span, "
+            f"{contested} losing a contested RGB frame"
+        )
 
         sky_direction_scene, trajectories, intrinsics, images, depths = (
             convert_scene_metadata(
@@ -218,7 +352,11 @@ def process_scene(args):
             return None
 
         os.makedirs(out_scene_subdir, exist_ok=True)
-        assert isinstance(sky_direction_scene, str)
+        if not isinstance(sky_direction_scene, str):
+            raise TypeError(
+                f"{scene_subdir}: sky_direction_scene must be a str, got "
+                f"{type(sky_direction_scene).__name__}"
+            )
 
         # all converted frames go into ONE uncompressed zip per scene
         # (inode-safe layout); the write is atomic (.tmp -> rename), and the
@@ -270,8 +408,12 @@ def process_scene(args):
 
                 depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
                 ok, enc = cv2.imencode(".png", depth)
-                assert ok, f"png encode failed for {depth_path}"
-                writer.writestr("highres_depth/" + depth_path, enc.tobytes())
+                if not ok:
+                    raise RuntimeError(f"png encode failed for {depth_path}")
+                # named for the RGB frame, not the depth frame: the two differ
+                # by up to the match window, and the loader reads one basename
+                # per frame from the metadata
+                writer.writestr("highres_depth/" + image_path, enc.tobytes())
 
         # save at the end
         np.savez(
@@ -314,31 +456,24 @@ def convert_scene_metadata(
     # semantics in both layouts, and O(1) per probe instead of a stat / a
     # namelist scan
     intrinsic_names = set(zlistdir(intrinsics_dir))
-    for i, (basename, frame_id) in enumerate(selected_depths):
-        intrinsic_name = f"{scene_subdir}_{frame_id}.pincam"
-        search_interval = int(0.1 / 0.001)
-        for timestamp in range(-search_interval, search_interval + 1):
-            if intrinsic_name in intrinsic_names:
-                break
-            intrinsic_name = (
-                f"{scene_subdir}_{float(frame_id) + timestamp * 0.001:.3f}.pincam"
-            )
+    missing_intrinsics = 0
+    for i, (basename, image_path) in enumerate(selected_depths):
+        # the pose and the intrinsics belong to the RGB frame, so both are
+        # looked up by ITS timestamp, not the depth frame's
+        rgb_frame_id = image_path[len(scene_subdir) + 1 : -len(".png")]
+        intrinsic_name = f"{scene_subdir}_{rgb_frame_id}.pincam"
         if intrinsic_name not in intrinsic_names:
+            # vga_wide_intrinsics carries one .pincam per vga_wide frame
+            # (100% on every scene sampled), so a miss is a per-frame oddity
+            # -- but a scene missing ALL of them means the two assets are
+            # named on different clocks, and skipping every frame would drop
+            # the scene with nothing in the log but a Skipping line per frame.
+            # That silent whole-scene loss is the failure this rewrite exists
+            # to remove, so it is checked after the loop.
+            missing_intrinsics += 1
             print(f"Skipping {intrinsic_name}")
             continue
         intrinsic_fn = osp.join(intrinsics_dir, intrinsic_name)
-
-        image_path = "{}_{}.png".format(scene_subdir, frame_id)
-        search_interval = int(0.001 / 0.001)
-        for timestamp in range(-search_interval, search_interval + 1):
-            if image_path in all_images:
-                break
-            image_path = "{}_{}.png".format(
-                scene_subdir, float(frame_id) + timestamp * 0.001
-            )
-        if image_path not in all_images:
-            print(f"Skipping {scene_subdir} {frame_id}")
-            continue
 
         w, h, fx, fy, hw, hh = np.loadtxt(
             io.BytesIO(read_bytes(intrinsic_fn))
@@ -348,7 +483,9 @@ def convert_scene_metadata(
         pose[:3, :3] = quaternion.as_rotation_matrix(interpolated_rotations[i])
         pose[:3, 3] = interpolated_positions[i]
 
-        images.append(basename)
+        # the frame is named for its RGB timestamp; both zip members use that
+        # name, so the loader keeps reading one basename per frame
+        images.append(image_path)
         depths.append(basename)
         if sky_direction_scene == "RIGHT" or sky_direction_scene == "LEFT":
             intrinsics.append([h, w, fy, fx, hh, hw])  # swapped intrinsics
@@ -358,6 +495,14 @@ def convert_scene_metadata(
             pose @ rotated_to_cam
         )  # pose_cam_to_world @ rotated_to_cam = rotated(cam) to world
 
+    if selected_depths and not images:
+        raise FileNotFoundError(
+            f"{scene_subdir}: none of the {len(selected_depths)} matched "
+            f"frames has a .pincam in vga_wide_intrinsics "
+            f"({missing_intrinsics} misses). The intrinsics are named on a "
+            "different clock than vga_wide here; the scene would otherwise "
+            "vanish from scene_list.json with no error."
+        )
     return sky_direction_scene, trajectories, intrinsics, images, depths
 
 
@@ -393,7 +538,11 @@ def find_scene_orientation(poses_cam_to_world):
         device_right_to_world_up_angle - 90.0
     )
     if up_closest_to_90:
-        assert abs(device_up_to_world_up_angle - 90.0) < 45.0
+        if abs(device_up_to_world_up_angle - 90.0) >= 45.0:
+            raise ValueError(
+                f"device up vector is {device_up_to_world_up_angle:.1f} deg "
+                "from world up; expected within 45 deg of 90"
+            )
         # LEFT
         if device_right_to_world_up_angle > 90.0:
             sky_direction_scene = "LEFT"
@@ -410,7 +559,11 @@ def find_scene_orientation(poses_cam_to_world):
             )
     else:
         # right is close to 90
-        assert abs(device_right_to_world_up_angle - 90.0) < 45.0
+        if abs(device_right_to_world_up_angle - 90.0) >= 45.0:
+            raise ValueError(
+                f"device right vector is {device_right_to_world_up_angle:.1f} "
+                "deg from world up; expected within 45 deg of 90"
+            )
         if device_up_to_world_up_angle > 90.0:
             sky_direction_scene = "DOWN"
             cam_to_rotated_q = quaternion.from_rotation_vector([0.0, 0.0, math.pi])

@@ -5,20 +5,37 @@ import numpy as np
 from tqdm import tqdm
 
 from .base.base_multiview_dataset import BaseMultiViewDataset, EmptyDatasetError
+from .base.segments import segment_frame_ids_by_rate
 from .types import Split
 from .utils.image import imread_cv2
 from .utils.zipio import frames_root, listdir as zlistdir
 
 # preserves the original DUSt3R ScanNet++ stride cap (max_interval=3); override
 # via the constructor or the DatasetConfig CLI rather than editing this
-# constant. It is far tighter than TartanAir's because ScanNet++ frames are
-# already a decimated selection of the capture, not a full-rate video.
+# constant.
+#
+# NOTE what a stride now BUYS here. The cap was set when a scene held ~143
+# frames, every 50th of the 60 fps capture (~1.2 fps), so strides 1-3 spanned
+# 0.8-2.5 s. preprocess_scannetpp.py now keeps every registered frame (~637
+# per scene, every 10th, ~6 fps), so the same strides span 0.17-0.5 s and a
+# clip covers ~5x less camera motion than it used to. The number is unchanged
+# because it is the inherited default and the training script pins
+# stride_range to (1, 1) anyway; raising it is how to recover the old
+# parallax, and that is a training decision, not a loader one.
 DEFAULT_STRIDE_RANGE = (1, 3)
+
+# Continuity threshold for splitting a scene's iPhone run, in video frame
+# numbers. The kept-frame step is set by preprocessing (see _load_data), so the
+# threshold scales with the median step; MAX_FRAME_GAP caps it for a scene
+# whose kept frames are mostly fragments. Both decide which clips exist, so
+# they are protocol parameters.
+GAP_FACTOR = 1.5
+MAX_FRAME_GAP = 120
 
 
 class ScanNetpp_Multi(BaseMultiViewDataset):
-    """ScanNet++ DSLR (fisheye, undistorted) and iPhone frames with metric depth
-    ray-cast from the scene mesh, preprocessed into:
+    """ScanNet++ iPhone frames with metric depth ray-cast from the scene mesh,
+    preprocessed into:
         ROOT/<scene>/{images,depth}/... + new_scene_metadata.npz,
         plus ROOT/all_metadata.npz listing the scenes.
 
@@ -31,11 +48,12 @@ class ScanNetpp_Multi(BaseMultiViewDataset):
        the same reason and this follows it, so `image_collection` is unused
        here and scenes are kept on frame count alone.
 
-    2. Each CAMERA is its own sequence. A scene holds a DSLR run and an iPhone
-       run whose frames share no timeline, so a clip spanning both is not a
-       video at any stride. Splitting them means a scene missing one camera is
-       still usable through the other, where the DUSt3R loader's
-       `max(dslr_ids) < min(iphone_ids)` assertion raised on an empty list.
+    2. iPhone frames only, split into contiguous runs. The DSLR run is a set of
+       stills (a median 20 cm of camera motion between consecutive DSC numbers,
+       up to 9.7 m), so a clip drawn from it is not a video at any stride and
+       its temporal metrics say nothing; it is dropped rather than sampled. The
+       DUSt3R loader instead paired the two cameras and asserted
+       `max(dslr_ids) < min(iphone_ids)`, which raised on an empty list.
 
     Images listed in the metadata but absent from disk (registered in the
     release's COLMAP reconstruction but never rendered -- 1077 of 64923 in the
@@ -108,28 +126,44 @@ class ScanNetpp_Multi(BaseMultiViewDataset):
                 if name.endswith(".jpg")
             }
 
-            # DSLR frames are named DSC*, iPhone frames frame_*; each run is a
-            # separate timeline, so each becomes its own sequence.
-            cameras = {"dslr": [], "iphone": []}
+            # iPhone frames only (named frame_%06d). The DSLR run is a set of
+            # stills, not a capture: consecutive DSC numbers are a median 20 cm
+            # of camera motion apart (up to 9.7 m), so a "clip" of them is not
+            # video at any stride and its temporal metrics are meaningless.
+            # Their metadata rows stay in place so intrinsics/trajectories
+            # indexing by global id is unaffected.
+            iphone_ids = []
+            frame_numbers = []
             for i in range(num_imgs):
-                if imgs[i] not in imgs_on_disk:
+                if imgs[i] not in imgs_on_disk or not imgs[i].startswith("frame"):
                     continue
-                if imgs[i].startswith("DSC"):
-                    cameras["dslr"].append(i + offset)
-                elif imgs[i].startswith("frame"):
-                    cameras["iphone"].append(i + offset)
+                iphone_ids.append(i + offset)
+                frame_numbers.append(int(str(imgs[i]).split("_")[1]))
 
             cut_off = self.min_views()
-            usable = [ids for ids in cameras.values() if len(ids) >= cut_off]
-            if not usable:
+            # frame_%06d is the index in the 60 fps iPhone video, so the step
+            # between kept frames is the decimation of the capture. It is a
+            # property of the preprocessing run -- every 10th frame (~6 fps)
+            # in the rebuilt tree, every ~50th in the DUSt3R selection before
+            # it -- hence derived per scene rather than hard-coded: at a step
+            # of 10 the split threshold is ~15 frames.
+            frame_numbers = np.array(frame_numbers)
+            sequences = (
+                segment_frame_ids_by_rate(
+                    iphone_ids, frame_numbers, GAP_FACTOR, MAX_FRAME_GAP, cut_off
+                )
+                if len(iphone_ids) >= cut_off
+                else []
+            )
+            if not sequences:
                 print(f"Skipping {scene}")
                 continue
 
-            for img_ids in usable:
+            for img_ids in sequences:
                 seq_img_list.append(img_ids)
                 start_img_ids.extend(img_ids[: len(img_ids) - cut_off + 1])
                 # seqids is indexed by GLOBAL image id, so every frame of this
-                # camera points at the sequence just appended
+                # run points at the sequence just appended
                 for gid in img_ids:
                     seqids.append((gid, len(seq_img_list) - 1))
 

@@ -4,12 +4,19 @@ import os.path as osp
 import cv2
 import numpy as np
 
-from .arkitscenes import DEFAULT_STRIDE_RANGE
+from .arkitscenes import (
+    DEFAULT_STRIDE_RANGE,
+    GAP_FACTOR,
+    MAX_GAP_SECONDS,
+    PARTITION_MIN_FRAMES,
+    frame_timestamp,
+)
 from .base.base_multiview_dataset import (
     BaseMultiViewDataset,
     EmptyDatasetError,
     intrinsics_rows_to_K,
 )
+from .base.segments import segment_frame_ids_by_rate
 from .types import Split
 from .utils.image import imread_cv2
 from .utils.zipio import frames_root
@@ -48,6 +55,19 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
         super().__init__(
             *args, stride_range=stride_range, regular_stride=regular_stride, **kwargs
         )
+        # ARKitScenes_Multi hands this loader every scene holding a run of
+        # PARTITION_MIN_FRAMES, without knowing this loader's num_views. Past
+        # that, the scenes whose longest laser run is between the two are
+        # dropped by ARKitScenes_Multi AND unsampleable here, so they vanish
+        # from both variants with nothing but a Skipping line. Refuse instead.
+        if self.num_views > PARTITION_MIN_FRAMES:
+            raise ValueError(
+                f"ARKitScenesHighRes num_views={self.num_views} exceeds "
+                f"PARTITION_MIN_FRAMES={PARTITION_MIN_FRAMES}: scenes whose "
+                f"longest laser-GT run is {PARTITION_MIN_FRAMES}-"
+                f"{self.num_views - 1} frames would be in neither ARKitScenes "
+                "variant. Raise PARTITION_MIN_FRAMES in arkitscenes.py to match."
+            )
         match self.split:
             case Split.TRAIN:
                 self.split_dir = "Training"
@@ -74,7 +94,8 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
         sceneids = []
         images = []
         start_img_ids = []
-        scene_img_list = []
+        seq_img_list = []
+        seqids = []
         intrinsics = []
         trajectories = []
         scene_id = 0
@@ -102,13 +123,42 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
                     )
                 num_imgs = len(imgs)
                 img_ids = list(np.arange(num_imgs) + offset)
-                start_img_ids_ = img_ids[: num_imgs - cut_off + 1]
+
+                # High-res (laser) depth exists for only a fraction of the
+                # capture -- 62% of 32-frame windows in this tree span a jump
+                # of over a second -- so a scene is many short runs, and most
+                # of them are too short to fill a clip.
+                #
+                # The run length is PARTITION_MIN_FRAMES, not this dataset's
+                # num_views: ARKitScenes_Multi drops exactly the scenes this
+                # keeps, and the two configs carry independent num_views, so
+                # keying on num_views here would put a capture in both datasets
+                # or in neither the moment they disagree.
+                timestamps = np.array([frame_timestamp(name) for name in imgs])
+                sequences = segment_frame_ids_by_rate(
+                    img_ids,
+                    timestamps,
+                    GAP_FACTOR,
+                    MAX_GAP_SECONDS,
+                    PARTITION_MIN_FRAMES,
+                )
+                if not sequences:
+                    print(
+                        f"Skipping {scene}: no run of "
+                        f"{PARTITION_MIN_FRAMES} consecutive frames"
+                    )
+                    continue
+
+                for img_ids_seq in sequences:
+                    seq_img_list.append(img_ids_seq)
+                    start_img_ids.extend(img_ids_seq[: len(img_ids_seq) - cut_off + 1])
+                    # seqids is indexed by GLOBAL image id
+                    for gid in img_ids_seq:
+                        seqids.append((gid, len(seq_img_list) - 1))
 
                 scenes.append(scene)
-                scene_img_list.append(img_ids)
                 sceneids.extend([scene_id] * num_imgs)
                 images.extend(imgs)
-                start_img_ids.extend(start_img_ids_)
 
                 intrinsics.extend(
                     list(intrinsics_rows_to_K(data["intrinsics"][indices]))
@@ -129,7 +179,12 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
         self.scenes = scenes
         self.sceneids = sceneids
         self.images = images
-        self.scene_img_list = scene_img_list
+        # one entry per contiguous run, NOT per scene: indexed by
+        # seqids[start_id], never by sceneids[start_id] (the scene-path lookup)
+        self.seq_img_list = seq_img_list
+        self.seqids = np.full(offset, -1, dtype=np.int64)
+        for gid, seq_idx in seqids:
+            self.seqids[gid] = seq_idx
         self.intrinsics = intrinsics
         self.trajectories = trajectories
         self.start_img_ids = start_img_ids
@@ -148,7 +203,7 @@ class ARKitScenesHighRes_Multi(BaseMultiViewDataset):
 
     def _get_views(self, idx, resolution, rng, num_views):
         start_id = self.start_img_ids[idx]
-        all_image_ids = self.scene_img_list[self.sceneids[start_id]]
+        all_image_ids = self.seq_img_list[self.seqids[start_id]]
         pos, ordered_video = self.get_seq_from_start_id(
             num_views,
             start_id,

@@ -9,6 +9,7 @@ from .base.base_multiview_dataset import (
     EmptyDatasetError,
     intrinsics_rows_to_K,
 )
+from .base.segments import segment_frame_ids_by_rate
 from .types import Split
 from .utils.image import imread_cv2
 from .utils.zipio import frames_root
@@ -16,6 +17,73 @@ from .utils.zipio import frames_root
 # preserves the original DUSt3R ARKitScenes stride cap; override via the
 # constructor or the DatasetConfig CLI rather than editing this constant.
 DEFAULT_STRIDE_RANGE = (1, 8)
+
+# Continuity threshold for splitting a scene into runs, on the frame timestamps
+# carried in the filenames ("<scene>_<seconds>.png").
+#
+# The capture rate is a property of the scene, not of the dataset: the tree
+# built before this rebuild sits at 10 fps (0.1 s steps) and the rebuilt one at
+# 30 fps (preprocess_arkitscenes.py's TARGET_FPS), so the threshold is derived
+# per scene from the median step rather than hard-coded, and both trees load.
+# GAP_FACTOR admits the jitter in ARKit timestamps (steps of 0.033/0.034 s
+# alternate) while rejecting a dropped frame.
+#
+# MAX_GAP_SECONDS is the ceiling: a scene whose frames are MOSTLY fragments has
+# a median step that is itself a gap, and a pure factor rule would then merge
+# every fragment into one run. Both are protocol parameters -- they decide
+# which clips exist -- so they are stated here rather than inferred silently.
+GAP_FACTOR = 1.5
+MAX_GAP_SECONDS = 0.5
+
+# Run length that decides which ARKitScenes variant OWNS a scene. It is a fixed
+# number rather than either loader's num_views on purpose: the two variants are
+# separate DatasetConfigs with independent num_views, so keying the partition
+# on one of them would let the same capture land in BOTH datasets (high-res
+# num_views below low-res) or in NEITHER (above it), and the composition of the
+# training mixture would shift whenever a training knob moved. 32 is the clip
+# length used for evaluation.
+PARTITION_MIN_FRAMES = 32
+
+
+def frame_timestamp(name):
+    """Capture time in seconds from a "<scene>_<seconds>.png" frame name."""
+    return float(str(name).rsplit("_", 1)[-1][: -len(".png")])
+
+
+def highres_scenes_with_clips(highres_split_dir, min_frames=PARTITION_MIN_FRAMES):
+    """Scene ids the high-res variant owns: those with a run of `min_frames`.
+
+    The two ARKitScenes variants partition the scenes, and this loader drops
+    whatever the high-res one owns. Ownership cannot be a directory listing:
+    ARKitScenesHighRes_Multi samples within contiguous runs, and laser depth
+    covers only a fraction of the capture, so most of its scene dirs yield no
+    run long enough for a clip -- 158 of 719 at 10 frames, and 656 at 32.
+    Excluding those by name put 130 (resp. 504) captures in NEITHER dataset,
+    though their low-res video is perfectly usable.
+
+    So a scene is excluded only when the high-res loader can actually sample
+    it, using that loader's segmentation rule and PARTITION_MIN_FRAMES -- which
+    both loaders apply, so the split between them is the same from either side.
+    """
+    scenes = []
+    for scene in sorted(os.listdir(highres_split_dir)):
+        meta = osp.join(highres_split_dir, scene, "scene_metadata.npz")
+        if not osp.isfile(meta):
+            continue
+        with np.load(meta, allow_pickle=True) as data:
+            imgs = data["images"]
+        if len(imgs) < min_frames:
+            continue
+        timestamps = np.sort(np.array([frame_timestamp(name) for name in imgs]))
+        if segment_frame_ids_by_rate(
+            list(range(len(timestamps))),
+            timestamps,
+            GAP_FACTOR,
+            MAX_GAP_SECONDS,
+            min_frames,
+        ):
+            scenes.append(scene)
+    return np.array(scenes)
 
 
 class ARKitScenes_Multi(BaseMultiViewDataset):
@@ -78,7 +146,7 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                         f"ARKitScenes highres_root was given explicitly but "
                         f"{highres_split_dir} does not exist"
                     )
-                high_res_list = np.array(os.listdir(highres_split_dir))
+                high_res_list = highres_scenes_with_clips(highres_split_dir)
             else:
                 # original DUSt3R convention: sibling tree named ROOT_highres;
                 # silently skipped when absent (lowres-only setups)
@@ -87,7 +155,7 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                     highres_dir,
                 )
                 if os.path.isdir(highres_split_dir):
-                    high_res_list = np.array(os.listdir(highres_split_dir))
+                    high_res_list = highres_scenes_with_clips(highres_split_dir)
 
             self.scenes = np.setdiff1d(self.scenes, high_res_list)
         # start-id sampling, identical to the other four loaders (ScanNet,
@@ -106,7 +174,8 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
         intrinsics = []
         trajectories = []
         start_img_ids = []
-        scene_img_list = []
+        seq_img_list = []
+        seqids = []
         j = 0
         for scene in self.scenes:
             scene_dir = osp.join(self.ROOT, split, scene)
@@ -123,15 +192,31 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
                     continue
 
                 img_ids = list(np.arange(num_imgs) + offset)
-                start_img_ids_ = img_ids[: num_imgs - cut_off + 1]
+
+                # "<scene>_<seconds>.png" -> the frame's capture time. The
+                # processed tree keeps whichever windows the upstream frame
+                # selection happened to pick, so a scene is typically several
+                # separate runs with seconds of missing capture between them.
+                timestamps = np.array([frame_timestamp(name) for name in imgs])
+                sequences = segment_frame_ids_by_rate(
+                    img_ids, timestamps, GAP_FACTOR, MAX_GAP_SECONDS, cut_off
+                )
+                if not sequences:
+                    print(f"Skipping {scene}: no run of {cut_off} consecutive frames")
+                    continue
+
+                for img_ids_seq in sequences:
+                    seq_img_list.append(img_ids_seq)
+                    start_img_ids.extend(img_ids_seq[: len(img_ids_seq) - cut_off + 1])
+                    # seqids is indexed by GLOBAL image id
+                    for gid in img_ids_seq:
+                        seqids.append((gid, len(seq_img_list) - 1))
 
                 scenes.append(scene)
-                scene_img_list.append(img_ids)
                 sceneids.extend([j] * num_imgs)
                 images.extend(imgs)
                 intrinsics.extend(list(intrinsics_rows_to_K(intrins)))
                 trajectories.extend(list(traj))
-                start_img_ids.extend(start_img_ids_)
 
                 offset += num_imgs
                 j += 1
@@ -145,7 +230,12 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
         self.images = images
         self.intrinsics = intrinsics
         self.trajectories = trajectories
-        self.scene_img_list = scene_img_list
+        # one entry per contiguous run, NOT per scene: indexed by
+        # seqids[start_id], never by sceneids[start_id] (the scene-path lookup)
+        self.seq_img_list = seq_img_list
+        self.seqids = np.full(offset, -1, dtype=np.int64)
+        for gid, seq_idx in seqids:
+            self.seqids[gid] = seq_idx
         self.start_img_ids = start_img_ids
 
     def __len__(self):
@@ -156,7 +246,7 @@ class ARKitScenes_Multi(BaseMultiViewDataset):
 
     def _get_views(self, idx, resolution, rng, num_views):
         start_id = self.start_img_ids[idx]
-        all_image_ids = self.scene_img_list[self.sceneids[start_id]]
+        all_image_ids = self.seq_img_list[self.seqids[start_id]]
         pos, ordered_video = self.get_seq_from_start_id(
             num_views,
             start_id,

@@ -58,6 +58,15 @@
 #    matching every other processed dataset here, then --finalize
 #    concatenates the per-scene metadata into all_metadata.npz.
 #
+#  * Converts the iPhone video only, at every registered frame. Upstream took
+#    its frame set from DUSt3R's selected_pairs.npz, a covisibility selection
+#    over both cameras. Its iPhone frames are decimated well below the
+#    registration rate (~143 per scene against COLMAP's ~637 -- every 50th
+#    video frame rather than every 10th), and its DSLR frames are stills a
+#    median 20 cm apart (up to 9.7 m), so neither run is a video. COLMAP's own
+#    registration is dense, contiguous, and carries a pose and intrinsics for
+#    every frame by construction.
+#
 # Usage:
 #   python3 datasets_preprocess/preprocess_scannetpp.py \
 #       --scannetpp_dir <raw> --precomputed_pairs <scannetpp_pairs> \
@@ -76,7 +85,6 @@ import zipfile
 
 import cv2
 import numpy as np
-import PIL.Image as Image
 import trimesh
 import trimesh.exchange.ply
 from scipy.spatial.transform import Rotation
@@ -91,11 +99,9 @@ sys.path.insert(0, osp.join(osp.dirname(osp.abspath(__file__)), "..", "src"))
 from dust3r.utils.zipio import (  # noqa: E402
     SceneZipWriter,
     asset_root,
-    read_bytes,
     split_zip_path,
 )
 
-REGEXPR_DSLR = re.compile(r"^DSC(?P<frameid>\d+).JPG$")
 REGEXPR_IPHONE = re.compile(r"frame_(?P<frameid>\d+).jpg$")
 
 # default values from
@@ -110,9 +116,10 @@ def get_parser():
     parser.add_argument(
         "--precomputed_pairs",
         required=True,
-        help="DUSt3R's scannetpp_pairs dir: scene_list.json plus one "
-        "<scene>/selected_pairs.npz per scene. It supplies the scene list "
-        "AND the per-scene image selection, so there is no default.",
+        help="DUSt3R's scannetpp_pairs dir. Only its scene_list.json is read, "
+        "for the set of scenes to convert; the per-scene selected_pairs.npz is "
+        "no longer used, since frames come from the iPhone COLMAP "
+        "registration itself. No default.",
     )
     parser.add_argument("--output_dir", default="data/scannetpp_processed")
     parser.add_argument(
@@ -133,9 +140,9 @@ def get_parser():
     parser.add_argument(
         "--keep-unusable-scenes",
         action="store_true",
-        help="with --finalize, keep scenes that rendered images from only one "
-        "of the two cameras. They are excluded by default because "
-        "ScanNetpp_Multi._load_data raises on them rather than skipping them.",
+        help="with --finalize, keep scenes that rendered no frames at all. "
+        "They are excluded by default, since the loader has nothing to sample "
+        "from them.",
     )
     return parser
 
@@ -174,14 +181,11 @@ def pose_from_qwxyz_txyz(elems):
     return np.linalg.inv(pose)  # returns cam2world
 
 
-def get_frame_number(name, cam_type="dslr"):
-    if cam_type == "dslr":
-        regex_expr = REGEXPR_DSLR
-    elif cam_type == "iphone":
-        regex_expr = REGEXPR_IPHONE
-    else:
-        raise NotImplementedError(f"wrong {cam_type=} for get_frame_number")
-    matches = re.match(regex_expr, name)
+def get_frame_number(name):
+    """The %06d in an iPhone COLMAP name, which IS the video frame index."""
+    matches = re.match(REGEXPR_IPHONE, name)
+    if matches is None:
+        raise ValueError(f"not an iPhone frame name: {name!r}")
     return matches["frameid"]
 
 
@@ -218,7 +222,7 @@ def open_binary_stream(path):
         yield io.BytesIO(raw.read())
 
 
-def load_sfm(sfm_dir, cam_type="dslr"):
+def load_sfm(sfm_dir):
     """Read a COLMAP text reconstruction: intrinsics and poses only.
 
     Returns (img_idx, img_infos), dropping upstream's points3D and
@@ -283,7 +287,7 @@ def load_sfm(sfm_dir, cam_type="dslr"):
             img_infos[idx] = dict(
                 intrinsics=intrinsics[int(image[-2])],
                 path=img_name,
-                frame_id=get_frame_number(img_name, cam_type),
+                frame_id=get_frame_number(img_name),
                 cam_to_world=pose_from_qwxyz_txyz(image[1:-2]),
             )
 
@@ -440,7 +444,8 @@ class VideoFrameReader:
     rgb_mask.mkv per scene, against ~250 s of ray casting for the same scene.
 
     grab() skips the colour conversion and copy for frames we are not
-    keeping, which is most of them (COLMAP registers every 20th frame).
+    keeping, which is still most of them (COLMAP registers every 10th frame,
+    and every registered frame is now converted).
     """
 
     def __init__(self, path):
@@ -547,66 +552,43 @@ def convert_one_image(rgb, mask, img_infos_idx, renderer, target_resolution, emi
     emit(f"depth/{basename}.png", enc.tobytes())
 
 
-def process_scene(scene, root, pairsdir, output_dir, target_resolution):
+def process_scene(scene, root, output_dir, target_resolution):
     """Convert one scene. Returns the number of images written."""
     data_dir = osp.join(root, "data", scene)
-    dir_dslr = osp.join(data_dir, "dslr")
     dir_iphone = osp.join(data_dir, "iphone")
     dir_scans = osp.join(data_dir, "scans")
 
-    selected = osp.join(pairsdir, scene, "selected_pairs.npz")
-    if not osp.isfile(selected):
-        raise FileNotFoundError(f"{scene}: no selected_pairs.npz at {selected}")
-    with np.load(selected) as npz:
-        selection, pairs = npz["selection"], npz["pairs"]
-
     output_dir_scene = osp.join(output_dir, scene)
-    os.makedirs(output_dir_scene, exist_ok=True)
 
-    # both cameras' COLMAP reconstructions, then the mesh BVH
-    dslr_colmap = asset_root(dir_dslr, "colmap")
+    # iPhone COLMAP reconstruction, then the mesh BVH
     iphone_colmap = asset_root(dir_iphone, "colmap")
-    if dslr_colmap is None or iphone_colmap is None:
-        raise FileNotFoundError(f"{scene}: missing a colmap asset")
-    img_idx_dslr, img_infos_dslr = load_sfm(dslr_colmap, cam_type="dslr")
-    img_idx_iphone, img_infos_iphone = load_sfm(iphone_colmap, cam_type="iphone")
+    if iphone_colmap is None:
+        raise FileNotFoundError(f"{scene}: missing the iphone colmap asset")
+    img_idx_iphone, img_infos_iphone = load_sfm(iphone_colmap)
 
     renderer = MeshDepthRenderer(osp.join(dir_scans, "mesh_aligned_0.05.ply"))
 
-    dslr_rgb = asset_root(dir_dslr, "resized_images")
-    dslr_mask = asset_root(dir_dslr, "resized_anon_masks")
-    if dslr_rgb is None or dslr_mask is None:
-        raise FileNotFoundError(f"{scene}: missing a DSLR image/mask asset")
+    # EVERY registered iPhone frame, in capture order -- iPhone only.
+    #
+    # The frame set used to come from DUSt3R's selected_pairs.npz, a
+    # covisibility selection over both cameras. Two things were wrong with it
+    # here. Its iPhone frames are decimated far below the registration rate
+    # (~143 kept per scene against the ~637 COLMAP registers, i.e. roughly
+    # every 50th video frame rather than every 10th), which makes a "clip" a
+    # sequence of 0.8 s jumps rather than video. And its DSLR frames are
+    # stills: a median 20 cm of camera motion separates consecutive DSC
+    # numbers, up to 9.7 m, so no ordering of them is a video at any stride.
+    #
+    # COLMAP's own registration is the right selection: it is dense (every
+    # 10th frame of the 60 fps capture, ~6 fps), contiguous, and every frame
+    # in it has the pose and intrinsics the render needs by construction --
+    # so there are no listed-but-unrenderable images left to carry NaN rows.
+    selection_iphone = sorted(img_idx_iphone, key=lambda n: int(get_frame_number(n)))
+    selection = [n[: -len(".jpg")] for n in selection_iphone]
+    if not selection:
+        raise ValueError(f"{scene}: no registered iPhone frames")
 
-    # Not every selected image still exists to be rendered.
-    #
-    # DUSt3R computed these selections against an older ScanNet++, and a
-    # small tail of the images it picked is no longer registered: 63,846 of
-    # the 64,923 selected images survive (98.3%) -- DSLR 33,769/33,818
-    # (99.9%), iPhone 30,077/31,105 (96.7%) -- the rest being ordinary
-    # per-scene registration failures. A selected name with no COLMAP entry
-    # has no pose and no intrinsics, so it cannot be rendered at all --
-    # upstream would die here on a bare KeyError.
-    #
-    # Dropping such an image from the OUTPUT while keeping it in the metadata
-    # is exactly the case the rest of the pipeline is already built for:
-    # `pairs` indexes into `selection`, so the selection has to keep its
-    # length and order, and both generate_set_scannetpp.py (which filters
-    # pairs by what is on disk) and the loader (`imgs[i] in imgs_on_disk`)
-    # already treat a listed-but-absent image as normal. Their rows in
-    # trajectories/intrinsics are filled with NaN rather than identity, so
-    # anything that does reach for one fails loudly instead of silently
-    # training on a camera at the origin.
-    selection_dslr = [
-        n + ".JPG"
-        for n in selection
-        if n.startswith("DSC") and n + ".JPG" in img_idx_dslr
-    ]
-    selection_iphone = [
-        n + ".jpg"
-        for n in selection
-        if n.startswith("frame_") and n + ".jpg" in img_idx_iphone
-    ]
+    os.makedirs(output_dir_scene, exist_ok=True)
 
     # frames.zip is written first and renamed only on success, and
     # scene_metadata.npz only after that, so the npz existing implies a
@@ -618,89 +600,69 @@ def process_scene(scene, root, pairsdir, output_dir, target_resolution):
     # frame was actually written.
     converted = {}
     with SceneZipWriter(osp.join(output_dir_scene, "frames.zip")) as writer:
-        for imgname in tqdm(
-            selection_dslr, desc=f"{scene} dslr", position=1, leave=False
-        ):
-            info = img_infos_dslr[img_idx_dslr[imgname]]
-            rgb = np.array(
-                Image.open(io.BytesIO(read_bytes(osp.join(dslr_rgb, imgname))))
-            )
-            mask = np.array(
-                Image.open(
-                    io.BytesIO(read_bytes(osp.join(dslr_mask, imgname[:-3] + "png")))
+        # selection_iphone is already in ascending frame order, which is what
+        # lets the two videos be walked linearly (VideoFrameReader refuses to
+        # seek backwards)
+        rgb_video = VideoFrameReader(osp.join(dir_iphone, "rgb.mkv"))
+        mask_video = VideoFrameReader(osp.join(dir_iphone, "rgb_mask.mkv"))
+        try:
+            if rgb_video.frame_count != mask_video.frame_count:
+                raise RuntimeError(
+                    f"{scene}: rgb.mkv has {rgb_video.frame_count} frames but "
+                    f"rgb_mask.mkv has {mask_video.frame_count}; the mask "
+                    "index would not line up with the image index"
                 )
-            )
-            convert_one_image(
-                rgb, mask, info, renderer, target_resolution, writer.writestr
-            )
-            converted[imgname[:-4]] = (info["intrinsics"], info["cam_to_world"])
-            written += 1
+            for imgname in tqdm(
+                selection_iphone, desc=f"{scene} iphone", position=1, leave=False
+            ):
+                info = img_infos_iphone[img_idx_iphone[imgname]]
+                frame_no = int(get_frame_number(imgname))
+                if frame_no >= rgb_video.frame_count:
+                    # registered past the end of the video: nothing to decode,
+                    # and read_at would raise mid-scene
+                    print(
+                        f"{scene}: {imgname} is frame {frame_no} of a "
+                        f"{rgb_video.frame_count}-frame video; skipping"
+                    )
+                    continue
+                # cv2 gives BGR, so flip to RGB before anything touches pixels
+                rgb = rgb_video.read_at(frame_no)[:, :, ::-1]
+                mask = mask_video.read_at(frame_no)
+                convert_one_image(
+                    rgb, mask, info, renderer, target_resolution, writer.writestr
+                )
+                converted[imgname[: -len(".jpg")]] = (
+                    info["intrinsics"],
+                    info["cam_to_world"],
+                )
+                written += 1
+        finally:
+            rgb_video.close()
+            mask_video.close()
 
-        if selection_iphone:
-            # ascending frame order so the two videos can be walked linearly
-            ordered = sorted(
-                selection_iphone,
-                key=lambda n: int(get_frame_number(n, "iphone")),
-            )
-            rgb_video = VideoFrameReader(osp.join(dir_iphone, "rgb.mkv"))
-            mask_video = VideoFrameReader(osp.join(dir_iphone, "rgb_mask.mkv"))
-            try:
-                if rgb_video.frame_count != mask_video.frame_count:
-                    raise RuntimeError(
-                        f"{scene}: rgb.mkv has {rgb_video.frame_count} frames but "
-                        f"rgb_mask.mkv has {mask_video.frame_count}; the mask "
-                        "index would not line up with the image index"
-                    )
-                for imgname in tqdm(
-                    ordered, desc=f"{scene} iphone", position=1, leave=False
-                ):
-                    info = img_infos_iphone[img_idx_iphone[imgname]]
-                    frame_no = int(get_frame_number(imgname, "iphone"))
-                    # cv2 gives BGR; the DSLR path comes through PIL as RGB,
-                    # so flip to match before anything touches the pixels
-                    rgb = rgb_video.read_at(frame_no)[:, :, ::-1]
-                    mask = mask_video.read_at(frame_no)
-                    convert_one_image(
-                        rgb, mask, info, renderer, target_resolution, writer.writestr
-                    )
-                    converted[imgname[:-4]] = (
-                        info["intrinsics"],
-                        info["cam_to_world"],
-                    )
-                    written += 1
-            finally:
-                rgb_video.close()
-                mask_video.close()
-
-    # metadata, in the order `selection` gives -- `pairs` indexes into it, so
-    # the length and order are load-bearing and unrendered images keep their
-    # slot with a NaN pose (see the comment above selection_dslr)
+    # metadata, in capture order. Every selected frame is registered, so a NaN
+    # row can only come from the frames-past-end-of-video case above.
     nan_K = np.full((3, 3), np.nan)
     nan_pose = np.full((4, 4), np.nan)
     trajectories = []
     intrinsics = []
     for imgname in selection:
-        if not (imgname.startswith("DSC") or imgname.startswith("frame_")):
-            raise ValueError(f"{scene}: invalid image name {imgname!r}")
         K, pose = converted.get(imgname, (nan_K, nan_pose))
         intrinsics.append(K)
         trajectories.append(pose)
 
-    n_dslr = sum(1 for n in selection if n.startswith("DSC"))
-    n_iphone = len(selection) - n_dslr
+    # `pairs` is written empty: DUSt3R's pairs index into ITS selection, which
+    # this no longer uses, and nothing downstream reads them -- the streamvggt
+    # loader dropped the image_collection sampler, and generate_set_scannetpp
+    # builds a collection from whatever pairs it finds.
     np.savez(
         osp.join(output_dir_scene, "scene_metadata.npz"),
         trajectories=np.stack(trajectories, axis=0),
         intrinsics=np.stack(intrinsics, axis=0),
         images=selection,
-        pairs=pairs,
+        pairs=np.zeros((0, 3), dtype=np.float64),
     )
-    return dict(
-        written=written,
-        selected=len(selection),
-        dslr=(len(selection_dslr), n_dslr),
-        iphone=(len(selection_iphone), n_iphone),
-    )
+    return dict(written=written, selected=len(selection))
 
 
 def scene_list(root, pairsdir):
@@ -732,19 +694,15 @@ def scene_list(root, pairsdir):
 def finalize(root, pairsdir, output_dir, keep_unusable=False):
     """Concatenate the per-scene metadata into all_metadata.npz.
 
-    Scenes the loader cannot open are left out by default. ScanNetpp_Multi
-    takes `max(dslr_ids) < min(iphone_ids)` after filtering both lists to what
-    is on disk, so a scene contributing images from only one camera does not
-    get skipped -- min() raises ValueError on the empty list and the whole
-    dataset fails to construct. all_metadata.npz's scene list is what the
-    loader iterates, so dropping them here is the fix that needs no change to
-    the training code.
+    A scene with no renderable frame is left out by default: all_metadata.npz's
+    scene list is what the loader iterates, so dropping it here needs no change
+    to the training code. --keep-unusable-scenes overrides it.
 
-    With the current release nothing is actually excluded: the seven scenes
-    that first looked one-camera-only were the ones whose COLMAP entries carry
-    a "video/" prefix, and normalising that in load_sfm gives all of them
-    usable iPhone frames. This stays as the guard for the next such surprise.
-    --keep-unusable-scenes overrides it.
+    The guard used to be two-camera ("no rendered images from one camera"),
+    because ScanNetpp_Multi paired DSLR with iPhone and took
+    `max(dslr_ids) < min(iphone_ids)`, which raises on an empty list. Both
+    sides of that are gone: the loader samples iPhone runs only, and so does
+    the conversion.
     """
     scenes = scene_list(root, pairsdir)
     missing = [
@@ -761,8 +719,8 @@ def finalize(root, pairsdir, output_dir, keep_unusable=False):
         )
 
     # First pass: read every scene and count what actually rendered. A row
-    # whose pose is NaN is a selected image that could not be rendered -- see
-    # the comment above selection_dslr in process_scene.
+    # whose pose is NaN is a frame that could not be rendered -- see the
+    # comment above the selection in process_scene.
     loaded = {}
     usable = {}
     for scene in tqdm(scenes, desc="finalize: read"):
@@ -775,19 +733,9 @@ def finalize(root, pairsdir, output_dir, keep_unusable=False):
             )
         loaded[scene] = entry
         traj = entry["trajectories"]
-        ok = np.isfinite(traj.reshape(len(traj), -1)).all(1)
-        usable[scene] = (
-            sum(
-                1 for n, o in zip(entry["images"], ok) if o and str(n).startswith("DSC")
-            ),
-            sum(
-                1
-                for n, o in zip(entry["images"], ok)
-                if o and str(n).startswith("frame_")
-            ),
-        )
+        usable[scene] = int(np.isfinite(traj.reshape(len(traj), -1)).all(1).sum())
 
-    unusable = [s for s in scenes if 0 in usable[s]]
+    unusable = [s for s in scenes if usable[s] == 0]
     kept = scenes if keep_unusable else [s for s in scenes if s not in unusable]
     if not kept:
         raise SystemExit("no usable scenes; nothing to write")
@@ -830,11 +778,8 @@ def finalize(root, pairsdir, output_dir, keep_unusable=False):
     if unusable:
         verb = "KEPT (--keep-unusable-scenes)" if keep_unusable else "excluded"
         print(
-            f"{len(unusable)} scene(s) {verb}: no rendered images from one "
-            "camera, which ScanNetpp_Multi._load_data cannot open -- "
-            + ", ".join(
-                f"{s} (dslr {usable[s][0]}, iphone {usable[s][1]})" for s in unusable
-            ),
+            f"{len(unusable)} scene(s) {verb}: no rendered frames -- "
+            + ", ".join(unusable),
             file=sys.stderr,
         )
 
@@ -879,7 +824,6 @@ def main():
             stats = process_scene(
                 scene,
                 args.scannetpp_dir,
-                args.precomputed_pairs,
                 args.output_dir,
                 args.target_resolution,
             )
@@ -892,22 +836,15 @@ def main():
             failed += 1
             print(f"FAILED {scene}: {e}", file=sys.stderr, flush=True)
             continue
-        d_ok, d_sel = stats["dslr"]
-        i_ok, i_sel = stats["iphone"]
         print(
-            f"{scene}: {stats['written']}/{stats['selected']} images written "
-            f"(dslr {d_ok}/{d_sel}, iphone {i_ok}/{i_sel})",
+            f"{scene}: {stats['written']}/{stats['selected']} iPhone frames written",
             flush=True,
         )
-        # The loader takes max(dslr_ids) < min(iphone_ids), which raises on an
-        # empty list -- a scene with no usable images from one camera breaks
-        # it. Say so here, and again in --finalize where the whole set is
-        # visible at once.
-        if d_ok == 0 or i_ok == 0:
+        if stats["written"] == 0:
+            # the loader skips such a scene, and --finalize drops it, but say
+            # so here too: a shard that renders nothing should not look fine
             print(
-                f"WARNING {scene}: no usable "
-                f"{'DSLR' if d_ok == 0 else 'iPhone'} images; "
-                "ScanNetpp_Multi._load_data will fail on this scene",
+                f"WARNING {scene}: no frames rendered",
                 file=sys.stderr,
                 flush=True,
             )

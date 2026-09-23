@@ -32,13 +32,13 @@ dataset1: Co3d_Multi(allow_repeat=${allow_repeat}, split='train', ROOT='/lustre/
 dataset2: WildRGBD_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/wildrgbd", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset3: ARKitScenes_Multi(allow_repeat=${allow_repeat}, split='train', ROOT='/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_arkitscenes/', 
+dataset3: ARKitScenes_Multi(allow_repeat=${allow_repeat}, split='train', ROOT='/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd/processed_arkitscenes/', 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset4: ARKitScenesHighRes_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_arkitscenes_highres", 
+dataset4: ARKitScenesHighRes_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd/processed_arkitscenes_highres", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)], 
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
-dataset5: ScanNetpp_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_scannetpp/", 
+dataset5: ScanNetpp_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd/processed_scannetpp/", 
   aug_crop=16, resolution=[(518, 392), (518, 336), (518, 294), (518, 266), (518, 210), (518, 154), (392, 518), (336, 518), (294, 518), (266, 518)],  
   transform=SeqColorJitter, num_views=${num_views}, n_corres=${n_corres_train})
 dataset6: ScanNet_Multi(allow_repeat=${allow_repeat}, split='train', ROOT="/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_scannet/", 
@@ -75,7 +75,7 @@ dataset15: PointOdyssey_Multi(allow_repeat=${allow_repeat}, split='train', ROOT=
 train_dataset: 4500 @ ${dataset1} + 4500 @ ${dataset2} + 4500 @ ${dataset3} + 2250 @ ${dataset4} + 2250 @ ${dataset5} 
               + 4500 @ ${dataset6} + 1200 @ ${dataset7} + 2250 @ ${dataset8} + 2250 @ ${dataset9} + 2250 @ ${dataset10} 
               + 2250 @ ${dataset11} + 1800 @ ${dataset12} + 1800 @ ${dataset13} + 450 @ ${dataset14} + 2250 @ ${dataset15}
-test_dataset: 1000 @ ARKitScenes_Multi(split='test', ROOT='/lustre/isaac24/proj/UTK0516/metrics_data/processed/processed_arkitscenes/', resolution=(518, 392), num_views=${num_test_views}, seed=42, n_corres=${n_corres_test})
+test_dataset: 1000 @ ARKitScenes_Multi(split='test', ROOT='/lustre/isaac24/proj/UTK0516/metrics_data/processed_jd/processed_arkitscenes/', resolution=(518, 392), num_views=${num_test_views}, seed=42, n_corres=${n_corres_test})
 
 seed: 0
 batch_size: 1

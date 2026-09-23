@@ -4,6 +4,7 @@ import os.path as osp
 import numpy as np
 
 from .base.base_multiview_dataset import BaseMultiViewDataset, EmptyDatasetError
+from .base.segments import segment_frame_ids
 from .types import Split
 from .utils.image import imread_cv2
 from .utils.zipio import frames_root, listdir as zlistdir, np_load
@@ -13,6 +14,11 @@ from .utils.zipio import frames_root, listdir as zlistdir, np_load
 # It is wide because TartanAir is rendered at a high, constant frame rate, so
 # adjacent frames are nearly redundant.
 DEFAULT_STRIDE_RANGE = (1, 20)
+
+# Largest frame-index step still treated as one continuous capture. TartanAir
+# renders every frame of a trajectory, so no trajectory splits today; this only
+# guards a future preprocessing change.
+MAX_FRAME_GAP = 1
 
 
 class TartanAir_Multi(BaseMultiViewDataset):
@@ -70,7 +76,8 @@ class TartanAir_Multi(BaseMultiViewDataset):
         scenes = []
         sceneids = []
         images = []
-        scene_img_list = []
+        seq_img_list = []
+        seqids = []
         start_img_ids = []
         j = 0
 
@@ -105,13 +112,34 @@ class TartanAir_Multi(BaseMultiViewDataset):
                         print(f"Skipping {seq_dir}")
                         continue
                     img_ids = list(np.arange(num_imgs) + offset)
-                    start_img_ids_ = img_ids[: num_imgs - cut_off + 1]
+
+                    # preprocess_tartanair.py renders every frame of a
+                    # trajectory, so this is one run per trajectory today; it
+                    # is here so a future gap cannot silently produce clips
+                    # that jump across it
+                    frame_idx = np.array([int(name) for name in basenames])
+                    sequences = segment_frame_ids(
+                        img_ids, frame_idx, MAX_FRAME_GAP, cut_off
+                    )
+                    if not sequences:
+                        print(
+                            f"Skipping {seq_dir}: no run of {cut_off} "
+                            f"consecutive frames"
+                        )
+                        continue
+
+                    for img_ids_seq in sequences:
+                        seq_img_list.append(img_ids_seq)
+                        start_img_ids.extend(
+                            img_ids_seq[: len(img_ids_seq) - cut_off + 1]
+                        )
+                        # seqids is indexed by GLOBAL image id
+                        for gid in img_ids_seq:
+                            seqids.append((gid, len(seq_img_list) - 1))
 
                     scenes.append(seq_dir)
-                    scene_img_list.append(img_ids)
                     sceneids.extend([j] * num_imgs)
                     images.extend(basenames)
-                    start_img_ids.extend(start_img_ids_)
                     offset += num_imgs
                     j += 1
 
@@ -124,7 +152,12 @@ class TartanAir_Multi(BaseMultiViewDataset):
         self.sceneids = sceneids
         self.images = images
         self.start_img_ids = start_img_ids
-        self.scene_img_list = scene_img_list
+        # one entry per contiguous run, NOT per trajectory: indexed by
+        # seqids[start_id], never by sceneids[start_id] (the path lookup)
+        self.seq_img_list = seq_img_list
+        self.seqids = np.full(offset, -1, dtype=np.int64)
+        for gid, seq_idx in seqids:
+            self.seqids[gid] = seq_idx
 
     def __len__(self):
         return len(self.start_img_ids)
@@ -137,7 +170,7 @@ class TartanAir_Multi(BaseMultiViewDataset):
 
     def _get_views(self, idx, resolution, rng, num_views):
         start_id = self.start_img_ids[idx]
-        all_image_ids = self.scene_img_list[self.sceneids[start_id]]
+        all_image_ids = self.seq_img_list[self.seqids[start_id]]
         pos, ordered_video = self.get_seq_from_start_id(
             num_views,
             start_id,
