@@ -409,6 +409,14 @@ python finetune_depth.py ... --epochs 0 --resume <ckpt> --bench.enabled --bench.
 python finetune_depth.py ... --bench.enabled --bench.max-sequences 2 --bench.densities 0.05   # smoke test
 ```
 
+An already trained run is scored without replaying its training CLI:
+
+```bash
+python src/bench_checkpoint.py --weights <run_dir> --checkpoint best        # -> <run_dir>/bench_best/
+sbatch experiments/all_datasets_finetune/bench_checkpoint.sh                # newest run under checkpoints_jd
+BASE=1 sbatch experiments/all_datasets_finetune/bench_checkpoint.sh         # pretrained backbone, same architecture
+```
+
 Results land in wandb as `final_bench/<dataset>/stream/d<pct>/<protocol>_<metric>`
 (and `.../tae_vda`, `.../tae_ours`) and on disk as `<run>/bench_results.json`
 with the per-sequence rows behind every mean. Budget: ~50k streamed frames
