@@ -202,6 +202,21 @@ class TAETest(unittest.TestCase):
         self.assertGreater(ours, 0.08)
         self.assertLess(ours, 0.12)
 
+    def test_nonfinite_pose_pair_scored_zero_by_vda_and_dropped_by_ours(self):
+        depth, Ks, poses = self._static(S=3)
+        depth[1] *= 1.1  # both real pairs see a 10% jump
+        bad = np.eye(4)
+        bad[0, 3] = -np.inf
+        poses = [poses[0], poses[1], bad]  # pair (1,2) touches a bad pose
+        vda = P.tae_vda(depth, Ks, poses, device="cpu")
+        ours, _ = P.tae_ours(depth, np.ones_like(depth, dtype=bool), Ks, poses)
+        # vda: pair (0,1) ~10, pair (1,2) scored 0, averaged over both pairs
+        self.assertGreater(vda, 4.0)
+        self.assertLess(vda, 6.0)
+        # ours: only pair (0,1) counts
+        self.assertGreater(ours, 0.08)
+        self.assertLess(ours, 0.12)
+
     def test_single_frame_has_no_tae(self):
         depth, Ks, poses = self._static(S=1)
         self.assertTrue(np.isnan(P.tae_vda(depth, Ks, poses)))
@@ -306,16 +321,19 @@ class BenchmarkCfgAndAggregateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             bench_eval.BenchmarkCfg(image_size=500).validate()
 
-    def test_has_cameras_rejects_nonfinite_pose(self):
+    def test_has_cameras_needs_only_intrinsics(self):
         K = np.eye(3)
         good = VB.Frame(Path("a"), Path("b"), 1.0, K, np.eye(4))
         bad_pose = np.eye(4)
         bad_pose[0, 3] = -np.inf
         bad = VB.Frame(Path("a"), Path("b"), 1.0, K, bad_pose)
         none = VB.Frame(Path("a"), Path("b"), 1.0, K, None)
-        self.assertTrue(bench_eval.has_cameras(VB.Sequence("x", "s", [good, good])))
-        self.assertFalse(bench_eval.has_cameras(VB.Sequence("x", "s", [good, bad])))
-        self.assertFalse(bench_eval.has_cameras(VB.Sequence("x", "s", [good, none])))
+        no_k = VB.Frame(Path("a"), Path("b"), 1.0, None, np.eye(4))
+        # bad / missing poses are handled per pair by the TAE functions
+        self.assertTrue(bench_eval.has_cameras(VB.Sequence("x", "s", [good, bad])))
+        self.assertTrue(bench_eval.has_cameras(VB.Sequence("x", "s", [good, none])))
+        self.assertFalse(bench_eval.has_cameras(VB.Sequence("x", "s", [good, no_k])))
+        self.assertFalse(bench_eval.has_cameras(VB.Sequence("x", "s", [good])))
 
     def test_density_key(self):
         self.assertEqual(bench_eval.density_key(0.05), "d5")

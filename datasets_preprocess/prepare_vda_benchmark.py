@@ -122,9 +122,24 @@ def install_shims() -> None:
         dataset_extract_bonn,
     ):
         mod.cv2 = shim
-    dataset_extract_bonn.get_sorted_files = lambda root, suffix: (
-        eval_utils.get_sorted_files(root, suffix)
-    )
+    dataset_extract_bonn.get_sorted_files = _bonn_sorted_files
+
+
+def _bonn_sorted_files(root, suffix):
+    """VDA's Bonn extractor pairs rgb[i] with depth[i] by sorted index over the
+    whole sequence, so a sequence with more rgb than depth frames (crowd3:
+    854 vs 847) raises IndexError. Truncate the rgb list to the depth count:
+    the index pairing inside the protocol's frames 30-140 is then exactly
+    DepthCrafter's (which slices both lists to [30:140] before pairing) --
+    parity, including its misalignment: on crowd3 rgb[i] and depth[i] are ~3
+    frames (~92 ms) apart there, where the other four are within one frame.
+    (Also fixes their call's keyword: the helper's parameter is root_path.)"""
+    names = eval_utils.get_sorted_files(root, suffix)
+    if os.path.basename(os.path.normpath(root)) == "rgb":
+        depth_dir = os.path.join(os.path.dirname(os.path.normpath(root)), "depth")
+        n_depth = len([f for f in os.listdir(depth_dir) if f.endswith(suffix)])
+        names = names[:n_depth]
+    return names
 
 
 def _require(path: Path, what: str) -> Path:

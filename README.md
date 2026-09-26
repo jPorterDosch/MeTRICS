@@ -373,11 +373,11 @@ NYU fixed intrinsics); `--cameras` re-attaches them to an existing tree.
 plus two TAEs on the published-aligned depth: `tae_vda` (theirs, vendored,
 x100) and `tae_ours` (`eval/temporal_consistency/metrics.py`). They differ in
 definition and are never blended. Both reproject with the manifest's GT
-cameras, never the model's. By default TAE runs on the ScanNet TAE split
-(20 scenes x 170 consecutive frames, VDA's own manifest -- the one dataset
-they report it on); `--bench.tae-datasets scannet sintel bonn kitti` adds
-the others, scored on their main-pass predictions with the attached cameras
-(ours-only rows until the baselines are run).
+cameras, never the model's, on every video dataset: ScanNet on VDA's TAE
+split (20 scenes x 170 consecutive frames, their own manifest -- the one
+dataset they report it on), the others on their main-pass predictions with
+the cameras the preparer attached (ours-only rows until the baselines are
+run). `--bench.tae-datasets` narrows it.
 
 **500-frame variant.** VDA's headline table scores up to 500 frames per
 video; `--bench.datasets scannet_500 kitti_500 bonn_500` runs that protocol
@@ -427,14 +427,19 @@ across ranks under DDP); `--bench.datasets` and `--bench.densities` cut it.
 the first `--bench.clouds-per-dataset` (2) sequences of each dataset to
 `<run>/bench_clouds/<dataset>_<sequence>_d5_stream.npz` -- RGB, predicted
 depth and confidence, the sparse depth, GT, predicted and (where available) GT
-cameras, 32 frames -- and renders a GLB next to each with the **GT**
-cameras (the frozen camera head reads fine-tuned tokens, so its track is
-not trusted for anything; it is stored, not used). Re-render later, with
-other options, without a model:
+cameras, 32 frames -- and renders two things next to each, both with the
+**GT** cameras (the frozen camera head reads fine-tuned tokens, so its
+track is not trusted for anything; it is stored, not used): a GLB, and a
+self-contained `.html` viewer (`src/cloud_viewer.py`) with the prediction
+colourable by RGB / `|pred-gt|/gt` / confidence / sparse-input pixels, a GT
+cloud to toggle against it, camera frustums, a frame slider (accumulate
+`0..t` or single frame) and per-frame metric AbsRel / delta1. Serve the
+directory and open `/<name>.html`:
 
 ```bash
-python src/render_clouds.py <run>/bench_clouds/*.npz                 # GT cameras (auto)
-python src/render_clouds.py <run>/bench_clouds/scannet_*.npz --cameras pred --mask-to-gt
+python src/serve_glb.py --glb-dir <run>/bench_clouds      # port-forward, then http://localhost:8000/<name>.html
+python src/cloud_viewer.py <run>/bench_clouds/*.npz --every 1   # rebuild at full resolution, or --cameras pred
+python src/render_clouds.py <run>/bench_clouds/*.npz --mask-to-gt   # GLB with other options
 ```
 
 ### Visualizing SPOT sequences

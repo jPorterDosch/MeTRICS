@@ -13,9 +13,9 @@ protocols reads them.
 
 Sources:
   scannet  <scene>/pose/<i>.txt + <scene>/intrinsic/intrinsic_depth.txt,
-           copied into the tree by VDA's extractor. Poses with non-finite
-           entries (tracking failures) are left out; the frame keeps no
-           "pose" key and the sequence is skipped for TAE.
+           copied into the tree by VDA's extractor. Non-finite poses
+           (tracking failures, -inf) are kept verbatim, as in VDA's TAE
+           manifest; the TAE code handles them per pair.
   sintel   training/camdata_left/<seq>/frame_%04d.cam: float tag, then M
            (3x3 intrinsics, float64) and N (3x4 world->cam, float64);
            pose = inv([N; 0 0 0 1]), the MonST3R convention.
@@ -99,6 +99,17 @@ def nearest_tum_pose(
             f"no groundtruth pose within {max_dt}s of t={timestamp} (nearest {dt:.3f}s)"
         )
     return tum_pose(traj[i])
+
+
+def _bonn_pose_or_none(traj: np.ndarray, t: float) -> np.ndarray | None:
+    """A frame with no mocap pose within tolerance (balloon2 has one 54 ms gap,
+    outside the protocol's frames 30-140) gets no pose: that sequence is then
+    skipped for TAE in the manifest it appears in, instead of failing the
+    whole dataset."""
+    try:
+        return nearest_tum_pose(traj, t)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +221,10 @@ def _scannet_cameras(
     pose = np.loadtxt(bench_ds / seq / "pose" / f"{stem}.txt")
     if pose.shape != (4, 4):
         raise ValueError(f"{seq}/pose/{stem}.txt: expected 4x4, got {pose.shape}")
-    return K, pose if _finite(pose) else None
+    # kept verbatim even when non-finite (ScanNet writes -inf on tracking
+    # failure), as VDA's own TAE manifest does: tae_vda must see what theirs
+    # sees, and tae_ours drops the affected pairs itself
+    return K, pose
 
 
 def attach_cameras(
@@ -234,7 +248,10 @@ def attach_cameras(
                 missing += 1
             else:
                 fr["pose"] = np.asarray(pose, dtype=np.float64).tolist()
-                stats["with_pose"] += 1
+                if _finite(np.asarray(pose)):
+                    stats["with_pose"] += 1
+                else:
+                    missing += 1
             stats["frames"] += 1
         if missing:
             stats["sequences_without_full_pose"] += 1
@@ -260,7 +277,7 @@ def _sequence_cameras(
             raw / "bonn" / "rgbd_bonn_dataset" / seq / "groundtruth.txt"
         )
         return [
-            (BONN_K, nearest_tum_pose(traj, float(Path(fr["image"]).stem)))
+            (BONN_K, _bonn_pose_or_none(traj, float(Path(fr["image"]).stem)))
             for fr in frames
         ]
     if name == "kitti":

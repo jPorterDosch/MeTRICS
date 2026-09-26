@@ -199,7 +199,9 @@ class AttachTest(unittest.TestCase):
                 0
             ]["scene0000_00"]
             self.assertIn("pose", frames[0])
-            self.assertNotIn("pose", frames[1])
+            # kept verbatim (-inf), as in VDA's TAE manifest
+            self.assertIn("pose", frames[1])
+            self.assertFalse(np.isfinite(np.asarray(frames[1]["pose"])).all())
             self.assertEqual(np.asarray(frames[1]["K"]).shape, (3, 3))
 
 

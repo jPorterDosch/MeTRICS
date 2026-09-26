@@ -64,6 +64,7 @@ INDEX_HTML = """<!doctype html>
 <body>
 <div id="bar">
   <label>scene <select id="file"></select></label>
+  <a id="viewer" target="_blank" style="display:none;margin-left:8px">interactive viewer (metrics, error colouring, GT side-by-side) &#8599;</a>
   <label>point size <input id="size" type="range" min="1" max="20" step="0.5" value="4"></label>
   <button id="fit">fit view</button>
   <button id="bg">bg</button>
@@ -367,6 +368,15 @@ document.getElementById('bar').addEventListener('click', requestRender);
 const fileEl = document.getElementById('file');
 fileEl.addEventListener('change', () => load(fileEl.value));
 
+// a bench_clouds snapshot also has a cloud_viewer.py page next to its .glb
+const viewerEl = document.getElementById('viewer');
+function updateViewerLink(name) {
+  const html = name.replace(/\.glb$/, '.html');
+  viewerEl.style.display = 'none';
+  fetch(html, {method: 'HEAD'}).then(r => { if (r.ok) { viewerEl.href = html; viewerEl.style.display = 'inline'; } }).catch(() => {});
+}
+fileEl.addEventListener('change', () => updateViewerLink(fileEl.value));
+
 fetch('api/list').then(r => r.json()).then(files => {
   if (!files.length) { infoEl.textContent = 'no .glb files in this directory'; return; }
   for (const f of files) {
@@ -374,6 +384,7 @@ fetch('api/list').then(r => r.json()).then(files => {
     opt.value = f; opt.textContent = f; fileEl.appendChild(opt);
   }
   load(files[0]);
+  updateViewerLink(files[0]);
 });
 
 window.addEventListener('resize', () => {
@@ -415,6 +426,12 @@ def resolve_glb_dir(path: str) -> Path:
 
 def make_handler(glb_dir: Path):
     class Handler(SimpleHTTPRequestHandler):
+        def end_headers(self):
+            # the viewer .html files are rewritten in place after every
+            # benchmark run; a cached copy would show stale panels
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            super().end_headers()
+
         def __init__(self, *a, **k):
             super().__init__(*a, directory=str(glb_dir), **k)
 

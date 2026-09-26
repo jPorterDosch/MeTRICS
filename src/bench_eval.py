@@ -79,12 +79,21 @@ class BenchmarkCfg:
     densities: tuple[float, ...] = (0.01, 0.05, 0.40)
     """Sparse depth densities (fraction of patches visible) swept per sequence. 5%
     is the training density; 40% is SPOT's real sensor."""
-    tae_datasets: tuple[str, ...] = ("scannet",)
-    """Datasets scored for TAE (both definitions), per density. ScanNet uses
-    VDA's TAE manifest (20 x 170 consecutive frames, its own pass); any other
-    video dataset is scored on the predictions of its main pass, using the
-    GT cameras the preparer attached. ScanNet only by default: it is the one
-    dataset VDA reports TAE on, so the others have no baseline row yet."""
+    tae_datasets: tuple[str, ...] = (
+        "sintel",
+        "scannet",
+        "kitti",
+        "bonn",
+        "scannet_500",
+        "kitti_500",
+        "bonn_500",
+    )
+    """Datasets scored for TAE (both definitions), per density -- every video
+    dataset, whenever it is also in `datasets`. ScanNet uses VDA's TAE
+    manifest (20 x 170 consecutive frames, its own pass; the only split VDA
+    reports TAE on); every other one is scored on the predictions of its
+    main pass with the GT cameras the preparer attached, so those rows are
+    ours-only until the baselines are run."""
     clouds_per_dataset: int = 2
     """Sequences per dataset snapshotted as re-renderable .npz (+ .glb)."""
     cloud_frames: int = 32
@@ -269,13 +278,15 @@ def score_sequence(
 
 
 def has_cameras(seq: Sequence) -> bool:
-    """Every frame carries K and a finite pose -- what TAE needs. VDA's own
-    ScanNet TAE manifest copies -inf poses from tracking failures verbatim
-    (json -Infinity), so None is not the only way a pose can be missing."""
-    return all(
-        fr.K is not None and fr.pose is not None and bool(np.isfinite(fr.pose).all())
-        for fr in seq.frames
-    )
+    """Every frame carries K -- what TAE needs to be scored at all. Poses may
+    be missing or non-finite (ScanNet's -inf on tracking failure, a Bonn
+    mocap gap): the TAE functions handle those per pair, tae_vda as upstream
+    does (pair scored 0), tae_ours by dropping the pair."""
+    return len(seq.frames) > 1 and all(fr.K is not None for fr in seq.frames)
+
+
+def _pose_or_nan(pose: np.ndarray | None) -> np.ndarray:
+    return np.full((4, 4), np.nan) if pose is None else pose
 
 
 def score_tae_sequence(
@@ -300,9 +311,14 @@ def score_tae_sequence(
             P.depth_to_disparity(pred_gt), gt, spec.max_depth
         )
     Ks_raw = [fr.K for fr in seq.frames]
-    poses = [fr.pose for fr in seq.frames]
-    if any(k is None for k in Ks_raw) or any(p is None for p in poses):
-        raise ValueError(f"{spec.name}/{seq.name}: TAE manifest frames lack K/pose")
+    if any(k is None for k in Ks_raw):
+        raise ValueError(f"{spec.name}/{seq.name}: TAE manifest frames lack K")
+    poses = [_pose_or_nan(fr.pose) for fr in seq.frames]
+    bad_pairs = sum(
+        1
+        for a, b in zip(poses, poses[1:])
+        if not (np.isfinite(a).all() and np.isfinite(b).all())
+    )
     Ks_ours = [scaled_intrinsics(k, spec.crop, (H, W), (H, W)) for k in Ks_raw]
     valid = P.gt_valid_mask(gt, spec.max_depth)
     tae_abs, tae_sq = P.tae_ours(aligned, valid, Ks_ours, poses)
@@ -316,6 +332,8 @@ def score_tae_sequence(
         "tae_vda": P.tae_vda(aligned, Ks_raw, poses),
         "tae_ours": tae_abs,
         "tae_ours_sq": tae_sq,
+        # pairs touching a non-finite pose: scored 0 in tae_vda, dropped in tae_ours
+        "tae_bad_pose_pairs": bad_pairs,
     }
 
 
@@ -392,6 +410,23 @@ def _render_cloud(path: Path) -> None:
         print(f"[bench] GLB render of {path.name} failed ({e}); npz kept", flush=True)
 
 
+def _render_viewers(paths: list[Path], results: Path) -> None:
+    """The interactive .html per snapshot (cloud_viewer.py): error /
+    confidence / sparse-input colouring, GT toggle, frame slider, and the
+    sequence's rows next to the dataset means -- hence written AFTER
+    bench_results.json exists, unlike the GLB."""
+    from cloud_viewer import write_html
+
+    for path in paths:
+        try:
+            write_html(path, results=results)
+        except Exception as e:
+            print(
+                f"[bench] HTML viewer for {path.name} failed ({e}); npz kept",
+                flush=True,
+            )
+
+
 # ---------------------------------------------------------------------------
 # aggregation
 # ---------------------------------------------------------------------------
@@ -426,8 +461,8 @@ def aggregate(rows: list[dict], tae_rows: list[dict]) -> dict[str, float]:
     for (ds, mode, dk), rs in sorted(tgroups.items()):
         base = f"{ds}/{mode}/{dk}"
         out[f"{base}/tae_n_sequences"] = float(len(rs))
-        for m in ("tae_vda", "tae_ours", "tae_ours_sq"):
-            out[f"{base}/{m}"] = _mean([r[m] for r in rs])
+        for m in ("tae_vda", "tae_ours", "tae_ours_sq", "tae_bad_pose_pairs"):
+            out[f"{base}/{m}"] = _mean([r.get(m) for r in rs])
     return out
 
 
@@ -479,6 +514,7 @@ def run_benchmark(
     # gather below, and a rank that died on its shard would leave the others
     # waiting there forever -- at the end of a multi-day run.
     failed: list[dict] = []
+    cloud_paths: list[Path] = []
 
     def _guard(tag: str, fn):
         try:
@@ -548,6 +584,7 @@ def run_benchmark(
                             cfg.cloud_frames,
                         )
                         _render_cloud(path)
+                        cloud_paths.append(path)
                     del pred
                 del views
                 # rows land only once the whole sequence scored, so a failure
@@ -568,9 +605,8 @@ def run_benchmark(
                 seq = tseqs[gi]
                 tag = f"{spec.name}/tae/{seq.name}"
                 if not has_cameras(seq):
-                    # ScanNet writes -inf poses where tracking failed
                     tae_skipped[spec.name] = tae_skipped.get(spec.name, 0) + 1
-                    accelerator.print(f"[bench] {tag}: missing GT pose(s); skipped")
+                    accelerator.print(f"[bench] {tag}: missing GT intrinsics; skipped")
                     continue
 
                 def _one_tae_sequence(seq=seq, tag=tag):
@@ -608,6 +644,11 @@ def run_benchmark(
             for k, v in part.items():
                 tae_skipped[k] = tae_skipped.get(k, 0) + v
         failed = [f for part in gather_object([failed]) for f in part]
+        cloud_paths = [
+            Path(p)
+            for part in gather_object([[str(p) for p in cloud_paths]])
+            for p in part
+        ]
 
     result = aggregate(rows, tae_rows)
     for name, sec in seconds.items():
@@ -634,6 +675,7 @@ def run_benchmark(
                 sort_keys=True,
             )
         accelerator.print(f"[bench] wrote {out}")
+        _render_viewers(cloud_paths, out)
         if failed:
             accelerator.print(
                 f"[bench] {len(failed)} sequence(s) FAILED and were skipped -- see bench_results.json"

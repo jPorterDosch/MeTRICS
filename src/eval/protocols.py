@@ -292,7 +292,12 @@ def tae_vda(
     the TAE, so this takes the output of published_metrics). Poses are
     cam2world 4x4; K is the 3x3 of frame i, as in their code (no per-pair
     intrinsics change is modelled). NOTE their tae_torch returns 0, not NaN,
-    for a pair with no overlap; kept. Runs on `device` (default: cuda when
+    for a pair with no overlap; kept. A pair touching a non-finite pose
+    (ScanNet's -inf on tracking failure) reaches the same return in their
+    code -- NaN reprojections leave no valid pixel -- so it is scored 0 and
+    counted in the mean here too, explicitly rather than through a NaN->long
+    cast whose result is platform-defined. Upstream parity, not correctness:
+    tae_ours drops those pairs instead. Runs on `device` (default: cuda when
     available -- 170 frames at 464x618 is minutes on a CPU)."""
     _check_seq("depth", depth)
     S = depth.shape[0]
@@ -307,6 +312,8 @@ def tae_vda(
     ones = torch.ones(depth.shape[1:], dtype=torch.bool, device=device)
     error_sum = 0.0
     for i in range(S - 1):
+        if not (np.isfinite(poses[i]).all() and np.isfinite(poses[i + 1]).all()):
+            continue  # upstream scores this pair 0 (see docstring); denominator unchanged
         d1, d2 = depth_t[i], depth_t[i + 1]
         R_2_1, t_2_1 = _relative_pose(poses[i], poses[i + 1])
         R_1_2, t_1_2 = _relative_pose(poses[i + 1], poses[i])
@@ -330,7 +337,9 @@ def tae_ours(
     """The repo's TAE (eval.temporal_consistency.metrics.tae) over a sequence:
     symmetric relative reprojection error between adjacent frames, restricted
     to GT-valid pixels, returned as (mean-abs, mean-sq) over the finite pairs.
-    Same aligned depth as tae_vda so the two differ only in definition."""
+    A pair touching a non-finite pose is dropped (not scored 0, unlike
+    tae_vda). Same aligned depth as tae_vda so the two differ only in
+    definition."""
     _check_seq("depth", depth)
     _check_seq("valid", valid, depth)
     S = depth.shape[0]
@@ -342,9 +351,12 @@ def tae_ours(
     for K, pose in zip(Ks, poses):
         k4 = np.eye(4, dtype=np.float32)
         k4[:3, :3] = np.asarray(K, dtype=np.float32)[:3, :3]
-        i2l.append(np.asarray(pose, dtype=np.float32) @ np.linalg.inv(k4))
+        pose = np.asarray(pose, dtype=np.float32)
+        i2l.append(pose @ np.linalg.inv(k4) if np.isfinite(pose).all() else None)
     abs_errs, sq_errs = [], []
     for i in range(S - 1):
+        if i2l[i] is None or i2l[i + 1] is None:
+            continue
         a, sq = tae_repo(
             depth[i].astype(np.float32),
             valid[i],
