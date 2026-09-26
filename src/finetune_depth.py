@@ -58,8 +58,9 @@ from streamvggt.depth_cond import (
 )
 from eval.temporal_consistency.metrics import depth_evaluation, tae
 from finetune import save_current_code, setup_for_distributed  # reuse
-from streamvggt.utils.geometry import unproject_depth_map_to_point_map
-from val_images import ValImageSampler, clip_dataset_label
+from bench_eval import BenchmarkCfg, run_benchmark
+from eval.vda_benchmark import bench_root_ok
+from val_images import ValImageSampler, clip_dataset_label, clip_predictions
 from visual_util import predictions_to_glb
 from streamvggt.datasets import (
     CatDataset,
@@ -75,6 +76,10 @@ torch.backends.cuda.matmul.allow_tf32 = True  # for gpu >= Ampere and pytorch >=
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 printer = get_logger(__name__, log_level="DEBUG")
+
+# kept under its historical name: visualize_depth.py / visualize_spot.py import
+# it from here
+_clip_predictions = clip_predictions
 
 WANDB_PROJECT = "MeTRIC"
 WANDB_ENTITY = "sparse_representation_learning"
@@ -276,6 +281,12 @@ class FinetuneDepthCfg:
     # experiment identity.
     val_log_images: int = 5
 
+    # end-of-training video-depth benchmark (Sintel / ScanNet / KITTI / Bonn /
+    # NYUv2 under the published, sparse-aligned and metric protocols, over a
+    # prompt-density sweep; see bench_eval.py). Off by default; runs once after
+    # the streaming eval, never per epoch. Not part of the experiment identity.
+    bench: BenchmarkCfg = field(default_factory=BenchmarkCfg)
+
     # derived at startup (do not set on the CLI)
     output_dir: str = ""
 
@@ -297,6 +308,7 @@ _NON_IDENTITY_FIELDS = (
     "export_glb",
     "export_glb_max_clips",
     "val_log_images",
+    "bench",
 )
 
 # Nested manifest keys that do not define the experiment. The freq map is
@@ -582,6 +594,18 @@ def run(
     seed_everything(seed)
     cudnn.benchmark = args.benchmark
 
+    # the benchmark runs after training: a missing tree must fail HERE, not
+    # after a multi-day run has finished
+    if args.bench.enabled:
+        missing = bench_root_ok(
+            args.bench.validate().root, args.bench.datasets, args.bench.tae_datasets
+        )
+        if missing:
+            raise FileNotFoundError(
+                f"--bench.enabled but manifests missing under {args.bench.root} for "
+                f"{missing}; run datasets_preprocess/prepare_vda_benchmark.sbatch first"
+            )
+
     data_loader_train = build_train_loader(args, Split.TRAIN, accelerator)
     data_loaders_val = build_val_loaders(args, accelerator) if args.val_freq > 0 else []
     # streaming_eval drives StreamVGGT.inference, which folds the batch dim of
@@ -742,6 +766,19 @@ def run(
             args=args,
             mcfg=mcfg,
             prefix="final_stream",
+        )
+
+    # published-protocol benchmark, once, on the final weights (the pure-eval
+    # path reaches here too, so --epochs 0 --bench.enabled rescores any arm)
+    if args.bench.enabled:
+        run_benchmark(
+            model,
+            accelerator,
+            args.bench,
+            mcfg,
+            args.output_dir,
+            step=args.epochs * len(data_loader_train),
+            seed=args.seed,
         )
 
     # No separate checkpoint-final.pth: the `epoch == args.epochs` branch above
@@ -1025,55 +1062,6 @@ def _stack_depth_batch(
     K = torch.stack([g["camera_intrinsics"] for g in views], dim=1).float().cpu()
     pose = torch.stack([g["camera_pose"] for g in views], dim=1).float().cpu()
     return pred, gt, valid, K, pose
-
-
-def _clip_predictions(
-    img: torch.Tensor,
-    depth: torch.Tensor,
-    valid: torch.Tensor,
-    K: torch.Tensor,
-    pose: torch.Tensor,
-    mask_to_gt: bool = True,
-) -> dict:
-    """Assemble the numpy `predictions` dict predictions_to_glb consumes, for a
-    single clip. Inputs are the per-clip slices of _stack_depth_batch plus the
-    images: img [S,3,H,W] in [0,1], depth [S,H,W], valid [S,H,W] bool,
-    K [S,3,3], pose [S,4,4] cam2world.
-
-    Both the unprojector and predictions_to_glb want world->cam extrinsics of
-    shape [S,3,4] -- depth_to_world_coords_points is documented "cam from
-    world", and the glb builder inverts extrinsic to place the camera frustums
-    -- so we invert the cam2world pose ONCE and hand the same array to both;
-    point cloud and cameras then live in one frame. Invalid pixels get zero
-    confidence, which predictions_to_glb's conf>1e-5 filter drops (paired with
-    conf_thres=0.0, so no valid pixels are thresholded out).
-
-    mask_to_gt=True (default) keeps only pixels with GT depth, which is what the
-    training-time export wants: the cloud then covers exactly the pixels the
-    logged metrics are computed over. Pass False for inference/visualization of
-    a depth-COMPLETION model -- the prediction in GT holes (sensor dropouts,
-    transparent/specular surfaces) is the completion output, and masking to GT
-    hides precisely the part you cannot read off the metrics. isfinite is
-    applied either way: a NaN/Inf would survive the conf>1e-5 filter and poison
-    the np.percentile scene scale (-> NaN camera sizing for the whole clip)."""
-    world2cam = np.linalg.inv(pose.numpy())[:, :3, :4].astype(np.float32)  # [S,3,4]
-    # the unprojector does a hard np.squeeze(-1) per frame, so it needs the
-    # trailing singleton (_stack_depth_batch already dropped it -> [S,H,W])
-    world_points = unproject_depth_map_to_point_map(
-        depth.numpy()[..., None], world2cam, K.numpy()
-    )  # [S,H,W,3]
-    # confidence = GT-valid AND finite prediction. Dropping non-finite pixels
-    # matters: a NaN/Inf predicted depth (bad/early ckpt) at a GT-valid pixel
-    # would survive predictions_to_glb's conf>1e-5 filter and poison the
-    # np.percentile scene-scale (-> NaN camera sizing for the whole clip).
-    finite = torch.isfinite(depth)
-    conf = ((valid & finite) if mask_to_gt else finite).numpy().astype(np.float32)
-    return {
-        "world_points_from_depth": world_points,
-        "depth_conf": conf,
-        "images": img.numpy(),
-        "extrinsic": world2cam,
-    }
 
 
 def _export_selected_glbs(

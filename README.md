@@ -332,7 +332,182 @@ MeTRICS
 ```
 
 ## Evaluation
-TODO: add eval scripts
+
+### Video-depth benchmark (Sintel / ScanNet / KITTI / Bonn / NYUv2)
+
+The end-of-training benchmark scores the final weights on the datasets of
+[Video Depth Anything](https://github.com/DepthAnything/Video-Depth-Anything)'s
+protocol -- Sintel 23 x 50, ScanNet 100 x 90 (every 3rd frame), KITTI 13 x 110,
+Bonn 5 x 110, NYUv2 654 stills -- so a row of ours sits next to a row of
+theirs. It runs once, after the streaming eval, never per epoch, and also in
+the `--epochs 0` pure-eval path, so any checkpoint or baseline arm can be
+rescored under the identical code. Implementation: `src/bench_eval.py`
+(orchestration), `src/eval/protocols.py` (scoring), `src/eval/vda_benchmark.py`
+(datasets); VDA's own scoring code is vendored under
+`third_party/video_depth_anything/` (see `README_VENDORED.md` there).
+
+**Data.** Two Slurm jobs, both resumable:
+
+```bash
+sbatch datasets_download/download_eval_benchmarks.sbatch   # raw sources -> metrics_data/eval_jd/raw (~55 GB)
+sbatch datasets_preprocess/prepare_vda_benchmark.sbatch    # ScanNet .sens export + VDA's extraction -> eval_jd/bench
+```
+
+ScanNet is not downloaded: VDA's 100 scenes are the first 100 of `scans_test`,
+already on Lustre. The preparer runs VDA's `dataset_extract_*.py` verbatim
+and documents, in its docstring, each shim it needs to (colour order, Bonn's
+keyword bug, Sintel's depth scale and layout, the missing NYU still split).
+It then writes GT cameras (K + cam2world pose per frame) into every manifest
+from each dataset's native format (`datasets_preprocess/benchmark_cameras.py`:
+ScanNet pose files, Sintel `.cam`, Bonn TUM groundtruth, KITTI oxts + calib,
+NYU fixed intrinsics); `--cameras` re-attaches them to an existing tree.
+
+**Protocols.** Every prediction is scored three ways, always side by side:
+
+| protocol | alignment | what it answers |
+|---|---|---|
+| `published` | one scale+shift per **video**, in **disparity**, against dense GT (VDA's `eval.py`, verbatim) | the only mode in which numbers from their tables are comparable |
+| `sparse_aligned` | one scale+shift per **frame**, fitted on the **sparse-depth pixels only**, in each model's native output space; sparse-depth pixels held out of the score | given the same sparse sensor, who completes it best -- causal, and symmetric between models that consume the sparse depth and models that only see it post hoc |
+| `metric` | none | calibration |
+
+plus two TAEs on the published-aligned depth: `tae_vda` (theirs, vendored,
+x100) and `tae_ours` (`eval/temporal_consistency/metrics.py`). They differ in
+definition and are never blended. Both reproject with the manifest's GT
+cameras, never the model's, on every video dataset: ScanNet on VDA's TAE
+split (20 scenes x 170 consecutive frames, their own manifest -- the one
+dataset they report it on), the others on their main-pass predictions with
+the cameras the preparer attached (ours-only rows until the baselines are
+run). `--bench.tae-datasets` narrows it.
+
+**500-frame variant.** VDA's headline table scores up to 500 frames per
+video; `--bench.datasets scannet_500 kitti_500 bonn_500` runs that protocol
+from the `*_video_500.json` manifests the same extractor writes (ScanNet at
+stride 1 there). Opt-in, ~4.5x the frames of the short protocol; run it on
+the final checkpoint. Sintel is 50 frames either way, and NYU's 500-frame
+split is an 8-scene video set we do not build. With `--bench.tae-datasets
+scannet_500` the long-horizon TAE comes out of the same pass.
+
+**Sparse depth.** One `TUBE_MASK` patch mask per sequence (the same pixels in every
+frame, like a static sensor pattern -- no mask flicker in the TAE), seeded by
+(dataset, sequence, density), so every mode, checkpoint and baseline gets the
+identical pixel set. Density is swept: `--bench.densities 0.01 0.05 0.4` by
+default (1%, the 5% training density, and 40% ~ SPOT's real sensor).
+
+**Mode.** Ours runs streaming only -- the per-frame KV-cache path, i.e.
+deployment. There is no separate "offline" row for this model on purpose:
+`StreamVGGT.forward` applies the same causal mask the cache reproduces
+incrementally, so the full-sequence forward is the same function up to
+kernel numerics (and it materialises an `[S·P, S·P]` mask that does not fit
+at 110+ frames). VDA's offline and streaming rows are both reported, from
+their table and their released cache mode. NYUv2 stills are one-frame
+sequences.
+
+```bash
+# in a training script, or a pure eval of an existing checkpoint:
+python finetune_depth.py ... --bench.enabled                      # all datasets, all densities
+python finetune_depth.py ... --epochs 0 --resume <ckpt> --bench.enabled --bench.datasets scannet bonn
+python finetune_depth.py ... --bench.enabled --bench.max-sequences 2 --bench.densities 0.05   # smoke test
+```
+
+An already trained run is scored without replaying its training CLI:
+
+```bash
+python src/bench_checkpoint.py --weights <run_dir> --checkpoint best        # -> <run_dir>/bench_best/
+sbatch experiments/all_datasets_finetune/bench_checkpoint.sh                # newest run under checkpoints_jd
+BASE=1 sbatch experiments/all_datasets_finetune/bench_checkpoint.sh         # pretrained backbone, same architecture
+```
+
+Results land in wandb as `final_bench/<dataset>/stream/d<pct>/<protocol>_<metric>`
+(and `.../tae_vda`, `.../tae_ours`) and on disk as `<run>/bench_results.json`
+with the per-sequence rows behind every mean. Budget: ~50k streamed frames
+per run at three densities, on the order of an hour on one H100 (sharded
+across ranks under DDP); `--bench.datasets` and `--bench.densities` cut it.
+
+**Point clouds.** The streaming pass at `--bench.cloud-density` (5%) snapshots
+the first `--bench.clouds-per-dataset` (2) sequences of each dataset to
+`<run>/bench_clouds/<dataset>_<sequence>_d5_stream.npz` -- RGB, predicted
+depth and confidence, the sparse depth, GT, predicted and (where available) GT
+cameras, 32 frames -- and renders two things next to each, both with the
+**GT** cameras (the frozen camera head reads fine-tuned tokens, so its
+track is not trusted for anything; it is stored, not used): a GLB, and a
+self-contained `.html` viewer (`src/cloud_viewer.py`) with the prediction
+colourable by RGB / `|pred-gt|/gt` / confidence / sparse-input pixels, a GT
+cloud to toggle against it, camera frustums, a frame slider (accumulate
+`0..t` or single frame) and per-frame metric AbsRel / delta1. Serve the
+directory and open `/<name>.html`:
+
+```bash
+python src/serve_glb.py --glb-dir <run>/bench_clouds      # port-forward, then http://localhost:8000/<name>.html
+python src/cloud_viewer.py <run>/bench_clouds/*.npz --every 1   # rebuild at full resolution, or --cameras pred
+python src/render_clouds.py <run>/bench_clouds/*.npz --mask-to-gt   # GLB with other options
+```
+
+### Visualizing SPOT sequences
+
+`src/visualize_spot.py` runs a checkpoint on a raw SPOT capture and writes the
+same artifacts as `visualize_depth.py`: per-frame point-cloud GLBs and, with
+`--heatmaps`, PNG series that `src/heatmaps_to_gif.py` turns into GIFs
+(`gifs/compare_spot_static.gif` and `gifs/compare_spot_dynamic.gif` were made
+this way). SPOT has no GT depth or poses; the sparse depth the other stereo
+camera projects into the view is the model's *real* conditioning input, so
+this is the one place the model is prompted by a sensor instead of a simulated
+mask. The captures live on Oscar (`/oscar/data/jtompki1/cli277/new_spot_data/<seq>`,
+one `color/<i>.png` + `depth/<i>` binary per frame); `experiments/eval_all.sh`'s
+`spot` stage is the scripted form of everything below.
+
+**1. Run the arms, base first.** The `--base` run writes `pose_cache.npz` into
+`--out-dir`; every later run into the same directory (finetuned, PromptDA)
+unprojects with that cached camera track, so a base/finetuned comparison is
+attributable to depth rather than to two different pose estimates. Geometry
+flags are fingerprinted into the cache, so a run with different framing fails
+loudly instead of silently pairing with it.
+
+```bash
+cd src
+OUT=../viz/spot_static; CKPT=../checkpoints/<group>/<run_id>
+GEOM=(--rotate cw --landscape-crop --crop-anchor top --start 0 --stride 2 \
+      --num-views 32 --seq-dir /oscar/data/jtompki1/cli277/new_spot_data/0 \
+      --heatmaps --rel-vmax 1.0 --tcons-vmax 0.15 --conf-vmax 10 --out-dir $OUT)
+
+python visualize_spot.py --weights $CKPT --checkpoint best --base \
+    --pretrained ../ckpt/checkpoints.pth "${GEOM[@]}"     # -> base_clip0_*
+python visualize_spot.py --weights $CKPT --checkpoint best "${GEOM[@]}"  # -> finetuned_clip0_*
+python visualize_spot.py --weights $CKPT --checkpoint best --promptda "${GEOM[@]}"  # optional third arm
+```
+
+Framing: SPOT's cameras are mounted sideways, so `--rotate cw` makes gravity
+point down, and `--landscape-crop` then cuts a 4:3 window out of the rotated
+frame so the model runs at its primary training resolution (518x392) rather
+than portrait. `--start 0` is the most static window of sequence 0 and
+`--start 998` the most dynamic; report both, since the finetuning advantage
+has been seen to hold on one and vanish on the other. The `--*-vmax` colour
+ceilings must be identical across the arms you intend to compare.
+
+**2. Assemble the GIFs.** Every `{tag}_{series}_NNN.png` series in
+`$OUT/heatmaps` becomes `{tag}_{series}.gif`; `--compare` adds side-by-side
+GIFs with one column per arm, and `--gt-tag` prefixes the RGB and sensor
+columns:
+
+```bash
+python heatmaps_to_gif.py --hm-dir $OUT/heatmaps \
+    --compare promptda_clip0 base_clip0 finetuned_clip0 \
+    --labels "PromptDA" "StreamVGGT" "Ours" --gt-tag gt_clip0 --fps 10 --prune none
+# -> compare_depth.gif, compare_gterr.gif, compare_tcons.gif, compare_conf.gif
+```
+
+Series: `depth` (colormapped prediction), `gterr` (deviation from the sparse
+*sensor* depth, not true GT), `tcons` (adjacent-frame warp self-consistency),
+`conf` (the model's own confidence; PromptDA has none and gets a placeholder
+column). Pass `--compare-name <name>` when writing several comparisons into
+one directory, and `--prune non-depth` once the GIFs exist to drop the
+per-frame PNGs. The per-arm `*_summary.csv` files next to the PNGs are the
+numbers to trust; a saturated panel is indistinguishable from "no difference"
+by eye, so check the `saturated_frac` columns before reading a GIF.
+
+The empirical sensor-validity map used by the `PIXEL_FREQ` training mask
+(`assets/spot/valid_freq_640x480.npz`) is built from the same captures with
+`src/build_spot_freq_map.py`; `src/analyze_spot_mask_temporal.py` measures
+their temporal persistence.
 
 ## Acknowledgements
 Our code is based on the following repositories:
