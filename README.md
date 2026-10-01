@@ -379,6 +379,21 @@ dataset they report it on), the others on their main-pass predictions with
 the cameras the preparer attached (ours-only rows until the baselines are
 run). `--bench.tae-datasets` narrows it.
 
+**SPOT (real sensor).** The two captures in `metrics_data/spot_data/seq_{0,1}`
+(640x480 colour + stereo sparse depth, mounted sideways) are scored too:
+rotated 90 degrees clockwise, the whole upright frame at 392x518
+(`--bench.spot-framing landscape_crop` gives the top 4:3 window at 518x392
+the SPOT GIFs used; the two are not comparable), 110 frames at stride 2 from
+starts 0 and 998. There is no dense GT or GT
+camera, so 10% of each frame's valid sensor pixels are held out, the model
+is fed the rest -- the real sensor pattern, holes and all -- and `metric` and
+`sparse_aligned` are scored on the held-out pixels (`spot/stream/real/*`).
+No `published` (a per-video fit to the held-out pixels would fit the answer
+key) and no TAE: SPOT has no GT camera poses (TODO: record them in future
+captures; TAE then runs as on the other datasets). Every window gets a
+snapshot (its first `--bench.cloud-frames` frames); they use the predicted cameras. `--bench.no-spot`
+skips it; `--bench.spot-*` sets sequences, windows, stride and holdout.
+
 **500-frame variant.** VDA's headline table scores up to 500 frames per
 video; `--bench.datasets scannet_500 kitti_500 bonn_500` runs that protocol
 from the `*_video_500.json` manifests the same extractor writes (ScanNet at
@@ -419,9 +434,9 @@ BASE=1 sbatch experiments/all_datasets_finetune/bench_checkpoint.sh         # pr
 
 Results land in wandb as `final_bench/<dataset>/stream/d<pct>/<protocol>_<metric>`
 (and `.../tae_vda`, `.../tae_ours`) and on disk as `<run>/bench_results.json`
-with the per-sequence rows behind every mean. Budget: ~50k streamed frames
-per run at three densities, on the order of an hour on one H100 (sharded
-across ranks under DDP); `--bench.datasets` and `--bench.densities` cut it.
+with the per-sequence rows behind every mean. Budget (measured): ~5.5 h on one H100 for all five datasets at three
+densities, ScanNet ~4.5 h of it, plus SPOT; sharded across ranks under DDP.
+`--bench.datasets` and `--bench.densities` cut it.
 
 **Point clouds.** The streaming pass at `--bench.cloud-density` (5%) snapshots
 the first `--bench.clouds-per-dataset` (2) sequences of each dataset to

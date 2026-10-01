@@ -284,7 +284,11 @@ def build_views(
         img = load_rgb(fr.image, size, crop, (H, W))  # [1,3,h,w] in [-1,1]
         h, w = img.shape[-2:]
         depth = cv2.resize(gt[i], (w, h), interpolation=cv2.INTER_NEAREST)
-        valid = (depth > 0) & np.isfinite(depth)
+        # the protocol's valid range (VDA: 1e-3 < gt < max_depth), not just
+        # > 0: Sintel's sky is stored at up to 650 m, and a sparse-depth
+        # sample from it conditions the model on a depth the protocol never
+        # scores and dominates the per-frame sparse_aligned fit
+        valid = np.isfinite(depth) & (depth > 1e-3) & (depth < spec.max_depth)
         view = {
             "img": img.to(device),
             "depthmap": torch.from_numpy(depth)[None].to(device),

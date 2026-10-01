@@ -20,7 +20,7 @@
 #
 #   sbatch experiments/all_datasets_finetune/bench_smoke.sh
 #   DATASETS="scannet" DENSITIES="0.01 0.05 0.4" sbatch experiments/all_datasets_finetune/bench_smoke.sh
-#   MAX_SEQ=0 sbatch ...          # the full benchmark (~1 h), still the baseline arm
+#   MAX_SEQ=0 sbatch ...          # the full benchmark (~6 h: exceeds this script's 3 h debug QOS; use bench_checkpoint.sh), baseline arm
 #
 # Needs the benchmark tree (prepare_vda_benchmark.sbatch). The training
 # mixture is still constructed (finetune_depth builds it before anything

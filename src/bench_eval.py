@@ -45,6 +45,10 @@ from accelerate.utils import gather_object
 
 from dust3r.inference import loss_of_one_batch
 from eval import protocols as P
+from eval.spot_benchmark import SpotSequence
+from eval.spot_benchmark import load_views as spot_views
+from eval.spot_benchmark import split_sensor_depth as spot_split
+from eval.spot_benchmark import window as spot_window
 from eval.vda_benchmark import (
     SPECS,
     BenchSpec,
@@ -62,6 +66,7 @@ from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
 from train_utils import to_primitive
 
 _BENCH_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench")
+_SPOT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/spot_data")
 
 PROTOCOLS = ("published", "sparse_aligned", "metric")
 MODE_STREAM = "stream"  # the only mode; kept in the keys so a baseline arm's offline rows can sit next to it
@@ -103,6 +108,27 @@ class BenchmarkCfg:
     """Long side the model runs at (dust3r load_images_for_eval convention)."""
     max_sequences: int = 0
     """Cap on sequences per dataset, for smoke tests. 0 = all."""
+    spot: bool = True
+    """Also score the real-sensor SPOT sequences (eval/spot_benchmark.py):
+    the model is fed the real sensor depth minus a held-out share, scored on
+    that share (metric + sparse_aligned; no dense GT, no TAE)."""
+    spot_root: Path = _SPOT_ROOT
+    spot_sequences: tuple[str, ...] = ("seq_0", "seq_1")
+    spot_starts: tuple[int, ...] = (0, 998)
+    """Window starts (raw frame index). 0 is the most static stretch of the
+    Oscar seq 0 capture and 998 the most dynamic (eval_all.sh's choice)."""
+    spot_frames: int = 110
+    spot_stride: int = 2
+    """SPOT walks fast; every 2nd raw frame, as the SPOT GIFs."""
+    spot_holdout: float = 0.1
+    """Share of each frame's valid sensor pixels held out for scoring."""
+    spot_max_depth: float = 10.0
+    spot_gifs: bool = True
+    """Write <out>/bench_gifs/spot_<seq>_<start>.gif per window: RGB | sensor |
+    prediction | rel. error vs sensor | confidence (eval/spot_gif.py)."""
+    spot_framing: str = "portrait"
+    """portrait: the whole upright frame at 392x518 (full scene). landscape_crop:
+    the top 4:3 window at 518x392, as the earlier SPOT GIFs. Not comparable."""
 
     def validate(self) -> "BenchmarkCfg":
         unknown = [d for d in self.datasets if d not in SPECS]
@@ -135,6 +161,21 @@ class BenchmarkCfg:
             raise ValueError(
                 f"bench.image_size must be a multiple of 14, got {self.image_size}"
             )
+        if self.spot:
+            if not self.spot_sequences or not self.spot_starts:
+                raise ValueError("bench.spot needs spot_sequences and spot_starts")
+            if self.spot_frames < 2 or self.spot_stride < 1:
+                raise ValueError(
+                    f"bench.spot_frames >= 2 and spot_stride >= 1, got {self.spot_frames}, {self.spot_stride}"
+                )
+            if self.spot_framing not in ("portrait", "landscape_crop"):
+                raise ValueError(
+                    f"bench.spot_framing must be portrait|landscape_crop, got {self.spot_framing!r}"
+                )
+            if not 0.0 < self.spot_holdout < 1.0:
+                raise ValueError(
+                    f"bench.spot_holdout must be in (0, 1), got {self.spot_holdout}"
+                )
         if self.max_sequences < 0:
             raise ValueError(
                 f"bench.max_sequences must be >= 0, got {self.max_sequences}"
@@ -338,6 +379,96 @@ def score_tae_sequence(
 
 
 # ---------------------------------------------------------------------------
+# SPOT (real sensor, held-out scoring)
+# ---------------------------------------------------------------------------
+class _SpotSpec:
+    name = "spot"
+
+
+_SPOT_SPEC = _SpotSpec()
+
+
+def _spot_gif(
+    path: Path, views: list[dict], sensor: np.ndarray, pred: Prediction, title: str
+) -> None:
+    """GIF of one SPOT window; a failure costs the GIF, never the scores."""
+    from eval.spot_gif import write_spot_gif
+
+    try:
+        imgs = torch.stack([v["img"][0] for v in views]).float().cpu()
+        rgb = (
+            (imgs * 255.0)
+            .round()
+            .clamp(0, 255)
+            .permute(0, 2, 3, 1)
+            .to(torch.uint8)
+            .numpy()
+        )
+        write_spot_gif(path, rgb, sensor, pred.depth, pred.conf, title)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[bench] GIF for {title} failed ({type(e).__name__}: {e}); scores kept",
+            flush=True,
+        )
+
+
+def spot_missing(cfg: BenchmarkCfg) -> list[str]:
+    """SPOT sequences requested but absent (as "spot/<seq>")."""
+    if not cfg.spot:
+        return []
+    return [
+        f"spot/{s}"
+        for s in cfg.spot_sequences
+        if not (Path(cfg.spot_root) / s / "color").is_dir()
+    ]
+
+
+def score_spot_window(
+    seq: SpotSequence,
+    sensor: np.ndarray,
+    fed: np.ndarray,
+    held: np.ndarray,
+    pred: Prediction,
+    max_depth: float,
+) -> dict:
+    """One SPOT row, scored on the held-out sensor pixels at model
+    resolution: `metric` (raw prediction) and `sparse_aligned` (per-frame
+    scale+shift fitted on the fed pixels). No `published` -- a per-video
+    fit to the held-out pixels would be fitting to the answer key."""
+    gt_held = np.where(held, sensor, 0.0).astype(np.float32)
+    fed_depth = np.where(fed, sensor, 0.0).astype(np.float32)
+    metric = P.metric_metrics(pred.depth, gt_held, max_depth)
+    sparse = P.sparse_aligned_metrics(
+        pred.depth, fed_depth, fed, pred.depth, fed, gt_held, max_depth
+    )
+    return {
+        "dataset": "spot",
+        "sequence": seq.name,
+        "mode": MODE_STREAM,
+        "frames": len(seq),
+        "fed_density": float(fed.mean()),
+        "held_pixels": int(held.sum()),
+        "metric": metric.as_dict(),
+        "sparse_aligned": sparse.as_dict(),
+    }
+
+
+def aggregate_spot(rows: list[dict]) -> dict[str, float]:
+    """spot/stream/real/<protocol>_<metric>: mean over windows."""
+    if not rows:
+        return {}
+    base = f"spot/{MODE_STREAM}/real"
+    out = {
+        f"{base}/n_windows": float(len(rows)),
+        f"{base}/fed_density": _mean([r["fed_density"] for r in rows]),
+    }
+    for proto in ("metric", "sparse_aligned"):
+        for m in P.METRIC_NAMES:
+            out[f"{base}/{proto}_{m}"] = _mean([r[proto][m] for r in rows])
+    return out
+
+
+# ---------------------------------------------------------------------------
 # point-cloud snapshots
 # ---------------------------------------------------------------------------
 def save_cloud(
@@ -349,6 +480,7 @@ def save_cloud(
     density: float,
     mode: str,
     n_frames: int,
+    score_mask: np.ndarray | None = None,
 ) -> Path:
     """Everything needed to re-render the first n_frames of a sequence later
     (render_clouds.py): RGB, predicted depth + confidence, the sparse depth, the GT
@@ -376,6 +508,13 @@ def save_cloud(
         .bool()
         .cpu()
         .numpy(),
+        # pixels the viewer's per-frame stats and error colouring use: the
+        # scored ones (SPOT: the held-out sensor pixels), else all GT-valid
+        **(
+            {"score_mask": score_mask[:n].astype(bool)}
+            if score_mask is not None
+            else {}
+        ),
         "K_pred": pred.K[:n].astype(np.float32),
         "w2c_pred": pred.w2c[:n].astype(np.float32),
         "frames": np.array([str(fr.image) for fr in seq.frames[:n]]),
@@ -493,10 +632,12 @@ def run_benchmark(
     the main process, so a multi-GPU run finishes proportionally faster."""
     cfg.validate()
     missing = bench_root_ok(cfg.root, cfg.datasets, cfg.tae_datasets)
+    missing += spot_missing(cfg)
     if missing:
         raise FileNotFoundError(
-            f"bench enabled but manifests missing under {cfg.root} for {missing}; "
-            "run datasets_preprocess/prepare_vda_benchmark.py"
+            f"bench enabled but inputs missing: {missing} (manifests under {cfg.root}: "
+            "run datasets_preprocess/prepare_vda_benchmark.py; spot/* under "
+            f"{cfg.spot_root}: --bench.spot-root, or --bench.no-spot)"
         )
     net = accelerator.unwrap_model(model)
     net.eval()
@@ -632,12 +773,76 @@ def run_benchmark(
             torch.cuda.empty_cache()
         seconds[name] = time.time() - t0
 
+    spot_rows: list[dict] = []
+    if cfg.spot:
+        t0 = time.time()
+        wins = [(s_, st) for s_ in cfg.spot_sequences for st in cfg.spot_starts]
+        if cfg.max_sequences:
+            wins = wins[: cfg.max_sequences]
+        for wi in range(rank, len(wins), world):
+            seq_name, start = wins[wi]
+            tag = f"spot/{seq_name}@{start}"
+
+            def _one_spot(seq_name=seq_name, start=start, wi=wi, tag=tag):
+                seq = spot_window(
+                    cfg.spot_root / seq_name, start, cfg.spot_frames, cfg.spot_stride
+                )
+                views, sensor = spot_views(
+                    seq, device, cfg.spot_framing, cfg.image_size
+                )
+                fed, held = spot_split(
+                    views,
+                    sensor,
+                    cfg.spot_holdout,
+                    _sparse_seed(seed, tag, cfg.spot_holdout),
+                )
+                pred = predict(net, accelerator, views)
+                row = score_spot_window(
+                    seq, sensor, fed, held, pred, cfg.spot_max_depth
+                )
+                row["framing"] = cfg.spot_framing
+                if cfg.spot_gifs:
+                    gif = (
+                        Path(output_dir) / "bench_gifs" / f"spot_{seq_name}_{start}.gif"
+                    )
+                    _spot_gif(gif, views, sensor, pred, seq.name)
+                # one snapshot per window: the starts are chosen to differ
+                # (static vs dynamic), so each needs its own cloud
+                if cfg.clouds_per_dataset > 0:
+                    path = cloud_dir / f"spot_{seq_name}_{start}_real_{MODE_STREAM}.npz"
+                    realized = float(fed.mean())
+                    save_cloud(
+                        path,
+                        _SPOT_SPEC,
+                        seq,
+                        views,
+                        pred,
+                        realized,
+                        MODE_STREAM,
+                        cfg.cloud_frames,
+                        score_mask=held,
+                    )
+                    _render_cloud(path)
+                    cloud_paths.append(path)
+                # last: a window whose snapshot failed is in `failed` only,
+                # like the VDA path, never also aggregated
+                spot_rows.append(row)
+                del pred, views
+                accelerator.print(f"[bench] {tag}: {len(seq)} frames done")
+
+            _guard(tag, _one_spot)
+        seconds["spot"] = time.time() - t0
+
     accelerator.wait_for_everyone()
     if world > 1:
+        spot_rows = [r for part in gather_object([spot_rows]) for r in part]
         rows = [r for part in gather_object([rows]) for r in part]
         tae_rows = [r for part in gather_object([tae_rows]) for r in part]
         seconds_all = gather_object([seconds])
-        seconds = {k: max(s.get(k, 0.0) for s in seconds_all) for k in cfg.datasets}
+        seconds = {
+            k: max(s.get(k, 0.0) for s in seconds_all)
+            for k in {*cfg.datasets, *(("spot",) if cfg.spot else ())}
+        }
         skipped_all = gather_object([tae_skipped])
         tae_skipped = {}
         for part in skipped_all:
@@ -656,6 +861,7 @@ def run_benchmark(
     for name, n in tae_skipped.items():
         result[f"{name}/tae_skipped_sequences"] = float(n)
     result["failed_sequences"] = float(len(failed))
+    result.update(aggregate_spot(spot_rows))
 
     if accelerator.is_main_process:
         accelerator.log({f"final_bench/{k}": v for k, v in result.items()}, step=step)
@@ -668,6 +874,7 @@ def run_benchmark(
                     "aggregate": result,
                     "rows": rows,
                     "tae_rows": tae_rows,
+                    "spot_rows": spot_rows,
                     "failed": failed,
                 },
                 f,

@@ -3,13 +3,14 @@
 write_html() turns one bench_clouds/*.npz into a single .html: the predicted
 cloud unprojected with the GT cameras (predicted cameras when the snapshot
 has none), colourable by RGB, by |pred-gt|/gt, by the model's confidence,
-or by whether the pixel was a sparse-depth INPUT; a GT cloud to toggle
-against it, placed beside it in the scene (offset along the camera's x
-axis by the cloud's width, with its own frustums), or split-screen (GT
-left, prediction right, one shared viewpoint); per-frame camera frustums; and a frame slider that either
-accumulates frames 0..t (what the stream has seen) or shows frame t alone.
-Per-frame metric AbsRel / delta1 are computed here and shown as the slider
-moves, so a bad frame can be found by number and then looked at. When the
+or by whether the pixel was a sparse-depth INPUT; the GT cloud placed
+beside it in the scene (offset along the camera's x axis by the cloud's
+width, with its own frustums; "GT cloud" hides it); per-frame camera
+frustums; a frame slider (play / space) that either accumulates frames 0..t
+(what the stream has seen) or shows frame t alone. Per-frame metric AbsRel /
+delta1 are computed on the scored pixels (npz `score_mask` when present --
+SPOT's held-out sensor pixels -- else every GT-valid one) and shown as the
+slider moves, so a bad frame can be found by number and then looked at. When the
 run's bench_results.json is found (next to bench_clouds/, or passed in),
 the panel also shows this sequence's rows under all three protocols and
 both TAEs, next to the dataset means at the same density -- quantitative
@@ -90,6 +91,27 @@ def load_metrics(
             and abs(row["density"] - density) < 1e-9
         )
 
+    if dataset == "spot":
+        # real-sensor windows: one row per window, no density sweep
+        seq_rows = [
+            row for row in r.get("spot_rows", []) if row["sequence"] == sequence
+        ]
+        agg_prefix = "spot/stream/real/"
+        agg = {
+            k[len(agg_prefix) :]: v
+            for k, v in r.get("aggregate", {}).items()
+            if k.startswith(agg_prefix)
+        }
+        agg["n_sequences"] = agg.get("n_windows")
+        row = seq_rows[0] if seq_rows else None
+        if row is not None:
+            row = {**row, "published": {m: None for m in ("abs_rel", "delta1", "rmse")}}
+        return {
+            "sequence": row,
+            "tae": None,
+            "dataset": agg,
+            "source": str(results_path),
+        }
     seq_rows = [row for row in r.get("rows", []) if same(row)]
     tae_rows = [row for row in r.get("tae_rows", []) if same(row)]
     mode = seq_rows[0]["mode"] if seq_rows else "stream"
@@ -120,6 +142,9 @@ def build_payload(
         gt = d["gt_depth"].astype(np.float32)
         gt_valid = d["gt_valid"].astype(bool)
         sparse_mask = d["sparse_mask"].astype(bool)
+        # SPOT: stats and error colouring on the held-out pixels only (the
+        # scored ones), while the GT cloud still shows every sensor pixel
+        score_mask = d["score_mask"].astype(bool) if "score_mask" in d else gt_valid
         has_gt_cam = "K_gt" in d and "pose_gt" in d
         if cameras == "auto":
             cameras = "gt" if has_gt_cam else "pred"
@@ -141,12 +166,12 @@ def build_payload(
     w2c = _c2w_to_w2c(c2w)
     pred_pts = unproject_depth_map_to_point_map(pred[..., None], w2c, K)  # [S,H,W,3]
     gt_pts = unproject_depth_map_to_point_map(gt[..., None], w2c, K)
-    stats = _frame_metrics(pred, gt, gt_valid)
+    stats = _frame_metrics(pred, gt, score_mask)
 
     # per-pixel error as uint8 on [0, ERR_VMAX]; 255 = no GT
     ERR_VMAX = 0.5
     err = np.full((S, H, W), 255, np.uint8)
-    ok = gt_valid & (gt > 0) & np.isfinite(pred)
+    ok = score_mask & (gt > 0) & np.isfinite(pred)
     rel = np.abs(pred - gt) / np.where(gt > 0, gt, 1.0)
     err[ok] = np.clip(rel[ok] / ERR_VMAX * 254.0, 0, 254).astype(np.uint8)
     # confidence to uint8 on a robust range (expp1 head: floor 1, no ceiling)
@@ -244,20 +269,18 @@ _HTML = r"""<!doctype html>
  <label><input type="radio" name="mode" value="err">|pred-gt|/gt</label>
  <label><input type="radio" name="mode" value="conf">confidence</label>
  <label><input type="radio" name="mode" value="sparse">sparse input</label><br>
- layout:
- <label><input type="radio" name="layout" value="twin" checked>GT cloud beside prediction</label>
- <label><input type="radio" name="layout" value="overlay">overlay</label>
- <label><input type="radio" name="layout" value="side">split screen</label><br>
+ <input type="radio" name="layout" value="twin" checked hidden>
  <label><input type="checkbox" id="showPred" checked>prediction</label>
- <label><input type="checkbox" id="showGt">GT cloud</label>
+ <label><input type="checkbox" id="showGt" checked>GT cloud</label>
  <label><input type="checkbox" id="showCams" checked>cameras</label>
  <label><input type="checkbox" id="showSparse" checked>sparse-input points</label><br>
+ <button id="play">&#9654; play</button> fps <input type="number" id="fps" value="8" min="1" max="30" style="width:3em">
  frame <input type="range" id="frame" min="0" max="0" value="0"> <span id="frameLbl"></span>
  <label><input type="checkbox" id="accum" checked>accumulate 0..t</label><br>
  view: <button id="gotoShoulder">over the shoulder</button> <button id="gotoCam">through camera</button> <label><input type="checkbox" id="follow" checked>follow frame</label> <button id="fit">fit all</button><br>
  point size <input type="range" id="psize" min="1" max="30" value="8"> &nbsp; err vmax <span id="vmaxLbl"></span>
  <input type="range" id="vmax" min="1" max="100" value="50"><br>
- <span style="opacity:.7">drag: orbit &middot; wheel: zoom &middot; right-drag: pan &middot; keys: &larr; &rarr; frame, g GT overlay, a accumulate, t GT beside, s split screen, f fit all</span>
+ <span style="opacity:.7">drag: orbit &middot; wheel: zoom &middot; right-drag: pan &middot; keys: space play/pause, &larr; &rarr; frame, a accumulate, f fit all, [ ] previous / next scene</span>
 </div>
 <div id="stats"></div>
 <div id="halfL" class="half" style="left:25%">ground truth</div><div id="halfR" class="half" style="left:75%">prediction</div>
@@ -362,7 +385,7 @@ function setVis(side) {
     const on = onFrame[i];
     if (side === 'gt') { frames[i].visible = false; sparseFrames[i].visible = false; gtFrames[i].visible = on; camFrames[i].visible = on && sc; camFramesGt[i].visible = false; }
     else if (side === 'pred') { frames[i].visible = on; sparseFrames[i].visible = on && ss; gtFrames[i].visible = false; camFrames[i].visible = on && sc; camFramesGt[i].visible = false; }
-    else if (twin) { frames[i].visible = on && sp; gtFrames[i].visible = on; sparseFrames[i].visible = on && ss; camFrames[i].visible = on && sc; camFramesGt[i].visible = on && sc; }
+    else if (twin) { frames[i].visible = on && sp; gtFrames[i].visible = on && sg; sparseFrames[i].visible = on && ss; camFrames[i].visible = on && sc; camFramesGt[i].visible = on && sg && sc; }
     else { frames[i].visible = on && sp; gtFrames[i].visible = on && sg; sparseFrames[i].visible = on && ss; camFrames[i].visible = on && sc; camFramesGt[i].visible = false; }
   }
 }
@@ -370,7 +393,7 @@ function applyLayout() {
   recolor();
   const side = layout() === 'side';
   $('halfL').style.display = $('halfR').style.display = side ? 'block' : 'none';
-  $('showGt').disabled = side || layout() === 'twin'; $('showPred').disabled = side;
+  $('showPred').disabled = side;
   applyFrames();
 }
 function applySize() { const s = parseInt($('psize').value, 10) / 4; mat.size = s; matGt.size = s; matSp.size = s * 2.5; }
@@ -379,7 +402,8 @@ document.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener('c
 document.querySelectorAll('input[name=layout]').forEach(r => r.addEventListener('change', () => { applyLayout(); if ($('follow').checked) gotoCam(parseInt(frameEl.value, 10)); }));
 frameEl.addEventListener('input', applyFrames); $('psize').addEventListener('input', applySize);
 $('vmax').addEventListener('input', () => { vmax = parseInt($('vmax').value, 10) / 100; $('vmaxLbl').textContent = vmax.toFixed(2); recolor(); });
-window.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { frameEl.value = Math.min(P.S - 1, Math.max(0, +frameEl.value + (e.key === 'ArrowRight' ? 1 : -1))); applyFrames(); if ($('follow').checked) gotoCam(parseInt(frameEl.value, 10)); } else if (e.key === 'g') { $('showGt').checked = !$('showGt').checked; applyFrames(); } else if (e.key === 'f') { $('follow').checked = false; fitAll(); } else if (e.key === 's' || e.key === 't') { const want = e.key === 's' ? 'side' : 'twin'; const r = document.querySelector(`input[name=layout][value=${layout() === want ? 'overlay' : want}]`); r.checked = true; applyLayout(); if ($('follow').checked) gotoCam(parseInt(frameEl.value, 10)); } else if (e.key === 'a') { $('accum').checked = !$('accum').checked; applyFrames(); } });
+window.addEventListener('keydown', e => { if ((e.key === '[' || e.key === ']') && window.parent !== window) window.parent.postMessage({sceneStep: e.key === ']' ? 1 : -1}, '*'); });
+window.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { frameEl.value = Math.min(P.S - 1, Math.max(0, +frameEl.value + (e.key === 'ArrowRight' ? 1 : -1))); applyFrames(); if ($('follow').checked) gotoCam(parseInt(frameEl.value, 10)); } else if (e.key === 'f') { $('follow').checked = false; fitAll(); } else if (e.key === 'a') { $('accum').checked = !$('accum').checked; applyFrames(); } });
 window.addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); });
 // Put the viewer camera exactly where frame t's camera was, same orientation
 // and field of view. c2w is OpenCV (x right, y down, z forward) in the
@@ -424,6 +448,20 @@ $('gotoCam').addEventListener('click', () => gotoCam(parseInt(frameEl.value, 10)
 $('gotoShoulder').addEventListener('click', () => gotoCam(parseInt(frameEl.value, 10), 'shoulder'));
 $('fit').addEventListener('click', () => { $('follow').checked = false; fitAll(); });
 frameEl.addEventListener('input', () => { if ($('follow').checked) gotoCam(parseInt(frameEl.value, 10)); });
+// play: step the frame slider at `fps`, wrapping to 0 at the end; follows the
+// frame camera when "follow frame" is on, like the slider
+let playTimer = null;
+function setFrame(t) { frameEl.value = t; applyFrames(); if ($('follow').checked) gotoCam(t); }
+function togglePlay() {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; $('play').innerHTML = '&#9654; play'; return; }
+  const fps = Math.min(30, Math.max(1, parseInt($('fps').value, 10) || 8));
+  if (parseInt(frameEl.value, 10) >= P.S - 1) setFrame(0);
+  playTimer = setInterval(() => { const t = parseInt(frameEl.value, 10); setFrame(t >= P.S - 1 ? 0 : t + 1); }, 1000 / fps);
+  $('play').innerHTML = '&#10074;&#10074; pause';
+}
+$('play').addEventListener('click', () => { togglePlay(); $('play').blur(); });
+$('fps').addEventListener('change', () => { if (playTimer) { togglePlay(); togglePlay(); } });
+window.addEventListener('keydown', e => { if (e.key === ' ' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON') { e.preventDefault(); togglePlay(); } });
 controls.addEventListener('start', () => { $('follow').checked = false; });
 (function metricsPanel() {
   const M = P.metrics, el = $('metrics');

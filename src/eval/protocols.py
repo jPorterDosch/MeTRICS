@@ -257,7 +257,15 @@ def sparse_aligned_metrics(
     aligned = np.full_like(gt, DEPTH_FLOOR, dtype=np.float32)
     valid = gt_valid_mask(gt, max_depth) & ~sparse_mask_gt_res
     for i in range(S):
-        m = sparse_mask[i] & np.isfinite(pred_native[i])
+        # fit only on sparse pixels inside the scored range (the sparse depth
+        # should already be restricted to it; this keeps the protocol honest
+        # for any caller whose sparse depth is not)
+        m = (
+            sparse_mask[i]
+            & np.isfinite(pred_native[i])
+            & (sparse_depth[i] > 1e-3)
+            & (sparse_depth[i] < max_depth)
+        )
         if int(m.sum()) < min_sparse_pixels:
             valid[i] = False
             continue

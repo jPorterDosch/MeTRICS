@@ -58,7 +58,7 @@ from streamvggt.depth_cond import (
 )
 from eval.temporal_consistency.metrics import depth_evaluation, tae
 from finetune import save_current_code, setup_for_distributed  # reuse
-from bench_eval import BenchmarkCfg, run_benchmark
+from bench_eval import BenchmarkCfg, run_benchmark, spot_missing
 from eval.vda_benchmark import bench_root_ok
 from val_images import ValImageSampler, clip_dataset_label, clip_predictions
 from visual_util import predictions_to_glb
@@ -600,6 +600,7 @@ def run(
         missing = bench_root_ok(
             args.bench.validate().root, args.bench.datasets, args.bench.tae_datasets
         )
+        missing += spot_missing(args.bench)
         if missing:
             raise FileNotFoundError(
                 f"--bench.enabled but manifests missing under {args.bench.root} for "

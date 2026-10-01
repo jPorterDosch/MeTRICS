@@ -408,6 +408,38 @@ window.addEventListener('resize', () => {
 """.replace("__THREE__", _THREE)
 
 
+# Index when the directory holds cloud_viewer.py pages (benchmark bench_clouds/):
+# one page -- a scene selector over the full-window GT-beside-prediction
+# viewer. The selection is kept in the URL hash, so a scene can be linked.
+VIEWER_INDEX_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>point clouds</title>
+<style>
+ html,body{margin:0;height:100%;background:#111;color:#ddd;font:13px system-ui,sans-serif;overflow:hidden}
+ #bar{position:absolute;left:50%;transform:translateX(-50%);top:8px;z-index:2;background:rgba(0,0,0,.7);padding:5px 10px;border-radius:6px}
+ select{background:#222;color:#ddd;border:1px solid #444;padding:2px 4px}
+ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+</style></head><body>
+<div id="bar">scene <select id="scene"></select> <span id="n"></span></div>
+<iframe id="view"></iframe>
+<script>
+const sel = document.getElementById('scene'), view = document.getElementById('view');
+fetch('api/viewers').then(r => r.json()).then(files => {
+  document.getElementById('n').textContent = files.length + ' scenes';
+  for (const f of files) { const o = document.createElement('option'); o.value = f; o.textContent = f.replace(/\\.html$/, ''); sel.appendChild(o); }
+  const want = decodeURIComponent(location.hash.slice(1));
+  sel.value = files.includes(want) ? want : files[0];
+  show();
+});
+function show() { view.src = sel.value; location.hash = encodeURIComponent(sel.value); }
+sel.addEventListener('change', show);
+function step(d) { const i = sel.selectedIndex + d; if (i >= 0 && i < sel.options.length) { sel.selectedIndex = i; show(); } }
+// [ / ] step scenes: from this page, or forwarded by the viewer inside the frame
+window.addEventListener('keydown', e => { if (e.key === '[' || e.key === ']') step(e.key === ']' ? 1 : -1); });
+window.addEventListener('message', e => { if (e.data && e.data.sceneStep) step(e.data.sceneStep); });
+</script></body></html>
+"""
+
+
 def resolve_glb_dir(path: str) -> Path:
     """Accept either the directory that holds the .glb files, or a parent (a
     run dir / its viz dir): descend through viz/ then glb/ when present, so
@@ -437,7 +469,37 @@ def make_handler(glb_dir: Path):
 
         def do_GET(self):  # noqa: N802 (stdlib naming)
             if self.path in ("/", "/index.html") or self.path.startswith("/?"):
-                body = INDEX_HTML.encode()
+                # the interactive viewer pages when present, else the GLB viewer
+                has_viewers = any(
+                    f.suffix == ".html" and f.name != "index.html"
+                    for f in glb_dir.iterdir()
+                )
+                body = (VIEWER_INDEX_HTML if has_viewers else INDEX_HTML).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/api/viewers":
+                files = sorted(
+                    f.name
+                    for f in glb_dir.iterdir()
+                    if f.suffix == ".html" and f.name != "index.html"
+                )
+                body = json.dumps(files).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/glb/":
+                # the page's relative URLs (api/list, <name>.glb) only resolve
+                # from /glb, so send the trailing-slash form there
+                self.send_response(301)
+                self.send_header("Location", "/glb")
+                self.end_headers()
+            elif self.path == "/glb":
+                body = INDEX_HTML.encode()  # the old GLB viewer, still reachable
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))

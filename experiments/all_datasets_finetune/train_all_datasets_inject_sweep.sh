@@ -35,11 +35,19 @@
 # as in the HAMMER ladder. Under depth_train the point head gets no gradient
 # anyway (be510a2bdb9e7035: point_head 0/62 tensors changed).
 #
-# The arms run one after another in this job. An arm whose run dir already
-# exists is refused by finetune_depth and the loop moves on to the next arm;
-# any other failure also moves on.
+# Run as a job array, one arm per task, so the arms train in parallel and
+# each gets the full 3-day limit (four arms back to back is ~4 days):
 #
-#   sbatch experiments/all_datasets_finetune/train_all_datasets_inject_sweep.sh
+#   sbatch --array=0-3 experiments/all_datasets_finetune/train_all_datasets_inject_sweep.sh
+#   sbatch --array=2   experiments/all_datasets_finetune/train_all_datasets_inject_sweep.sh   # one arm
+#
+# Without --array the arms run one after another in one job (the old
+# behaviour). An arm whose run dir already exists is refused by
+# finetune_depth; any other failure also moves on.
+#
+# Every arm ends with the video-depth benchmark (bench_eval.py: Sintel /
+# ScanNet / KITTI / Bonn / NYUv2, three protocols, 1/5/40% sparse depth, both
+# TAEs, point clouds + viewers), ~6 h. BENCH=0 skips it.
 #
 # Cost: TOKEN + LoRA took 22h49m on an H100 (linear-loss run). LoRA arms cost
 # about the same; head-only arms skip the decoder backward and should be faster.
@@ -70,6 +78,10 @@ ARKIT_OUT="${ARKIT_OUT:-$REBUILT}"
 EXP_GROUP=metric_all_datasets
 CKPT_DIR="${CKPT_DIR:-/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd}"
 PRETRAINED=${PRETRAINED:-/lustre/isaac24/proj/UTK0516/ckpt/checkpoints.pth}
+BENCH=${BENCH:-1}
+BENCH_ROOT=${BENCH_ROOT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench}
+BENCH_ARGS=()
+[ "$BENCH" = 1 ] && BENCH_ARGS=(--bench.enabled --bench.root "$BENCH_ROOT")
 mkdir -p "$CKPT_DIR" "$REPO/logs"
 
 # environment identical to train_all_datasets.sh (see its comments)
@@ -92,11 +104,25 @@ for d in "$REBUILT/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/proce
     [ -d "$d" ] || { echo "[fatal] missing dataset root: $d"; exit 1; }
 done
 
+if [ "$BENCH" = 1 ]; then
+    for d in sintel scannet kitti bonn nyuv2; do
+        ls "$BENCH_ROOT/$d"/*.json >/dev/null 2>&1 \
+            || { echo "[fatal] no benchmark manifest under $BENCH_ROOT/$d (BENCH=0 to skip)"; exit 1; }
+    done
+fi
+
+ARMS=("${!ARM_NAMES[@]}")
+if [ -n "${SLURM_ARRAY_TASK_ID:-}" ]; then
+    [ "$SLURM_ARRAY_TASK_ID" -lt "${#ARM_NAMES[@]}" ] \
+        || { echo "[fatal] array task $SLURM_ARRAY_TASK_ID has no arm (0-$((${#ARM_NAMES[@]} - 1)))"; exit 1; }
+    ARMS=("$SLURM_ARRAY_TASK_ID")
+fi
+
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
 cd "$REPO/src"
 
-for i in "${!ARM_NAMES[@]}"; do
+for i in "${ARMS[@]}"; do
     echo "=== arm $i: ${ARM_NAMES[$i]}  (${ARM_FLAGS[$i]}) ==="
     # ARM_FLAGS[$i] is deliberately unquoted: it word-splits into separate args
     # shellcheck disable=SC2086
@@ -141,6 +167,7 @@ for i in "${!ARM_NAMES[@]}"; do
         --save-freq 0.1 \
         --num-workers 12 \
         --print-freq 10 \
+        "${BENCH_ARGS[@]}" \
         || echo "=== arm $i did not run to completion (exists or failed); continuing ==="
 done
 

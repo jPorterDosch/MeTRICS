@@ -125,6 +125,16 @@ class SparseAlignedProtocolTest(unittest.TestCase):
         m = P.sparse_aligned_metrics(pred, pd, pm, bad, pm, gt, 10.0)
         self.assertLess(m.abs_rel, 1e-6)
 
+    def test_out_of_range_sparse_pixels_do_not_drive_the_fit(self):
+        gt, pred, pd, pm = self._case()
+        # one "sky" sample far beyond max_depth, where the model is way off
+        pm[0, 0, 0] = True
+        pd[0, 0, 0] = 650.0
+        pred = pred.copy()
+        pred[0, 0, 0] = 1.0
+        m = P.sparse_aligned_metrics(pred, pd, pm, pred, pm, gt, 10.0)
+        self.assertLess(m.abs_rel, 1e-6)
+
     def test_frame_without_sparse_depth_is_dropped(self):
         gt, pred, pd, pm = self._case()
         pm[2] = False
