@@ -160,6 +160,7 @@ def load_views(
                 Image.fromarray(read_spot_depth(fr.depth), mode="F"),
                 Image.NEAREST,
                 framing,
+                image_size,
             )
         ).copy()
         d[~np.isfinite(d)] = 0.0

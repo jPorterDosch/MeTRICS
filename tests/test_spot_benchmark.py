@@ -59,6 +59,16 @@ class SpotTest(unittest.TestCase):
             self.assertAlmostEqual(float((full[0] > 0).mean()), 0.5, delta=0.01)
             self.assertGreater(float((crop[0] > 0).mean()), 0.6)
 
+    def test_image_size_scales_rgb_and_depth_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            seq = SB.window(_write_seq(Path(tmp)), 0, 2, 1)
+            for framing in SB.FRAMINGS:
+                W, H = SB.model_size(framing, 1036)
+                views, sensor = SB.load_views(seq, torch.device("cpu"), framing, 1036)
+                self.assertEqual(sensor.shape, (2, H, W))
+                self.assertEqual(tuple(views[0]["img"].shape), (1, 3, H, W))
+                self.assertEqual(tuple(views[0]["depthmap"].shape), (1, H, W))
+
     def test_split_is_disjoint_seeded_and_fed_to_views(self):
         with tempfile.TemporaryDirectory() as tmp:
             seq = SB.window(_write_seq(Path(tmp)), 0, 3, 1)
