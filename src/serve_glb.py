@@ -371,7 +371,9 @@ fileEl.addEventListener('change', () => load(fileEl.value));
 // a bench_clouds snapshot also has a cloud_viewer.py page next to its .glb
 const viewerEl = document.getElementById('viewer');
 function updateViewerLink(name) {
-  const html = name.replace(/\.glb$/, '.html');
+  // GT-camera snapshots render <stem>.glb, predicted-camera ones <stem>_predcam.glb;
+  // both share one viewer page, <stem>.html
+  const html = name.replace(/(_predcam)?\.glb$/, '.html');
   viewerEl.style.display = 'none';
   fetch(html, {method: 'HEAD'}).then(r => { if (r.ok) { viewerEl.href = html; viewerEl.style.display = 'inline'; } }).catch(() => {});
 }

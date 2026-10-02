@@ -20,7 +20,8 @@ in eval.vda_benchmark. This module only orchestrates: sparse depth simulation,
 inference, sharding over ranks, aggregation, and the point-cloud snapshots.
 
 Cameras: TAE and the cloud snapshots use the GT cameras the preparer writes
-into every manifest (benchmark_cameras.py); the model's predicted cameras
+into every manifest (benchmark_cameras.py), except SPOT, which has none and
+renders with the predicted ones; the model's predicted cameras
 are stored in the snapshots but never scored -- the camera head is frozen
 and reads fine-tuned tokens, so its output is not a result.
 
@@ -464,6 +465,9 @@ def aggregate_spot(rows: list[dict]) -> dict[str, float]:
     for proto in ("metric", "sparse_aligned"):
         for m in P.METRIC_NAMES:
             out[f"{base}/{proto}_{m}"] = _mean([r[proto][m] for r in rows])
+        out[f"{base}/{proto}_n_scored"] = float(
+            sum(1 for r in rows if np.isfinite(r[proto]["abs_rel"]))
+        )
     return out
 
 
@@ -591,6 +595,12 @@ def aggregate(rows: list[dict], tae_rows: list[dict]) -> dict[str, float]:
             for m in P.METRIC_NAMES:
                 out[f"{base}/{proto}_{m}"] = _mean([r[proto][m] for r in rs])
             out[f"{base}/{proto}_frames"] = _mean([r[proto]["frames"] for r in rs])
+            # _mean skips NaN rows (e.g. a 1% KITTI frame set whose sparse
+            # patches all miss the LiDAR), so n_sequences can overstate what a
+            # protocol's mean covers; this is the count actually averaged
+            out[f"{base}/{proto}_n_scored"] = float(
+                sum(1 for r in rs if np.isfinite(r[proto]["abs_rel"]))
+            )
     tgroups: dict[tuple[str, str, str], list[dict]] = {}
     for r in tae_rows:
         tgroups.setdefault(
@@ -669,7 +679,12 @@ def run_benchmark(
     for name in cfg.datasets:
         spec = SPECS[name]
         t0 = time.time()
-        seqs = load_manifest(cfg.root, spec)
+        # a malformed manifest costs that dataset, not the whole run (every
+        # rank reads the same file, so they all skip it alike)
+        seqs = (
+            _guard(f"{spec.name}/<manifest>", lambda: load_manifest(cfg.root, spec))
+            or []
+        )
         if cfg.max_sequences:
             seqs = seqs[: cfg.max_sequences]
         for gi in range(rank, len(seqs), world):
@@ -738,7 +753,13 @@ def run_benchmark(
 
             _guard(tag, _one_sequence)
         if spec.name in cfg.tae_datasets and spec.tae_json:
-            tseqs = load_manifest(cfg.root, spec, tae=True)
+            tseqs = (
+                _guard(
+                    f"{spec.name}/tae/<manifest>",
+                    lambda: load_manifest(cfg.root, spec, tae=True),
+                )
+                or []
+            )
             if cfg.max_sequences:
                 tseqs = tseqs[: cfg.max_sequences]
             for gi in range(rank, len(tseqs), world):
@@ -848,6 +869,8 @@ def run_benchmark(
             for k, v in part.items():
                 tae_skipped[k] = tae_skipped.get(k, 0) + v
         failed = [f for part in gather_object([failed]) for f in part]
+        # a manifest failure is hit by every rank; keep one entry per tag
+        failed = list({f["sequence"]: f for f in failed}.values())
         cloud_paths = [
             Path(p)
             for part in gather_object([[str(p) for p in cloud_paths]])

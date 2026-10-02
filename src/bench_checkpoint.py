@@ -70,8 +70,11 @@ def main(cfg: BenchCheckpointCfg) -> None:
             raise FileNotFoundError(
                 f"--base needs pretrained weights (saved path: {raw.get('pretrained')!r})"
             )
+    # named after the file actually loaded: --weights may name a .pth, which
+    # wins over --checkpoint, and "auto" is not a checkpoint
+    label = Path(ckpt_path).stem.removeprefix("checkpoint-")
     out_dir = cfg.out_dir or str(
-        Path(ckpt_path).parent / f"bench_{'base' if cfg.base else cfg.checkpoint}"
+        Path(ckpt_path).parent / f"bench_{'base' if cfg.base else label}"
     )
     train_cfg = FinetuneDepthCfg(
         depth_cond=mcfg.depth_cond,

@@ -365,6 +365,27 @@ class BenchmarkCfgAndAggregateTest(unittest.TestCase):
         self.assertFalse(bench_eval.has_cameras(VB.Sequence("x", "s", [good, no_k])))
         self.assertFalse(bench_eval.has_cameras(VB.Sequence("x", "s", [good])))
 
+    def test_viewer_payload_and_density_match(self):
+        import cloud_viewer
+
+        safe = cloud_viewer._json_safe({"a": [1.0, float("nan")], "b": float("inf")})
+        self.assertEqual(safe, {"a": [1.0, None], "b": None})
+        json.dumps(safe, allow_nan=False)  # raises on any NaN left behind
+        # snapshots store density as float32; 0.4 must still find its row
+        row = {
+            "dataset": "bonn",
+            "sequence": "a",
+            "mode": "stream",
+            "density": 0.4,
+            "published": {"abs_rel": 0.1},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "bench_results.json"
+            p.write_text(json.dumps({"rows": [row], "tae_rows": [], "aggregate": {}}))
+            m = cloud_viewer.load_metrics(p, "bonn", "a", float(np.float32(0.4)))
+        self.assertIsNotNone(m)
+        self.assertTrue(m["sequence"])
+
     def test_density_key(self):
         self.assertEqual(bench_eval.density_key(0.05), "d5")
         self.assertEqual(bench_eval.density_key(0.4), "d40")
@@ -407,6 +428,9 @@ class BenchmarkCfgAndAggregateTest(unittest.TestCase):
         self.assertAlmostEqual(out["bonn/stream/d5/published_abs_rel"], 0.2)
         self.assertEqual(out["bonn/stream/d5/n_sequences"], 2.0)
         self.assertTrue(np.isnan(out["bonn/stream/d40/published_abs_rel"]))
+        self.assertEqual(out["bonn/stream/d5/published_n_scored"], 2.0)
+        self.assertEqual(out["bonn/stream/d40/n_sequences"], 1.0)
+        self.assertEqual(out["bonn/stream/d40/published_n_scored"], 0.0)
         self.assertAlmostEqual(out["bonn/stream/d5/tae_vda"], 2.0)
         self.assertAlmostEqual(out["bonn/stream/d5/realized_density"], 0.045)
 

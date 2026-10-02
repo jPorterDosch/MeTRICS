@@ -68,13 +68,20 @@ BASE_ARGS=()
 [ "$BASE" = 1 ] && BASE_ARGS=(--base --pretrained "$PRETRAINED")
 # a non-default input size writes to its own dir, so it never overwrites the 518 run
 OUT_ARGS=()
+RUN_DIR="$WEIGHTS"
+CKPT_LABEL="$CKPT"
+if [ -f "$WEIGHTS" ]; then  # WEIGHTS may name a .pth, which wins over CKPT
+    RUN_DIR="$(dirname "$WEIGHTS")"
+    CKPT_LABEL="$(basename "$WEIGHTS" .pth)"
+    CKPT_LABEL="${CKPT_LABEL#checkpoint-}"
+fi
 if [ "$IMAGE_SIZE" != 518 ]; then
-    OUT_ARGS=(--out-dir "$WEIGHTS/bench_${CKPT}_s${IMAGE_SIZE}")
-    [ "$BASE" = 1 ] && OUT_ARGS=(--out-dir "$WEIGHTS/bench_base_s${IMAGE_SIZE}")
+    OUT_ARGS=(--out-dir "$RUN_DIR/bench_${CKPT_LABEL}_s${IMAGE_SIZE}")
+    [ "$BASE" = 1 ] && OUT_ARGS=(--out-dir "$RUN_DIR/bench_base_s${IMAGE_SIZE}")
 fi
 [ -n "${OUT_DIR:-}" ] && OUT_ARGS=(--out-dir "$OUT_DIR")
 echo "image size: $IMAGE_SIZE"
-echo "weights: $WEIGHTS (checkpoint-${CKPT}.pth) base=$BASE datasets=$DATASETS densities=$DENSITIES clouds@$CLOUD_DENSITY max_seq=$MAX_SEQ"
+echo "weights: $WEIGHTS (checkpoint-${CKPT_LABEL}.pth) base=$BASE datasets=$DATASETS densities=$DENSITIES clouds@$CLOUD_DENSITY max_seq=$MAX_SEQ"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
 cd "$REPO/src"

@@ -412,6 +412,7 @@ __all__ = [
     "gt_stack",
     "build_views",
     "resize_to_gt",
+    "sparse_mask_to_gt",
     "load_rgb",
     "scaled_intrinsics",
     "bench_root_ok",

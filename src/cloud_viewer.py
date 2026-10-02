@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -88,7 +89,8 @@ def load_metrics(
         return (
             row["dataset"] == dataset
             and row["sequence"] == sequence
-            and abs(row["density"] - density) < 1e-9
+            # the snapshot stores density as float32 (0.4 -> 0.40000000596)
+            and abs(row["density"] - density) < 1e-6
         )
 
     if dataset == "spot":
@@ -403,7 +405,7 @@ document.querySelectorAll('input[name=layout]').forEach(r => r.addEventListener(
 frameEl.addEventListener('input', applyFrames); $('psize').addEventListener('input', applySize);
 $('vmax').addEventListener('input', () => { vmax = parseInt($('vmax').value, 10) / 100; $('vmaxLbl').textContent = vmax.toFixed(2); recolor(); });
 window.addEventListener('keydown', e => { if ((e.key === '[' || e.key === ']') && window.parent !== window) window.parent.postMessage({sceneStep: e.key === ']' ? 1 : -1}, '*'); });
-window.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { frameEl.value = Math.min(P.S - 1, Math.max(0, +frameEl.value + (e.key === 'ArrowRight' ? 1 : -1))); applyFrames(); if ($('follow').checked) gotoCam(parseInt(frameEl.value, 10)); } else if (e.key === 'f') { $('follow').checked = false; fitAll(); } else if (e.key === 'a') { $('accum').checked = !$('accum').checked; applyFrames(); } });
+window.addEventListener('keydown', e => { if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && e.target !== frameEl) { frameEl.value = Math.min(P.S - 1, Math.max(0, +frameEl.value + (e.key === 'ArrowRight' ? 1 : -1))); applyFrames(); if ($('follow').checked) gotoCam(parseInt(frameEl.value, 10)); } else if (e.key === 'f') { $('follow').checked = false; fitAll(); } else if (e.key === 'a') { $('accum').checked = !$('accum').checked; applyFrames(); } });
 window.addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); });
 // Put the viewer camera exactly where frame t's camera was, same orientation
 // and field of view. c2w is OpenCV (x right, y down, z forward) in the
@@ -494,6 +496,20 @@ renderer.setAnimationLoop(() => {
 """
 
 
+def _json_safe(x):
+    """Non-finite floats -> None, recursively: the page reads the payload
+    with JSON.parse, which rejects the bare NaN json.dumps would write (a
+    sequence with no scorable pixel has NaN metrics); the JS shows None as
+    '-'."""
+    if isinstance(x, dict):
+        return {k: _json_safe(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_json_safe(v) for v in x]
+    if isinstance(x, float) and not math.isfinite(x):
+        return None
+    return x
+
+
 def write_html(
     npz_path: str | Path,
     out: str | Path | None = None,
@@ -513,7 +529,10 @@ def write_html(
     html = (
         _HTML.replace("__THREE__", _THREE)
         .replace("__TITLE__", title)
-        .replace("__PAYLOAD__", json.dumps(payload).replace("</", "<\\/"))
+        .replace(
+            "__PAYLOAD__",
+            json.dumps(_json_safe(payload), allow_nan=False).replace("</", "<\\/"),
+        )
     )
     out.write_text(html)
     return out

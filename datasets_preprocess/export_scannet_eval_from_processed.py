@@ -35,6 +35,7 @@ import argparse
 import io
 import os
 import os.path as osp
+import shutil
 import sys
 import zipfile
 
@@ -46,12 +47,20 @@ from extract_scannet_sens import EXPORT_MARKER, already_extracted, export_option
 
 def export_scene(scene_dir: str, out_dir: str, max_frames: int | None) -> int:
     meta = np.load(osp.join(scene_dir, "new_scene_metadata.npz"), allow_pickle=True)
-    names = sorted(str(n) for n in meta["images"])
+    # numeric frame order: a plain string sort is only right while every
+    # name has the same zero padding
+    names = sorted(
+        (str(n) for n in meta["images"]),
+        key=lambda n: (int(n), n) if n.isdigit() else (float("inf"), n),
+    )
     if max_frames is not None:
         names = names[:max_frames]
     if not names:
         raise ValueError(f"{scene_dir}: no frames listed in new_scene_metadata.npz")
     for sub in ("color", "depth", "pose", "intrinsic"):
+        # start clean, as extract_scannet_sens does: frames left by an earlier
+        # (e.g. killed .sens) export use another naming scheme and would mix in
+        shutil.rmtree(osp.join(out_dir, sub), ignore_errors=True)
         os.makedirs(osp.join(out_dir, sub), exist_ok=True)
     intrinsic_written = False
     with zipfile.ZipFile(osp.join(scene_dir, "frames.zip")) as z:

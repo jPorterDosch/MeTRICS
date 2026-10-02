@@ -361,6 +361,10 @@ It then writes GT cameras (K + cam2world pose per frame) into every manifest
 from each dataset's native format (`datasets_preprocess/benchmark_cameras.py`:
 ScanNet pose files, Sintel `.cam`, Bonn TUM groundtruth, KITTI oxts + calib,
 NYU fixed intrinsics); `--cameras` re-attaches them to an existing tree.
+Bonn's groundtruth is the mocap marker pose and is converted to the camera
+pose (the dataset page's `T_ROS^-1 T T_ROS T_m`); a tree prepared before that
+conversion holds marker poses, so re-run `prepare_vda_benchmark.py bonn --cameras` on it before
+trusting Bonn TAE or Bonn snapshots.
 
 **Protocols.** Every prediction is scored three ways, always side by side:
 
@@ -399,8 +403,9 @@ video; `--bench.datasets scannet_500 kitti_500 bonn_500` runs that protocol
 from the `*_video_500.json` manifests the same extractor writes (ScanNet at
 stride 1 there). Opt-in, ~4.5x the frames of the short protocol; run it on
 the final checkpoint. Sintel is 50 frames either way, and NYU's 500-frame
-split is an 8-scene video set we do not build. With `--bench.tae-datasets
-scannet_500` the long-horizon TAE comes out of the same pass.
+split is an 8-scene video set we do not build. `scannet_500` is in the
+default `--bench.tae-datasets`, so the long-horizon TAE comes out of the
+same pass whenever `scannet_500` is benchmarked.
 
 **Sparse depth.** One `TUBE_MASK` patch mask per sequence (the same pixels in every
 frame, like a static sensor pattern -- no mask flicker in the TAE), seeded by

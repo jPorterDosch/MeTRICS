@@ -19,8 +19,10 @@ Sources:
   sintel   training/camdata_left/<seq>/frame_%04d.cam: float tag, then M
            (3x3 intrinsics, float64) and N (3x4 world->cam, float64);
            pose = inv([N; 0 0 0 1]), the MonST3R convention.
-  bonn     rgbd_bonn_<seq>/groundtruth.txt (TUM: t tx ty tz qx qy qz qw,
-           cam2world), nearest timestamp to the RGB filename; the dataset's
+  bonn     rgbd_bonn_<seq>/groundtruth.txt (TUM: t tx ty tz qx qy qz qw),
+           nearest timestamp to the RGB filename. That is the mocap MARKER
+           pose; bonn_camera_pose converts it to the camera's cam2world
+           (T_ROS^-1 T T_ROS T_m, from the dataset page). The dataset's
            published RGB intrinsics.
   kitti    oxts/data/%010d.txt + the per-date calib files, composed as in
            pykitti: T_w_cam2 = T_w_imu @ inv(T_cam2_velo @ T_velo_imu), with
