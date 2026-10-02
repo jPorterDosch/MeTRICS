@@ -101,13 +101,35 @@ def nearest_tum_pose(
     return tum_pose(traj[i])
 
 
+# Bonn's groundtruth.txt is the motion-capture MARKER pose, not the camera's.
+# The dataset page gives the conversion T_cam = T_ROS^-1 T T_ROS T_m, with T_m
+# the RGB-D sensor -> marker calibration and T_ROS an axis swap undoing a bug
+# in their ROS recording node. Matrices verbatim from
+# https://www.ipb.uni-bonn.de/data/rgbd-dynamic-dataset/ (T_m is not exactly
+# orthonormal there either; kept as published).
+BONN_T_M = np.array(
+    [
+        [1.0157, 0.1828, -0.2389, 0.0113],
+        [0.0009, -0.8431, -0.6413, -0.0098],
+        [-0.3009, 0.6147, -0.8085, 0.0111],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+)
+BONN_T_ROS = np.array([[-1.0, 0, 0, 0], [0, 0, 1.0, 0], [0, 1.0, 0, 0], [0, 0, 0, 1.0]])
+
+
+def bonn_camera_pose(marker_pose: np.ndarray) -> np.ndarray:
+    """Bonn groundtruth (marker) pose -> RGB camera cam2world."""
+    return np.linalg.inv(BONN_T_ROS) @ marker_pose @ BONN_T_ROS @ BONN_T_M
+
+
 def _bonn_pose_or_none(traj: np.ndarray, t: float) -> np.ndarray | None:
-    """A frame with no mocap pose within tolerance (balloon2 has one 54 ms gap,
-    outside the protocol's frames 30-140) gets no pose: that sequence is then
-    skipped for TAE in the manifest it appears in, instead of failing the
-    whole dataset."""
+    """Camera cam2world for timestamp t. A frame with no mocap pose within
+    tolerance (balloon2 has one 54 ms gap, outside the protocol's frames
+    30-140) gets no pose: that sequence is then skipped for TAE in the
+    manifest it appears in, instead of failing the whole dataset."""
     try:
-        return nearest_tum_pose(traj, t)
+        return bonn_camera_pose(nearest_tum_pose(traj, t))
     except ValueError:
         return None
 
@@ -293,8 +315,11 @@ def _sequence_cameras(
 
 __all__ = [
     "BONN_K",
+    "BONN_T_M",
+    "BONN_T_ROS",
     "NYU_K",
     "attach_cameras",
+    "bonn_camera_pose",
     "kitti_cam2_calibration",
     "kitti_cam2_poses",
     "kitti_oxts_pose",

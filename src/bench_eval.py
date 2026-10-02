@@ -59,6 +59,7 @@ from eval.vda_benchmark import (
     load_manifest,
     resize_to_gt,
     scaled_intrinsics,
+    sparse_mask_to_gt,
 )
 from streamvggt.depth_cond.config import SparseSimMode
 from streamvggt.depth_cond.sparse import simulate_sparse_depth
@@ -288,9 +289,7 @@ def score_sequence(
     H, W = gt.shape[1:]
     pred_gt = resize_to_gt(pred.depth, (H, W))
     sparse_depth, sparse_mask = _sparse_arrays(views)
-    sparse_mask_gt = (
-        resize_to_gt(sparse_mask.astype(np.float32), (H, W), nearest=True) > 0.5
-    )
+    sparse_mask_gt = sparse_mask_to_gt(sparse_mask, (H, W))
     published, aligned = P.published_metrics(
         P.depth_to_disparity(pred_gt), gt, spec.max_depth
     )

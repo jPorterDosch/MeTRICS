@@ -313,6 +313,26 @@ class ManifestTest(unittest.TestCase):
             (root / "scannet" / "scannet_video_tae.json").write_text("{}")
             self.assertEqual(VB.bench_root_ok(root, ("scannet",), ("scannet",)), [])
 
+    def test_sparse_mask_to_gt_covers_every_fed_gt_pixel(self):
+        # build_views' sparse source: GT nearest-downsampled to model size
+        H, W, h, w = 436, 1024, 224, 518
+        rng = np.random.default_rng(0)
+        idx = np.arange(H * W, dtype=np.float32).reshape(H, W)
+        src = cv2.resize(idx, (w, h), interpolation=cv2.INTER_NEAREST).astype(int)
+        cells = rng.random((2, -(-h // 14), -(-w // 14))) < 0.4
+        mask = np.repeat(np.repeat(cells, 14, 1), 14, 2)[:, :h, :w]
+        out = VB.sparse_mask_to_gt(mask, (H, W))
+        self.assertEqual(out.shape, (2, H, W))
+        for i in range(2):
+            fed = np.zeros(H * W, bool)
+            fed[src[mask[i]]] = True
+            self.assertTrue(out[i].reshape(-1)[fed].all())
+            # the plain nearest upsample misses some of them (the old leak)
+            up = VB.resize_to_gt(mask[i : i + 1].astype(np.float32), (H, W), True)
+            self.assertGreater(int((fed & ~(up[0].reshape(-1) > 0.5)).sum()), 0)
+            # and nothing outside fed pixels or fed patches is excluded
+            self.assertTrue(((up[0] > 0.5) | fed.reshape(H, W))[out[i]].all())
+
     def test_scaled_intrinsics_shifts_then_scales(self):
         K = np.array([[100.0, 0, 50.0], [0, 100.0, 40.0], [0, 0, 1]])
         out = VB.scaled_intrinsics(K, (8, -8, 11, -11), (80, 100), (40, 50))

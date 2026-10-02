@@ -154,7 +154,21 @@ class AttachTest(unittest.TestCase):
             stats = C.attach_cameras(out, "bonn", "bonn/bonn_video.json", raw)
             self.assertEqual(stats["with_pose"], 1)
             fr = json.load(open(out / "bonn" / "bonn_video.json"))["bonn"][0][seq][0]
-            self.assertAlmostEqual(fr["pose"][1][3], 1.0)
+            # the stored pose is the CAMERA's, converted from the marker pose
+            marker = C.tum_pose(np.array([100.033, 0, 1, 0, 0, 0, 0, 1]))
+            self.assertTrue(np.allclose(fr["pose"], C.bonn_camera_pose(marker)))
+            self.assertFalse(np.allclose(fr["pose"], marker))
+
+    def test_bonn_marker_to_camera(self):
+        # identity marker pose -> T_ROS^-1 T_ROS T_m = T_m
+        self.assertTrue(np.allclose(C.bonn_camera_pose(np.eye(4)), C.BONN_T_M))
+        # T_ROS is its own inverse (an axis swap with one flip)
+        self.assertTrue(np.allclose(C.BONN_T_ROS @ C.BONN_T_ROS, np.eye(4)))
+        # a pure marker translation along world x moves the camera along -x
+        T = np.eye(4)
+        T[0, 3] = 1.0
+        d = C.bonn_camera_pose(T)[:3, 3] - C.BONN_T_M[:3, 3]
+        self.assertTrue(np.allclose(d, [-1.0, 0.0, 0.0]))
 
     def test_scannet_nonfinite_pose_is_dropped(self):
         with tempfile.TemporaryDirectory() as tmp:

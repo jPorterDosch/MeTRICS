@@ -359,6 +359,31 @@ def resize_to_gt(
     return out.astype(bool) if nearest and pred.dtype == bool else out
 
 
+def sparse_mask_to_gt(mask: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
+    """[S,h,w] model-resolution sparse mask -> [S,H,W] GT-resolution mask of
+    every GT pixel the model was fed, for holding them out of the score.
+
+    build_views samples the sparse depth from the GT nearest-DOWNsampled to
+    (h, w); nearest-upsampling the mask back is not its inverse (cv2 takes
+    floor(x * scale) both ways), so it misses some fed source pixels. The
+    exact set is the downsample's own source-index map, read off cv2 by
+    resizing an index image the same way; the upsampled patches are kept on
+    top so whole fed patches stay excluded as before."""
+    if mask.ndim != 3:
+        raise ValueError(f"mask must be [S,h,w], got shape {mask.shape}")
+    H, W = hw
+    h, w = mask.shape[1:]
+    if H * W >= 1 << 24:
+        raise ValueError(f"GT {H}x{W} too large for a float32 index map")
+    idx = np.arange(H * W, dtype=np.float32).reshape(H, W)
+    src = cv2.resize(idx, (w, h), interpolation=cv2.INTER_NEAREST).astype(np.int64)
+    out = resize_to_gt(mask.astype(np.float32), hw, nearest=True) > 0.5
+    flat = out.reshape(out.shape[0], -1)
+    for i in range(mask.shape[0]):
+        flat[i, src[mask[i]]] = True
+    return out
+
+
 def bench_root_ok(
     root: Path, datasets: tuple[str, ...], tae_datasets: tuple[str, ...] = ()
 ) -> list[str]:
