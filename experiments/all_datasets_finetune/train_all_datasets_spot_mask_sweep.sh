@@ -23,6 +23,8 @@
 #    1   TUBE_MASK   5% of 14px patches   one patch set, fixed for the whole clip
 #    2   PIXEL_FREQ  ~42% (map density)   per-pixel draws from the real SPOT
 #                                         sensor's validity map
+#    3   RANDOM      ~42% of 14px patches arm 0's pattern at arm 2's density
+#                    (mask ratio 0.58)
 #
 # Arm 0 is the inject sweep's token_lora cell with an identical config, so it
 # hashes to the same run (e9263a9af33e8195) and finetune_depth refuses it:
@@ -32,15 +34,18 @@
 # CONFOUND in arm 2: PIXEL_FREQ's density is the map's (~0.58 mask ratio), not
 # 5% -- load_freq_map refuses any other ratio -- so 0 vs 1 is the clean
 # pattern contrast (moving vs fixed patches at equal density), and 2 changes
-# pattern AND density at once. The end-of-training benchmark scores all three
-# identically (TUBE_MASK at 1/5/40%, plus real SPOT sensor input), which is
-# where the density difference should show.
+# pattern AND density at once. Arm 3 separates the two: RANDOM patches at
+# PIXEL_FREQ's density (mask ratio 0.58 vs the map's 0.5795), so 2 vs 3 is
+# the SPOT pattern at equal density and 0 vs 3 is density alone. The
+# end-of-training benchmark scores every arm identically (TUBE_MASK at
+# 1/5/40%, plus real SPOT sensor input).
 #
 # Everything else is train_all_datasets_inject_sweep.sh verbatim -- data,
 # stride (1,1), epoch sizes, 15 epochs, lr schedule, loss, heads -- plus the
 # end-of-training benchmark (BENCH=0 skips it).
 #
 #   sbatch --array=1-2 experiments/all_datasets_finetune/train_all_datasets_spot_mask_sweep.sh
+#   sbatch --array=3 experiments/all_datasets_finetune/train_all_datasets_spot_mask_sweep.sh   # density-matched RANDOM
 #
 # Cost: ~23 h per arm on an H100 (the inject sweep's TOKEN+LoRA cell) plus
 # ~6 h of benchmark; one arm per array task, inside the 3-day limit.
@@ -48,7 +53,7 @@
 
 set -euo pipefail
 
-ARM_NAMES=(random_token_lora tube_token_lora spot_token_lora)
+ARM_NAMES=(random_token_lora tube_token_lora spot_token_lora random_d42_token_lora)
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 DATA=/lustre/isaac24/proj/UTK0516/metrics_data/processed
 # The datasets rebuilt as video are NOT under $DATA, which still holds the
@@ -70,6 +75,7 @@ ARM_FLAGS=(
     "--depth-cond.sim-mode RANDOM"
     "--depth-cond.sim-mode TUBE_MASK"
     "--depth-cond.sim-mode PIXEL_FREQ --depth-cond.sim-freq-map-path $SPOT_FREQ_MAP"
+    "--depth-cond.sim-mode RANDOM --depth-cond.sim-mask-ratio 0.58"
 )
 BENCH=${BENCH:-1}
 BENCH_ROOT=${BENCH_ROOT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench}
