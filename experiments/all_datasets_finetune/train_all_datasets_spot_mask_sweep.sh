@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=all_ds_spot
+#SBATCH --job-name=all_ds_mask
 #SBATCH --account=isaac-utk0256
 #SBATCH --partition=ai-tenn
 #SBATCH --qos=ai-tenn
@@ -9,59 +9,51 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=192G
 #SBATCH --time=3-00:00:00
-#SBATCH --output=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/all_ds_spot_%j.out
-#SBATCH --error=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/all_ds_spot_%j.out
+#SBATCH --output=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/all_ds_mask_%j.out
+#SBATCH --error=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/all_ds_mask_%j.out
 
 # =============================================================================
-# The TOKEN half of the injection ladder, re-run under the EMPIRICAL SPOT mask
-# instead of uniform random patch masking.
+# Masking-strategy sweep on the winning injection cell (TOKEN + LoRA, from the
+# inject sweep on the rebuilt video data: best on 3 of 4 benchmark datasets).
+# ONLY the training-time sparse-depth simulation changes:
 #
-#   arm  injection  trainable                      inject-sweep counterpart
-#   ---  ---------  -----------------------------  ------------------------
-#    0   TOKEN      + LoRA on decoder attention    arm 2 (66c8672b41ac8421)
-#    1   TOKEN      heads + conditioner (no LoRA)  arm 3 (54bbf74c1353d559)
+#   arm  sim mode    density              what the model sees per clip
+#   ---  ----------  -------------------  ---------------------------------------
+#    0   RANDOM      5% of 14px patches   a new random patch set every frame
+#    1   TUBE_MASK   5% of 14px patches   one patch set, fixed for the whole clip
+#    2   PIXEL_FREQ  ~42% (map density)   per-pixel draws from the real SPOT
+#                                         sensor's validity map
+#    3   RANDOM      ~42% of 14px patches arm 0's pattern at arm 2's density
+#                    (mask ratio 0.58)
 #
-# Contrast: 0 vs 1 = does TOKEN still need decoder plasticity once the prompt
-# is the real sensor pattern rather than a uniform random one. The HEAD arms
-# are dropped: the inject sweep settled that question at 0.95 random sparsity
-# (TOKEN without LoRA beat HEAD with LoRA, 0.0329 vs 0.0563 val absrel), and
-# re-running them here would cost ~36 GPU-hours to re-answer it.
+# Arm 0 is the inject sweep's token_lora cell with an identical config, so it
+# hashes to the same run (e9263a9af33e8195) and finetune_depth refuses it:
+# submit --array=1-2 and compare against that run. It is listed so the sweep
+# reads as the full comparison.
 #
-# ONLY the mask changes from train_all_datasets_inject_sweep.sh -- data,
-# stride (1,1), epoch sizes, 15 epochs, lr schedule, loss, heads are verbatim.
+# CONFOUND in arm 2: PIXEL_FREQ's density is the map's (~0.58 mask ratio), not
+# 5% -- load_freq_map refuses any other ratio -- so 0 vs 1 is the clean
+# pattern contrast (moving vs fixed patches at equal density), and 2 changes
+# pattern AND density at once. Arm 3 separates the two: RANDOM patches at
+# PIXEL_FREQ's density (mask ratio 0.58 vs the map's 0.5795), so 2 vs 3 is
+# the SPOT pattern at equal density and 0 vs 3 is density alone. The
+# end-of-training benchmark scores every arm identically (TUBE_MASK at
+# 1/5/40%, plus real SPOT sensor input).
 #
-# WHAT THE MASK CHANGES. The inject sweep trained at sim_mask_ratio 0.95 with
-# RANDOM patch masking: 5% of patches visible, uniform over the frame. The SPOT
-# map is both DENSER and STRUCTURED -- mean validity 0.4205, so a ~0.58 mask
-# ratio, with per-pixel validity drawn from the real sensor's hole pattern
-# (assets/spot/valid_freq_640x480.npz, 2558 frames over seqs 0 and 1). Expect
-# lower absrel across the board from the denser prompt; the comparison that
-# matters is arm 0 vs arm 1, not these numbers against the inject sweep's.
+# Everything else is train_all_datasets_inject_sweep.sh verbatim -- data,
+# stride (1,1), epoch sizes, 15 epochs, lr schedule, loss, heads -- plus the
+# end-of-training benchmark (BENCH=0 skips it).
 #
-# NO --depth-cond.sim-mask-ratio FLAG. Under sim_mode=pixel_freq the density is
-# the map's, derived in DepthCondCfg.validate(); passing a ratio is a hard
-# error. The map's content sha256 is part of the experiment hash, so rebuilding
-# the .npz gives these arms new hashes rather than silently redefining them.
+#   sbatch --array=1-2 experiments/all_datasets_finetune/train_all_datasets_spot_mask_sweep.sh
+#   sbatch --array=3 experiments/all_datasets_finetune/train_all_datasets_spot_mask_sweep.sh   # density-matched RANDOM
 #
-# The arms run one after another in this job. An arm whose run dir already
-# exists is refused by finetune_depth and the loop moves on to the next arm;
-# any other failure also moves on.
-#
-#   sbatch experiments/all_datasets_finetune/train_all_datasets_spot_mask_sweep.sh
-#
-# Cost: the inject sweep's TOKEN arms took 23h10m (LoRA) and 20h49m (no LoRA)
-# on an H100. Masking cost is identical at any density, so budget ~44h total,
-# inside the 3-day wall clock.
+# Cost: ~23 h per arm on an H100 (the inject sweep's TOKEN+LoRA cell) plus
+# ~6 h of benchmark; one arm per array task, inside the 3-day limit.
 # =============================================================================
 
 set -euo pipefail
 
-ARM_NAMES=(spot_token_lora spot_token_headonly)
-ARM_FLAGS=(
-    "--depth-cond.injection TOKEN --lora.enabled"
-    "--depth-cond.injection TOKEN --lora.no-enabled"
-)
-
+ARM_NAMES=(random_token_lora tube_token_lora spot_token_lora random_d42_token_lora)
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 DATA=/lustre/isaac24/proj/UTK0516/metrics_data/processed
 # The datasets rebuilt as video are NOT under $DATA, which still holds the
@@ -79,6 +71,16 @@ PRETRAINED=${PRETRAINED:-/lustre/isaac24/proj/UTK0516/ckpt/checkpoints.pth}
 # against src/ instead of the repo root
 SPOT_FREQ_MAP="${SPOT_FREQ_MAP:-$REPO/assets/spot/valid_freq_640x480.npz}"
 mkdir -p "$CKPT_DIR" "$REPO/logs"
+ARM_FLAGS=(
+    "--depth-cond.sim-mode RANDOM"
+    "--depth-cond.sim-mode TUBE_MASK"
+    "--depth-cond.sim-mode PIXEL_FREQ --depth-cond.sim-freq-map-path $SPOT_FREQ_MAP"
+    "--depth-cond.sim-mode RANDOM --depth-cond.sim-mask-ratio 0.58"
+)
+BENCH=${BENCH:-1}
+BENCH_ROOT=${BENCH_ROOT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench}
+BENCH_ARGS=()
+[ "$BENCH" = 1 ] && BENCH_ARGS=(--bench.enabled --bench.root "$BENCH_ROOT")
 
 # environment identical to train_all_datasets.sh (see its comments)
 export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/envs/metrics/bin:$PATH
@@ -107,11 +109,25 @@ for d in "$REBUILT/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/proce
     [ -d "$d" ] || { echo "[fatal] missing dataset root: $d"; exit 1; }
 done
 
+if [ "$BENCH" = 1 ]; then
+    for d in sintel scannet kitti bonn nyuv2; do
+        ls "$BENCH_ROOT/$d"/*.json >/dev/null 2>&1 \
+            || { echo "[fatal] no benchmark manifest under $BENCH_ROOT/$d (BENCH=0 to skip)"; exit 1; }
+    done
+fi
+
+ARMS=("${!ARM_NAMES[@]}")
+if [ -n "${SLURM_ARRAY_TASK_ID:-}" ]; then
+    [ "$SLURM_ARRAY_TASK_ID" -lt "${#ARM_NAMES[@]}" ] \
+        || { echo "[fatal] array task $SLURM_ARRAY_TASK_ID has no arm (0-$((${#ARM_NAMES[@]} - 1)))"; exit 1; }
+    ARMS=("$SLURM_ARRAY_TASK_ID")
+fi
+
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
 cd "$REPO/src"
 
-for i in "${!ARM_NAMES[@]}"; do
+for i in "${ARMS[@]}"; do
     echo "=== arm $i: ${ARM_NAMES[$i]}  (${ARM_FLAGS[$i]}) ==="
     # ARM_FLAGS[$i] is deliberately unquoted: it word-splits into separate args
     # shellcheck disable=SC2086
@@ -119,11 +135,11 @@ for i in "${!ARM_NAMES[@]}"; do
         --exp-group "$EXP_GROUP" \
         --pretrained "$PRETRAINED" \
         --save-dir "$CKPT_DIR" \
+        --depth-cond.injection TOKEN \
+        --lora.enabled \
         ${ARM_FLAGS[$i]} \
         --depth-cond.heads DEPTH \
         --train.train-heads DEPTH \
-        --depth-cond.sim-mode PIXEL_FREQ \
-        --depth-cond.sim-freq-map-path "$SPOT_FREQ_MAP" \
         --loss.depth-log-space \
         --loss.depth-alpha 0.02 \
         --train-dataset.root "$REBUILT/processed_scannetpp" \
@@ -158,6 +174,7 @@ for i in "${!ARM_NAMES[@]}"; do
         --save-freq 0.1 \
         --num-workers 12 \
         --print-freq 10 \
+        "${BENCH_ARGS[@]}" \
         || echo "=== arm $i did not run to completion (exists or failed); continuing ==="
 done
 

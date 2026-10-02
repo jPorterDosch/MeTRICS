@@ -1,12 +1,16 @@
 # Download Sintel
-mkdir -p ~/scratch/data/sintel
-cd ~/scratch/data/sintel
+set -eu
+EVAL_RAW="${EVAL_RAW:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/raw}"
+mkdir -p "$EVAL_RAW/sintel"
+cd "$EVAL_RAW/sintel"
+# each fetch is skipped once its unpacked result exists (the zips are deleted
+# after unpacking, so a rerun would otherwise download everything again)
 # images
-wget --no-proxy http://files.is.tue.mpg.de/sintel/MPI-Sintel-training_images.zip
+[ -d training/clean ] || wget -c --no-proxy http://files.is.tue.mpg.de/sintel/MPI-Sintel-training_images.zip
 # depth & cameras
-wget --no-proxy http://files.is.tue.mpg.de/jwulff/sintel/MPI-Sintel-depth-training-20150305.zip
+[ -d training/depth ] || wget -c --no-proxy http://files.is.tue.mpg.de/jwulff/sintel/MPI-Sintel-depth-training-20150305.zip
 # flow
-wget --no-proxy http://files.is.tue.mpg.de/sintel/MPI-Sintel-training_extras.zip
+[ -d training/flow ] || wget -c --no-proxy http://files.is.tue.mpg.de/sintel/MPI-Sintel-training_extras.zip
 # unzip all
 find . -name "*.zip" -exec unzip -o -q {} \;
 # remove all zip files
