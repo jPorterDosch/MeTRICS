@@ -748,7 +748,7 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
             rec_path = Path(tmp) / "rec.json"
             R.save(rec, rec_path)
             arm = _FakeArm(_depth_from_red)
-            A.ARMS["fake"] = lambda device: arm
+            A.ARMS["fake"] = lambda device, record: arm
             try:
                 args = argparse.Namespace(
                     record=rec_path,
@@ -762,6 +762,7 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
                     image_size=518,
                     patch_size=14,
                     seed=42,
+                    overwrite=False,
                     max_sequences=0,
                 )
                 BB.benchmark(args)
@@ -812,7 +813,7 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
             rec_path = Path(tmp) / "rec.json"
             R.save(rec, rec_path)
             arm = Prompted()
-            A.ARMS["fakep"] = lambda device: arm
+            A.ARMS["fakep"] = lambda device, record: arm
             try:
                 BB.benchmark(
                     argparse.Namespace(
@@ -827,6 +828,7 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
                         image_size=518,
                         patch_size=14,
                         seed=42,
+                        overwrite=False,
                         max_sequences=1,
                     )
                 )
@@ -836,6 +838,50 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
         self.assertLess(
             arm.prompts[0], arm.prompts[1]
         )  # and the draw differs: 5% then 40%
+
+    def test_benchmark_refuses_to_overwrite_results(self):
+        import argparse
+
+        rec = R.load()
+        rec["arms"]["fake"] = {
+            "status": R.VERIFIED,
+            "status_note": "",
+            "targets": [],
+            "runs": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            _fake_bonn_tree(Path(tmp))
+            rec_path = Path(tmp) / "rec.json"
+            R.save(rec, rec_path)
+            out = Path(tmp) / "out" / "bench_fake"
+            out.mkdir(parents=True)
+            (out / "bench_results.json").write_text("{}")
+            arm = _FakeArm(_depth_from_red)
+            A.ARMS["fake"] = lambda device, record: arm
+            try:
+                args = argparse.Namespace(
+                    record=rec_path,
+                    arm="fake",
+                    device="cpu",
+                    bench_root=Path(tmp),
+                    out=Path(tmp) / "out",
+                    datasets=["bonn"],
+                    tae_datasets=[],
+                    densities=[0.05],
+                    image_size=518,
+                    patch_size=14,
+                    seed=42,
+                    max_sequences=1,
+                    overwrite=False,
+                )
+                with self.assertRaises(FileExistsError):
+                    BB.benchmark(args)
+                self.assertEqual(arm.calls, [])  # refused before any inference
+                args.overwrite = True
+                BB.benchmark(args)
+            finally:
+                del A.ARMS["fake"]
+        self.assertEqual(len(arm.calls), 1)
 
     def test_benchmark_refuses_an_unverified_arm(self):
         import argparse
@@ -855,6 +901,7 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
             image_size=518,
             patch_size=14,
             seed=42,
+            overwrite=False,
             max_sequences=1,
         )
         with self.assertRaises(R.GateError):

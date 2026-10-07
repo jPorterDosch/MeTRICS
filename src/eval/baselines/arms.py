@@ -77,9 +77,16 @@ def _vendored(root: Path, *shadowed: str):
         return name.split(".")[0] in shadowed
 
     saved = {k: sys.modules.pop(k) for k in list(sys.modules) if _mine(k)}
+    before = set(sys.modules)
     sys.path.insert(0, str(root))
     try:
         yield
+    except BaseException:
+        # a failed import leaves half-initialised modules behind, and a retry
+        # would import them as done: drop everything the block added
+        for k in set(sys.modules) - before:
+            del sys.modules[k]
+        raise
     finally:
         sys.path.remove(str(root))
         for k in [k for k in sys.modules if _mine(k)]:
@@ -154,14 +161,16 @@ class VDAArm:
     target_fps 1 (unused by the model). The relative model returns disparity
     aligned across windows; the metric one returns metres."""
 
-    def __init__(self, device: torch.device, metric: bool = False):
+    def __init__(
+        self, device: torch.device, metric: bool = False, record: dict | None = None
+    ):
         name = "vda_metric" if metric else "vda"
         self.info = ArmInfo(
             name, "depth" if metric else "disparity", causal=False, prompted=False
         )
         model = _vda_class()(**_VDA_VITL, metric=metric)
         model.load_state_dict(
-            torch.load(weights_file(name), map_location="cpu"), strict=True
+            torch.load(weights_file(name, record), map_location="cpu"), strict=True
         )
         self.model = model.to(device).eval()
         self.device = device
@@ -169,9 +178,17 @@ class VDAArm:
     def predict(self, frames: np.ndarray, prompt: Prompt | None = None) -> np.ndarray:
         _check_frames(frames)
         _no_prompt(self.info, prompt)
-        out, _ = self.model.infer_video_depth(
-            frames, 1, input_size=518, device=self.device.type, fp32=True
-        )
+        # infer_video_depth takes the bare device TYPE (its autocast needs it)
+        # and moves inputs to the current device of that type: pin it for the
+        # call only
+        with (
+            torch.cuda.device(self.device)
+            if self.device.type == "cuda"
+            else contextlib.nullcontext()
+        ):
+            out, _ = self.model.infer_video_depth(
+                frames, 1, input_size=518, device=self.device.type, fp32=True
+            )
         return np.asarray(out, dtype=np.float32)
 
 
@@ -191,14 +208,16 @@ class OVDAArm:
     """The paper's context-16 model through its own infer_video_depth: one
     frame per forward, the cache carried inside. fp32 (see README_VENDORED)."""
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, record: dict | None = None):
         import yaml
 
         self.info = ArmInfo("ovda", "disparity", causal=True, prompted=False)
         with open(_OVDA_ROOT / "configs" / "oVDA_c16.yaml") as f:
             net = yaml.safe_load(f)["net"]
         model = _ovda_class()(**net)
-        model.load_state_dict(torch.load(weights_file("ovda"), map_location="cpu"))
+        model.load_state_dict(
+            torch.load(weights_file("ovda", record), map_location="cpu")
+        )
         self.model = model.to(device).eval()
         self.device = device
 
@@ -228,7 +247,7 @@ class DAVArm:
     NUM_FRAMES = 32
     MAX_RESOLUTION = 1024
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, record: dict | None = None):
         from diffusers import (
             AutoencoderKLTemporalDecoder,
             FlowMatchEulerDiscreteScheduler,
@@ -239,7 +258,7 @@ class DAVArm:
             from dav.models import UNetSpatioTemporalRopeConditionModel
             from dav.pipelines import DAVPipeline
             from dav.utils import img_utils
-        base = str(weights_file("dav"))
+        base = str(weights_file("dav", record))
         self.pipe = DAVPipeline(
             vae=AutoencoderKLTemporalDecoder.from_pretrained(base, subfolder="vae"),
             unet=UNetSpatioTemporalRopeConditionModel.from_pretrained(
@@ -273,9 +292,16 @@ class DAVArm:
         image = torch.from_numpy(
             np.ascontiguousarray([f.transpose(2, 0, 1) / 255.0 for f in cropped])
         ).to(self.device)
-        torch.manual_seed(0)
-        torch.cuda.manual_seed_all(0)
-        with torch.no_grad(), torch.autocast(self.device.type, dtype=torch.float16):
+        # a fixed seed per call, without touching the process RNG state
+        devices = [self.device] if self.device.type == "cuda" else []
+        with (
+            torch.random.fork_rng(devices=devices),
+            torch.no_grad(),
+            torch.autocast(self.device.type, dtype=torch.float16),
+        ):
+            torch.manual_seed(0)
+            if devices:
+                torch.cuda.manual_seed_all(0)
             out = self.pipe(
                 image,
                 num_frames=self.NUM_FRAMES,
@@ -426,9 +452,9 @@ class PromptDAArm:
 
     MAX_SIZE = 1008
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, record: dict | None = None):
         self.info = ArmInfo("promptda", "depth", causal=True, prompted=True)
-        self.model = load_promptda(str(weights_file("promptda")), device)
+        self.model = load_promptda(str(weights_file("promptda", record)), device)
         self.device = device
 
     def predict(self, frames: np.ndarray, prompt: Prompt | None = None) -> np.ndarray:
@@ -461,8 +487,8 @@ class PromptDAArm:
 # registry + gate
 # ---------------------------------------------------------------------------
 ARMS = {
-    "vda": lambda device: VDAArm(device),
-    "vda_metric": lambda device: VDAArm(device, metric=True),
+    "vda": lambda device, record: VDAArm(device, record=record),
+    "vda_metric": lambda device, record: VDAArm(device, metric=True, record=record),
     "dav": DAVArm,
     "ovda": OVDAArm,
     "promptda": PromptDAArm,
@@ -476,10 +502,12 @@ def build_arm(
     record: dict | None = None,
 ):
     """The arm, built only if the reproduction record opens every (dataset,
-    protocol) in `uses` to it (record.require_allowed)."""
+    protocol) in `uses` to it (record.require_allowed). The same record
+    names the weights the arm loads."""
     if name not in ARMS:
         raise KeyError(f"unknown baseline arm {name!r}; known: {sorted(ARMS)}")
     if not uses:
         raise ValueError("build_arm needs the (dataset, protocol) pairs it will run")
-    R.require_allowed(record or R.load(), name, uses)
-    return ARMS[name](device)
+    record = record or R.load()
+    R.require_allowed(record, name, uses)
+    return ARMS[name](device, record)

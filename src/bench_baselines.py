@@ -355,13 +355,31 @@ def benchmark(args) -> None:
     missing = BE.bench_root_ok(cfg.root, cfg.datasets, cfg.tae_datasets)
     if missing:
         raise FileNotFoundError(f"benchmark manifests missing: {missing}")
+    out = args.out / f"bench_{args.arm}" / "bench_results.json"
+    if out.exists() and not args.overwrite:  # before hours of inference, not after
+        raise FileExistsError(f"{out} exists; pass --overwrite or another --out")
+
+    def _frames(seq, spec):
+        """The arm sees the pixels our model sees: for an uncropped-frame
+        manifest the protocol crop is applied to the frames here, as
+        build_views does for ours (and where a prompted arm's sparse depth is
+        drawn), instead of to the prediction afterwards as `reproduce` does
+        for parity with VDA's infer.py."""
+        frames = read_frames(seq)
+        if seq.rgb_uncropped:
+            ys, xs = crop_slices(spec.crop)
+            frames = np.ascontiguousarray(frames[:, ys, xs])
+        return frames
 
     def _pred(raw, seq, spec, frame_hw, gt_hw, native_hw) -> BE.Prediction:
         """The arm's output as bench_eval scores it: on the GT grid for
         published / metric / TAE, and at OUR model resolution (where the
         sparse pixels live) for the sparse fit."""
-        at_gt = register_to_gt(raw, seq, spec, frame_hw, gt_hw)
-        native = resize_to_gt(raw, native_hw)
+        cropped = Sequence(seq.dataset, seq.name, seq.frames, rgb_uncropped=False)
+        at_gt = register_to_gt(raw, cropped, spec, frame_hw, gt_hw)
+        # from the GT grid, not from the raw frames: for an uncropped-frame
+        # manifest the raw output still carries the border the protocol crops
+        native = resize_to_gt(at_gt, native_hw)
         S = len(raw)
         return BE.Prediction(
             native,
@@ -389,7 +407,7 @@ def benchmark(args) -> None:
         for seq in seqs:
             tag = f"{spec.name}/{seq.name}"
             gt, views = BE._prepare_sequence(spec, seq, cfg.image_size, device)
-            frames = read_frames(seq)
+            frames = _frames(seq, spec)
             native_hw = tuple(views[0]["img"].shape[-2:])
             pred = None
             main_tae = (
@@ -429,7 +447,7 @@ def benchmark(args) -> None:
                 if not BE.has_cameras(seq):
                     continue
                 gt, views = BE._prepare_sequence(spec, seq, cfg.image_size, device)
-                frames = read_frames(seq)
+                frames = _frames(seq, spec)
                 native_hw = tuple(views[0]["img"].shape[-2:])
                 pred = None
                 for density in cfg.densities:
@@ -574,6 +592,11 @@ def main() -> None:
         help="sparse-depth seed (bench_checkpoint.py --seed)",
     )
     bench.add_argument("--max-sequences", type=int, default=0)
+    bench.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing bench_results.json",
+    )
     sub.add_parser("status", help="print the record's status per arm")
     args = parser.parse_args()
     if args.command == "fetch":

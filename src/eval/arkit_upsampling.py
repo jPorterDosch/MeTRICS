@@ -22,6 +22,10 @@ Scored in metres over GT > 0: L1 and RMSE per image, mean over images.
 Layout, as datasets_download/download_arkit_scenes.py leaves it (zips are
 never extracted): <root>/metadata.csv and <root>/Validation/<video_id>.zip,
 each zip holding <video_id>/{wide,highres_depth,lowres_depth}/<name>.png.
+The video list the downloader takes (--video_id_csv) is Apple's own
+depth_upsampling/upsampling_train_val_splits.csv (1970 Training / 287
+Validation videos), checked in verbatim as
+datasets_download/raw/upsampling_train_val_splits.csv.
 """
 
 from __future__ import annotations
