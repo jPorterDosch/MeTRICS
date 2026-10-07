@@ -21,6 +21,12 @@ Three protocols, kept apart because they answer different questions:
                   one that only sees it post hoc get the same pixels.
   metric          No alignment at all: raw metric depth against GT.
 
+Two more exist only to reproduce a baseline's own tables and are not part
+of the comparison (ovda_aligned_metrics):
+  first_frame     Online Video Depth Anything's: scale+shift in inverse depth
+                  fitted on the first frame, applied to the whole video.
+  ovda_global     the same with the fit over all frames.
+
 Plus two temporal metrics on the published-aligned depth:
   tae_vda         VDA's TAE (bidirectional reprojection with GT K/poses,
                   relative error, x100), vendored.
@@ -51,18 +57,21 @@ _VDA_EVAL = (
     / "eval"
 )
 
-# Both are loaded by path rather than via sys.path: the vendored directory
+_OVDA_ALIGN = _VDA_EVAL.parents[2] / "ovda" / "src" / "utils" / "align_utils.py"
+
+# All are loaded by path rather than via sys.path: the vendored directory
 # holds an eval.py, which would shadow THIS package (src/eval) for any later
 # `import eval.*`.
 _METRIC_MODULE = None
 _TAE_MODULE = None
+_OVDA_ALIGN_MODULE = None
 
 
 def _load_by_path(name: str, path: pathlib.Path):
     if not path.is_file():
         raise FileNotFoundError(
-            f"vendored VDA benchmark file missing: {path} (see third_party/"
-            "video_depth_anything/README_VENDORED.md)"
+            f"vendored file missing: {path} (see the README_VENDORED.md of "
+            "its third_party directory)"
         )
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -82,6 +91,13 @@ def vda_tae_module():
     if _TAE_MODULE is None:
         _TAE_MODULE = _load_by_path("vda_benchmark_eval_tae", _VDA_EVAL / "eval_tae.py")
     return _TAE_MODULE
+
+
+def ovda_align_module():
+    global _OVDA_ALIGN_MODULE
+    if _OVDA_ALIGN_MODULE is None:
+        _OVDA_ALIGN_MODULE = _load_by_path("ovda_align_utils", _OVDA_ALIGN)
+    return _OVDA_ALIGN_MODULE
 
 
 # Every protocol clips the scored prediction to this range, as VDA's eval.py
@@ -115,7 +131,15 @@ class FrameMetrics:
         }
 
 
-_EMPTY = FrameMetrics(float("nan"), float("nan"), float("nan"), 0)
+EMPTY = FrameMetrics(float("nan"), float("nan"), float("nan"), 0)
+"""Nothing scored: no valid pixel, or a protocol that does not apply."""
+_EMPTY = EMPTY
+
+
+def finite_mean(values) -> float:
+    """Mean over the finite entries (None and NaN skipped); NaN if none."""
+    vals = [v for v in values if v is not None and np.isfinite(v)]
+    return float(np.mean(vals)) if vals else float("nan")
 
 
 def gt_valid_mask(gt: np.ndarray, max_depth: float) -> np.ndarray:
@@ -195,9 +219,73 @@ def published_metrics(
     return vda_frame_metrics(aligned, gt, gt_valid_mask(gt, max_depth)), aligned
 
 
+def ovda_aligned_metrics(
+    pred_disp: np.ndarray, gt: np.ndarray, max_depth: float, first_frame_only: bool
+) -> FrameMetrics:
+    """Online Video Depth Anything's scoring. (scale, shift) is fitted in
+    inverse depth on the FIRST frame only and applied to the whole video
+    (their Table 1: scale drift is scored instead of absorbed), or on all
+    frames (their Table 8, "global").
+
+    The fit is the vendored one (align_utils.frame_align_lstsq, what their
+    align_prediction calls) and the inversion and clip repeat
+    align_prediction: an aligned inverse depth of exactly 0 becomes 1e-4, and
+    depth is clipped to [0, max_depth] -- a NEGATIVE aligned inverse depth
+    therefore scores as depth 0 (AbsRel 1), where VDA's eval floors the
+    inverse depth and scores max_depth (AbsRel up to max_depth / gt). That is
+    why their global table is not our `published` protocol.
+
+    GT beyond max_depth is CLIPPED to it and scored, not masked out ("The
+    maximum depth is clipped to 80m", their Table 1 caption): on Sintel, whose
+    sky is stored at hundreds of metres, that keeps the far pixels in the
+    score. The per-frame reduction is not stated in the paper; VDA's is used.
+    Fewer than 2 valid GT pixels in the fitted frames: nothing is scored."""
+    _check_seq("pred_disp", pred_disp, gt)
+    valid = gt > 1e-3
+    gt = np.minimum(gt, max_depth)
+    n = 1 if first_frame_only else len(gt)
+    fit = valid[:n] & np.isfinite(pred_disp[:n])
+    if fit.sum() < 2:
+        return _EMPTY
+    mod = ovda_align_module()
+    alignment = mod.frame_align_lstsq(
+        mod.DepthMap(
+            np.ma.array(pred_disp[:n].astype(np.float64), mask=~fit),
+            inverse=True,
+            range=None,
+            scale=None,
+            shift=None,
+        ),
+        mod.DepthMap(
+            np.ma.array(gt[:n].astype(np.float64), mask=~fit),
+            inverse=False,
+            range=None,
+            scale=1,
+            shift=0,
+        ),
+    )
+    aligned = (pred_disp.astype(np.float64) - alignment.shift) / alignment.scale
+    aligned = np.where(aligned == 0.0, 1e-4, aligned)
+    # a non-finite prediction pixel scores as depth 0, i.e. as an error
+    depth = np.nan_to_num(1.0 / aligned, nan=0.0, posinf=0.0, neginf=0.0)
+    depth = np.clip(depth, 0.0, max_depth).astype(np.float32)
+    return vda_frame_metrics(depth, gt, valid)
+
+
 def depth_to_disparity(depth: np.ndarray) -> np.ndarray:
     """1/depth with the same floor VDA applies to its own disparity."""
     return 1.0 / np.clip(depth.astype(np.float64), DEPTH_FLOOR, None)
+
+
+def as_disparity(pred: np.ndarray, output: str) -> np.ndarray:
+    """A prediction as disparity, whatever the model emits: `output` is
+    "disparity" (returned as is) or "depth" (inverted). The one place that
+    decides how a prediction enters the disparity-space protocols."""
+    if output == "disparity":
+        return pred
+    if output == "depth":
+        return depth_to_disparity(pred)
+    raise ValueError(f"output must be 'depth' or 'disparity', got {output!r}")
 
 
 def metric_metrics(
@@ -236,6 +324,7 @@ def sparse_aligned_metrics(
     gt: np.ndarray,
     max_depth: float,
     min_sparse_pixels: int = 2,
+    native_disparity: bool = False,
 ) -> FrameMetrics:
     """The `sparse_aligned` protocol.
 
@@ -248,7 +337,13 @@ def sparse_aligned_metrics(
     the model was handed would measure copying, not completion.
 
     A frame with fewer than min_sparse_pixels sparse-depth pixels cannot be aligned
-    and is dropped (counted out of `frames`)."""
+    and is dropped (counted out of `frames`).
+
+    native_disparity: the prediction (both arrays) IS disparity, a baseline's
+    native output. The fit is then s*disparity + t ~ 1/sparse depth, the
+    aligned disparity is floored like VDA's and inverted; everything else is
+    the same, so a disparity model and a depth model get the same pixels and
+    the same scoring."""
     _check_seq("pred_native", pred_native, sparse_depth)
     _check_seq("sparse_mask", sparse_mask, sparse_depth)
     _check_seq("pred_gt_res", pred_gt_res, gt)
@@ -270,11 +365,19 @@ def sparse_aligned_metrics(
             valid[i] = False
             continue
         # design decision: the fit lives in each model's NATIVE output space
-        # (depth here); a disparity model fits 1/depth against 1/sparse depth
-        s, t = affine_fit(pred_native[i][m], sparse_depth[i][m])
-        aligned[i] = np.clip(
-            s * _finite_or_floor(pred_gt_res[i]) + t, DEPTH_FLOOR, max_depth
-        )
+        if native_disparity:
+            s, t = affine_fit(pred_native[i][m], 1.0 / sparse_depth[i][m])
+            disp = s * pred_gt_res[i] + t
+            # a non-finite pixel scores as an error here too: floored AFTER
+            # the affine, so it lands at max_depth rather than at whatever
+            # depth the fit would map a floored disparity to
+            disp = np.clip(_finite_or_floor(disp), DEPTH_FLOOR, None)
+            aligned[i] = np.clip(1.0 / disp, DEPTH_FLOOR, max_depth)
+        else:
+            s, t = affine_fit(pred_native[i][m], sparse_depth[i][m])
+            aligned[i] = np.clip(
+                s * _finite_or_floor(pred_gt_res[i]) + t, DEPTH_FLOOR, max_depth
+            )
     return vda_frame_metrics(aligned, gt, valid)
 
 

@@ -1,0 +1,868 @@
+{
+  "_doc": [
+    "Reproduction record of the baseline arms (src/eval/baselines/record.py reads and writes it).",
+    "An arm may run only the (dataset, protocol) pairs listed in its own `targets` until its status is `verified`.",
+    "`published` is the number as printed in the source (a string, so the printed digits are kept);",
+    "`scale` converts our value to the printed unit (100 for a percentage). `gate: false` targets are",
+    "recorded but cannot verify an arm; `why_not_gating` says what is missing. `dataset: null` = not",
+    "runnable here. `reference_only` rows come from another paper: they authorise nothing.",
+    "Transcribed from the arXiv HTML renderings fetched 2026-10-03; nothing is quoted from memory."
+  ],
+  "tolerance": {
+    "relative": 0.02,
+    "last_digit_units": 2
+  },
+  "arms": {
+    "vda": {
+      "name": "Video Depth Anything (VDA-L)",
+      "paper": "arXiv:2501.12375v3",
+      "code": {
+        "repo": "https://github.com/DepthAnything/Video-Depth-Anything",
+        "commit": "4f5ae23172ba60fd7bc11ef671cca678842c7072"
+      },
+      "weights": {
+        "hf_repo": "depth-anything/Video-Depth-Anything-Large",
+        "file": "video_depth_anything_vitl.pth",
+        "license": "CC-BY-NC-4.0"
+      },
+      "settings": "benchmark/infer/infer.py: input_size 518 (short side, reduced when aspect > 1.78), fp32, 32-frame windows. Data settings found by running VDA's own unmodified scripts on variants of the tree (2026-10-04, jobs 6327481, 6327549, 6327659, 6327762): Bonn = all 26 sequences (`bonn_all`, `bonn_all_500`), which is what its extractor takes; Sintel = colour files with R and B swapped on disk (`sintel_bgr`), which is what its extractor writes; ScanNet TAE over all 100 scenes, because its 20 are the first 20 of an unsorted glob and cannot be recovered.",
+      "status": "verified",
+      "status_note": "Verified 2026-10-05 through this pipeline (jobs 6329345, 6329347): 15 of 15 gating targets. What it took, each measured with VDA's own unmodified scripts first: Bonn over all 26 sequences (bonn_all, bonn_all_500; the 5 DepthCrafter sequences give 0.0592 / 0.0821 instead of 0.053 / 0.071); Sintel on R/B-swapped colour files, as its extractor writes them (sintel_bgr 0.2981; true colours 0.3010; paper 0.295); ScanNet TAE over all 100 scenes (0.5659; paper 0.570 on an unrecoverable 20 -- the first 20 of an unsorted glob; a 20-scene mean has std 0.038). Ruled out along the way: Sintel depth encoding and depth cap; colour order for Bonn and TAE; TAE colour resolution (1296x968: 0.6020); Bonn timestamp pairing (other side of the paper: 0.0506 / 0.0681 on 5 sequences).",
+      "targets": [
+        {
+          "id": "t1_kitti_absrel",
+          "source": "Table 1, row VDA-L (Ours), KITTI, AbsRel",
+          "published": "0.083",
+          "scale": 1,
+          "dataset": "kitti_500",
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.08375992925040253,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_kitti_delta1",
+          "source": "Table 1, row VDA-L (Ours), KITTI, delta1",
+          "published": "0.944",
+          "scale": 1,
+          "dataset": "kitti_500",
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9400281997827383,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_scannet_absrel",
+          "source": "Table 1, row VDA-L (Ours), Scannet, AbsRel",
+          "published": "0.089",
+          "scale": 1,
+          "dataset": "scannet_500",
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.08924886089829061,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_scannet_delta1",
+          "source": "Table 1, row VDA-L (Ours), Scannet, delta1",
+          "published": "0.926",
+          "scale": 1,
+          "dataset": "scannet_500",
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9257990634441375,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_bonn_absrel",
+          "source": "Table 1, row VDA-L (Ours), Bonn, AbsRel",
+          "published": "0.071",
+          "scale": 1,
+          "dataset": "bonn_all_500",
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.0701842584123855,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_bonn_delta1",
+          "source": "Table 1, row VDA-L (Ours), Bonn, delta1",
+          "published": "0.959",
+          "scale": 1,
+          "dataset": "bonn_all_500",
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9615073547913477,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_nyuv2_absrel",
+          "source": "Table 1, row VDA-L (Ours), NYUv2, AbsRel",
+          "published": "0.062",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "VDA's 8-scene 500-frame NYUv2 video split (nyuv2_video_500.json) is not built here; needs the raw NYUv2 video dump."
+        },
+        {
+          "id": "t1_nyuv2_delta1",
+          "source": "Table 1, row VDA-L (Ours), NYUv2, delta1",
+          "published": "0.971",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "as t1_nyuv2_absrel"
+        },
+        {
+          "id": "t1_sintel_absrel",
+          "source": "Table 1, row VDA-L (Ours), Sintel (~50 frames), AbsRel",
+          "published": "0.295",
+          "scale": 1,
+          "dataset": "sintel_bgr",
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.29810527420735256,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_sintel_delta1",
+          "source": "Table 1, row VDA-L (Ours), Sintel (~50 frames), delta1",
+          "published": "0.644",
+          "scale": 1,
+          "dataset": "sintel_bgr",
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.6393983927757844,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_scannet_tae",
+          "source": "Table 1, row VDA-L (Ours), Scannet (170 frames), TAE",
+          "published": "0.570",
+          "scale": 1,
+          "dataset": "scannet",
+          "protocol": "tae",
+          "metric": "tae_vda",
+          "gate": true,
+          "measured": 0.565853168287351,
+          "within_tolerance": true
+        },
+        {
+          "id": "t7_kitti_absrel",
+          "source": "Table 7 (appendix), row VDA-L (Ours), KITTI(110), AbsRel",
+          "published": "0.079",
+          "scale": 1,
+          "dataset": "kitti",
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.07964727056899842,
+          "within_tolerance": true
+        },
+        {
+          "id": "t7_kitti_delta1",
+          "source": "Table 7 (appendix), row VDA-L (Ours), KITTI(110), delta1",
+          "published": "0.950",
+          "scale": 1,
+          "dataset": "kitti",
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9507544636726379,
+          "within_tolerance": true
+        },
+        {
+          "id": "t7_bonn_absrel",
+          "source": "Table 7 (appendix), row VDA-L (Ours), Bonn(110), AbsRel",
+          "published": "0.053",
+          "scale": 1,
+          "dataset": "bonn_all",
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.0532625429975652,
+          "within_tolerance": true
+        },
+        {
+          "id": "t7_bonn_delta1",
+          "source": "Table 7 (appendix), row VDA-L (Ours), Bonn(110), delta1",
+          "published": "0.972",
+          "scale": 1,
+          "dataset": "bonn_all",
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9722860891085404,
+          "within_tolerance": true
+        },
+        {
+          "id": "t7_scannet_absrel",
+          "source": "Table 7 (appendix), row VDA-L (Ours), Scannet(90), AbsRel",
+          "published": "0.075",
+          "scale": 1,
+          "dataset": "scannet",
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.074726482335527,
+          "within_tolerance": true
+        },
+        {
+          "id": "t7_scannet_delta1",
+          "source": "Table 7 (appendix), row VDA-L (Ours), Scannet(90), delta1",
+          "published": "0.954",
+          "scale": 1,
+          "dataset": "scannet",
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9547513157129288,
+          "within_tolerance": true
+        }
+      ],
+      "runs": [
+        {
+          "date": "2026-10-03T23:07:35",
+          "commit": "e4a9013+dirty",
+          "job_id": "6321742",
+          "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-03T23:23:27",
+          "commit": "e4a9013+dirty",
+          "job_id": "6321743",
+          "host": "erph1709"
+        },
+        {
+          "date": "2026-10-04T01:51:59",
+          "commit": "e4a9013+dirty",
+          "job_id": "6322814",
+          "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-05T01:06:54",
+          "job_id": "none",
+          "note": "targets retargeted to bonn_all / bonn_all_500 / sintel_bgr and TAE to 100 scenes; their measured values cleared"
+        },
+        {
+          "date": "2026-10-05T02:39:14",
+          "commit": "e4a9013+dirty",
+          "job_id": "6329345",
+          "host": "erph1709"
+        },
+        {
+          "date": "2026-10-05T03:01:35",
+          "commit": "e4a9013+dirty",
+          "job_id": "6329347",
+          "host": "clrv1205"
+        }
+      ]
+    },
+    "vda_metric": {
+      "name": "Metric Video Depth Anything (Metric-VDA-L)",
+      "paper": "none: the metric models postdate arXiv:2501.12375; the only published numbers are the upstream README release notes (2025-08-28)",
+      "code": {
+        "repo": "https://github.com/DepthAnything/Video-Depth-Anything",
+        "commit": "4f5ae23172ba60fd7bc11ef671cca678842c7072"
+      },
+      "weights": {
+        "hf_repo": "depth-anything/Metric-Video-Depth-Anything-Large",
+        "file": "metric_video_depth_anything_vitl.pth",
+        "license": "CC-BY-NC-4.0"
+      },
+      "settings": "as vda, with metric=True (no window alignment). The README does not state split, frame cap or alignment; ASSUMED: delta1 without alignment on the 500-frame split, TAE as eval_tae.sh.",
+      "status": "failed",
+      "status_note": "Not reproduced; README protocol unrecoverable. What was established (jobs 6329352, 6329880, 6333457; upstream git history): the metric model's own inference code at the time of the README table (metric_depth/video_depth.py, 2025-08-29) is the shared code of today, aspect shrink included, and the L checkpoint on HF (2025-04-22) predates the table, so code and weights are theirs. Raw metric delta1 is 0.344-0.366 on KITTI (full frame; the aspect shrink to a 280 px short side changes the scale: median gt/pred 0.77; a 16:9 centre crop gives 0.953) and 0.5835 on our NYUv2 stills (480x640, no shrink; AbsRel 0.25, a scale error on indoor data). With a per-video scale alignment: KITTI-500 0.9218 (scale-only LSQ) / 0.9318 (median), NYUv2 0.9448 / 0.9541 -- the README's 0.910 / 0.908 sit in that range but match no single alignment, and the README's NYU is its 8-scene 500-frame video split, not built here. Undoing the shrink at full width runs out of memory on an 80 GB H100. CONSEQUENCE: this arm's absolute scale depends on input resolution and camera, so in our `metric` table it is only meaningful with the input convention stated, and not on frames wider than 16:9 uncropped.",
+      "targets": [
+        {
+          "id": "readme_kitti_delta1",
+          "source": "README release notes 2025-08-28, column VDA-L-Metric, row KITTI (delta1)",
+          "published": "0.910",
+          "scale": 1,
+          "dataset": "kitti_500",
+          "protocol": "metric",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.34358291886746883,
+          "within_tolerance": false
+        },
+        {
+          "id": "readme_nyuv2_delta1",
+          "source": "README release notes 2025-08-28, column VDA-L-Metric, row NYUv2 (delta1)",
+          "published": "0.908",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "metric",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "NYUv2 video split not built (see vda t1_nyuv2_absrel)."
+        },
+        {
+          "id": "readme_scannet_tae",
+          "source": "README release notes 2025-08-28, column VDA-L-Metric, row TAE Scannet",
+          "published": "1.09",
+          "scale": 1,
+          "dataset": "scannet",
+          "protocol": "tae",
+          "metric": "tae_vda",
+          "gate": true,
+          "measured": 1.061593611939162,
+          "within_tolerance": false
+        }
+      ],
+      "runs": [
+        {
+          "date": "2026-10-04T00:01:11",
+          "commit": "e4a9013+dirty",
+          "job_id": "6322420",
+          "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-04T00:53:05",
+          "commit": "e4a9013+dirty",
+          "job_id": "6322815",
+          "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-05T01:06:54",
+          "job_id": "none",
+          "note": "TAE scene set changed to 100; measured value cleared"
+        },
+        {
+          "date": "2026-10-05T03:36:47",
+          "commit": "e4a9013+dirty",
+          "job_id": "6329346",
+          "host": "erph1709"
+        }
+      ]
+    },
+    "dav": {
+      "name": "Depth Any Video",
+      "paper": "arXiv:2410.10815v2",
+      "code": {
+        "repo": "https://github.com/Nightmare-n/DepthAnyVideo",
+        "commit": "3592f8c5e427327a31cf1f3775e69cc3f2f26309"
+      },
+      "weights": {
+        "hf_repo": "hhyangcs/depth-any-video",
+        "file": "(diffusers layout: unet, unet_interp, vae, scheduler)",
+        "license": "Apache-2.0 (model card); code is CC-BY-NC-4.0"
+      },
+      "settings": "Sec. 4.2: 3 denoising steps, ensemble size 20, per-image scale+shift. The released pipeline has NO ensembling; the arm runs one pass (seed 0). The alignment space is not stated; the arm's native disparity is assumed (our `published` protocol on one-frame sequences). NYUv2 as `nyuv2_full`: the whole 480x640 frame in (a multiple of 32, so upstream's centre crop is a no-op), scored inside the Eigen crop.",
+      "status": "failed",
+      "status_note": "Not reproducible from the release: NYUv2 6.64 / 94.65 vs 5.1 / 97.0 (full 480x640 frame, Eigen crop, per-image scale+shift in disparity). One variable at a time (jobs 6329351, 6329855; offline analysis of 10 saved seeds per image): ensembling 10 seeds 6.18 / 95.12 (mean) and saturating, so the paper's ensemble of 20 does not close it; fitting in depth space as Marigold does 13.2 / 84.0; R/B-swapped input 6.81; input upscaled to 768x1024 7.41; 1 step 6.75; 10 steps 6.93. No evaluation or data code is released; the remaining candidates (the released checkpoint differing from the paper's, an unreleased ensembling/alignment procedure) cannot be tested.",
+      "targets": [
+        {
+          "id": "t2_nyuv2_absrel",
+          "source": "Table 2, row Depth Any Video (Ours), NYUv2, AbsRel",
+          "published": "5.1",
+          "scale": 100,
+          "dataset": "nyuv2_full",
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.0663863398235486,
+          "within_tolerance": false
+        },
+        {
+          "id": "t2_nyuv2_delta1",
+          "source": "Table 2, row Depth Any Video (Ours), NYUv2, delta1",
+          "published": "97.0",
+          "scale": 100,
+          "dataset": "nyuv2_full",
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9465326486833234,
+          "within_tolerance": false
+        },
+        {
+          "id": "t2_kitti_absrel",
+          "source": "Table 2, row Depth Any Video (Ours), KITTI, AbsRel",
+          "published": "7.3",
+          "scale": 100,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "Single-frame KITTI Eigen test split (652 images, Marigold protocol) is not built here."
+        },
+        {
+          "id": "t2_kitti_delta1",
+          "source": "Table 2, row Depth Any Video (Ours), KITTI, delta1",
+          "published": "95.1",
+          "scale": 100,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "as t2_kitti_absrel"
+        },
+        {
+          "id": "t2_eth3d_absrel",
+          "source": "Table 2, row Depth Any Video (Ours), ETH3D, AbsRel",
+          "published": "4.7",
+          "scale": 100,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "ETH3D is not on Lustre."
+        },
+        {
+          "id": "t2_eth3d_delta1",
+          "source": "Table 2, row Depth Any Video (Ours), ETH3D, delta1",
+          "published": "97.9",
+          "scale": 100,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "as t2_eth3d_absrel"
+        },
+        {
+          "id": "t2_scannet_absrel",
+          "source": "Table 2, row Depth Any Video (Ours), ScanNet, AbsRel",
+          "published": "5.3",
+          "scale": 100,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "Marigold's 800-image ScanNet validation split is not built here (Lustre holds scans_test)."
+        },
+        {
+          "id": "t2_scannet_delta1",
+          "source": "Table 2, row Depth Any Video (Ours), ScanNet, delta1",
+          "published": "96.6",
+          "scale": 100,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "as t2_scannet_absrel"
+        },
+        {
+          "id": "video_scannetpp_absrel",
+          "source": "Unnumbered table 'Temporal consistency and spatial accuracy comparisons on ScanNet++', row Depth Any Video (Ours), AbsRel",
+          "published": "9.3",
+          "scale": 100,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "98 ScanNet++ clips of 32 frames; the clip list is not published."
+        },
+        {
+          "id": "video_scannetpp_delta1",
+          "source": "same table, delta1",
+          "published": "93.4",
+          "scale": 100,
+          "dataset": null,
+          "protocol": "published",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "as video_scannetpp_absrel"
+        },
+        {
+          "id": "video_scannetpp_tae",
+          "source": "same table, TAE",
+          "published": "2.1",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "tae",
+          "metric": "tae_vda",
+          "gate": false,
+          "why_not_gating": "as video_scannetpp_absrel"
+        }
+      ],
+      "reference_only": [
+        {
+          "source": "VDA paper (arXiv:2501.12375v3) Table 7, row DepthAnyVideo",
+          "values": {
+            "kitti(110)": "0.073 / 0.957",
+            "bonn(110)": "0.051 / 0.981",
+            "scannet(90)": "0.112 / 0.883"
+          }
+        },
+        {
+          "source": "VDA paper Table 1, row DepthAnyVideo",
+          "values": {
+            "sintel": "0.405 / 0.659",
+            "scannet TAE": "0.967"
+          }
+        }
+      ],
+      "runs": [
+        {
+          "date": "2026-10-03T23:05:12",
+          "commit": "e4a9013+dirty",
+          "job_id": "6321845",
+          "host": "clrv1205"
+        }
+      ]
+    },
+    "ovda": {
+      "name": "Online Video Depth Anything (oVDA-small, context 16)",
+      "paper": "arXiv:2510.09182v1",
+      "code": {
+        "repo": "https://github.com/FriedFeid/OnlineVideoDepthAnything",
+        "commit": "4173c24e22f528062a0cf8ae235c58a5d4376a74"
+      },
+      "weights": {
+        "hf_repo": "FriedFeid/oVDA",
+        "file": "oVDA_c16.pth",
+        "license": "NC-SA-UHDV1.0 (Heidelberg University, non-commercial, share-alike)"
+      },
+      "settings": "Sec. 4: full-length sequences, max depth 80 m, prediction resized to the dataset resolution, scale+shift in inverse depth fitted on the FIRST frame only (Table 1) or on all frames (Table 8). input_size 518 gives the 280x924 the paper lists for KITTI; the '329x924' it lists for Sintel is not a multiple of 14 and is read as 392x924. Both tables are scored with the released align_utils semantics (a negative aligned inverse depth scores as depth 0), Table 8 as protocol `ovda_global`. GT beyond 80 m is clipped to 80 m and scored, as the Table 1 caption says (first two runs masked it out instead). The per-frame reduction and the Sintel pass are not stated; VDA's reduction and the clean pass are used.",
+      "status": "failed",
+      "status_note": "Sintel global table (Table 8) reproduced: 0.2943 / 0.6074 vs 0.294 / 0.604. Sintel first-frame table (Table 1) not: 0.3470 / 0.5312 vs 0.380 / 0.548. One variable at a time: R/B-swapped input 0.3506 / 0.5254 (job 6329350); fp16 0.3467 / 0.5313 (job 6329933); final pass 0.3849 / 0.5366 but then global 0.3096 / 0.5859; 12 combinations of fit mask x scored GT range x negative-disparity handling, offline -- none reproduces both tables. Bonn: the paper's average length (1118) identifies all 26 sequences; first-500 global gives 0.0858 / 0.9537 with index pairing and 0.0830 / 0.9573 with timestamp pairing (job 6329879) vs 0.079 / 0.961 (5 DepthCrafter sequences: 0.0967). KITTI: sequence set still unidentified (paper average 311 frames; the 13 validation drives average 263.5). No evaluation or data code is released.",
+      "targets": [
+        {
+          "id": "t1_sintel_absrel",
+          "source": "Table 1, row Our oVDA, Sintel, AbsRel (first-frame alignment)",
+          "published": "0.380",
+          "scale": 1,
+          "dataset": "sintel",
+          "protocol": "first_frame",
+          "metric": "abs_rel",
+          "max_depth": 80.0,
+          "gate": true,
+          "measured": 0.34695674082775196,
+          "within_tolerance": false
+        },
+        {
+          "id": "t1_sintel_delta1",
+          "source": "Table 1, row Our oVDA, Sintel, delta1 (first-frame alignment)",
+          "published": "0.548",
+          "scale": 1,
+          "dataset": "sintel",
+          "protocol": "first_frame",
+          "metric": "delta1",
+          "max_depth": 80.0,
+          "gate": true,
+          "measured": 0.5312020973018978,
+          "within_tolerance": false
+        },
+        {
+          "id": "t8_sintel_absrel",
+          "source": "Table 8 (supplement), row Our oVDA, Sintel, AbsRel (global alignment, all frames)",
+          "published": "0.294",
+          "scale": 1,
+          "dataset": "sintel",
+          "protocol": "ovda_global",
+          "metric": "abs_rel",
+          "max_depth": 80.0,
+          "gate": true,
+          "measured": 0.29426756850421354,
+          "within_tolerance": true
+        },
+        {
+          "id": "t8_sintel_delta1",
+          "source": "Table 8 (supplement), row Our oVDA, Sintel, delta1 (global alignment, all frames)",
+          "published": "0.604",
+          "scale": 1,
+          "dataset": "sintel",
+          "protocol": "ovda_global",
+          "metric": "delta1",
+          "max_depth": 80.0,
+          "gate": true,
+          "measured": 0.6074394402296647,
+          "within_tolerance": true
+        },
+        {
+          "id": "t8_kitti500_absrel",
+          "source": "Table 8 (supplement), row Our oVDA, KITTI, AbsRel, '500' column (global alignment, first 500 frames)",
+          "published": "0.103",
+          "scale": 1,
+          "dataset": "kitti_500",
+          "protocol": "ovda_global",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "Sequence list unpublished; run on the 13 DepthCrafter drives as a diagnostic only.",
+          "measured": 0.09728440325853208,
+          "within_tolerance": false
+        },
+        {
+          "id": "t8_kitti500_delta1",
+          "source": "Table 8 (supplement), row Our oVDA, KITTI, delta1, '500' column",
+          "published": "0.894",
+          "scale": 1,
+          "dataset": "kitti_500",
+          "protocol": "ovda_global",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "as t8_kitti500_absrel",
+          "measured": 0.9155842065811157,
+          "within_tolerance": false
+        },
+        {
+          "id": "t8_bonn500_absrel",
+          "source": "Table 8 (supplement), row Our oVDA, Bonn, AbsRel, '500' column",
+          "published": "0.079",
+          "scale": 1,
+          "dataset": "bonn_all_500",
+          "protocol": "ovda_global",
+          "metric": "abs_rel",
+          "max_depth": 80.0,
+          "gate": false,
+          "why_not_gating": "Sequence set identified after the fact: the paper's average Bonn length (1118) is the mean depth-frame count of all 26 sequences (1117.8). Run on bonn_all_500 as a check; not gating until reviewed.",
+          "measured": 0.08579569348664012,
+          "within_tolerance": false
+        },
+        {
+          "id": "t8_bonn500_delta1",
+          "source": "Table 8 (supplement), row Our oVDA, Bonn, delta1, '500' column",
+          "published": "0.961",
+          "scale": 1,
+          "dataset": "bonn_all_500",
+          "protocol": "ovda_global",
+          "metric": "delta1",
+          "max_depth": 80.0,
+          "gate": false,
+          "why_not_gating": "Sequence set identified after the fact: the paper's average Bonn length (1118) is the mean depth-frame count of all 26 sequences (1117.8). Run on bonn_all_500 as a check; not gating until reviewed.",
+          "measured": 0.953659325838089,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_kitti_absrel",
+          "source": "Table 1, row Our oVDA, KITTI, AbsRel (first-frame alignment, full length)",
+          "published": "0.140",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "first_frame",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "Sequence list unpublished and no full-length manifest is built."
+        },
+        {
+          "id": "t1_kitti_delta1",
+          "source": "Table 1, row Our oVDA, KITTI, delta1",
+          "published": "0.809",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "first_frame",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "as t1_kitti_absrel"
+        },
+        {
+          "id": "t1_bonn_absrel",
+          "source": "Table 1, row Our oVDA, Bonn, AbsRel (first-frame alignment, full length)",
+          "published": "0.118",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "first_frame",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "as t1_kitti_absrel"
+        },
+        {
+          "id": "t1_bonn_delta1",
+          "source": "Table 1, row Our oVDA, Bonn, delta1",
+          "published": "0.871",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "first_frame",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "as t1_kitti_absrel"
+        }
+      ],
+      "runs": [
+        {
+          "date": "2026-10-03T21:13:12",
+          "commit": "e4a9013+dirty",
+          "job_id": "6321740",
+          "host": "clrv1103",
+          "note": "t8_* rows of this run were scored with VDA's `published` alignment (inverse depth floored, depth clipped to max): Sintel global AbsRel 0.4016, worse than first-frame 0.3658, which the paper's own ordering excludes. Protocol corrected to the released oVDA alignment (`ovda_global`) and rerun; no tolerance or target was changed."
+        },
+        {
+          "date": "2026-10-03T21:28:43",
+          "commit": "e4a9013+dirty",
+          "job_id": "6321768",
+          "host": "clrv1103",
+          "note": "Scored with GT beyond 80 m MASKED: Sintel global 0.3047 / 0.5815 vs 0.294 / 0.604. Diagnostic job 6321823 saved the Sintel predictions; rescored offline, CLIPPING GT to 80 m (the caption's wording) gives global 0.2943 / 0.6074, within tolerance. Protocol corrected to clip; rerun."
+        },
+        {
+          "date": "2026-10-04T00:18:23",
+          "commit": "e4a9013+dirty",
+          "job_id": "6322718",
+          "host": "clrv1107"
+        },
+        {
+          "date": "2026-10-05T01:06:54",
+          "job_id": "none",
+          "note": "Bonn diagnostic rows retargeted to bonn_all_500; measured values cleared"
+        },
+        {
+          "date": "2026-10-05T01:47:51",
+          "commit": "e4a9013+dirty",
+          "job_id": "6329349",
+          "host": "clrv1103"
+        }
+      ]
+    },
+    "promptda": {
+      "name": "Prompt Depth Anything (ViT-L)",
+      "paper": "arXiv:2412.14015v4",
+      "code": {
+        "repo": "https://github.com/fmz/PromptDA (branch inference-script), derived from https://github.com/DepthAnything/PromptDA",
+        "commit": "d289d43"
+      },
+      "weights": {
+        "hf_repo": "depth-anything/prompt-depth-anything-vitl",
+        "file": "model.ckpt",
+        "license": "Apache-2.0"
+      },
+      "settings": "Sec. 4.1: ARKitScenes depth-upsampling protocol (ARKitScenes paper), Validation fold (5,599 images): 192x256 ARKit depth as the prompt, laser-scan highres depth as GT, evaluated at 384x512 / 768x1024 / 1440x1920. No evaluation code is released; ASSUMED from apple/ARKitScenes depth_upsampling/dataset.py: GT nearest-resized to the evaluated size, frames rotated upright by sky_direction, L1 and RMSE in metres over GT > 0, mean over images. Inference is upstream's default (io_wrapper.load_image: long side capped at 1008, i.e. 756x1008), ONE prediction per frame, bilinearly resized to each evaluated size.",
+      "status": "failed",
+      "status_note": "Within 5.1% on all six targets, three within tolerance (job 6322208): 384x512 0.0132 / 0.0317 vs 0.0135 / 0.0326; 768x1024 0.0131 / 0.0312 vs 0.0132 / 0.0315; 1440x1920 0.0131 / 0.0311 vs 0.0138 / 0.0316. One variable at a time on the first 20 videos (jobs 6329348, 6329881; change in L1 / RMSE vs the one-inference base): inference at each column's size +21% / +12% at 384 and +19% / +11% at 1440 (ruled out; +1.2% / +2.6% at 768); no upright rotation +21% / +10% (ruled out); R/B-swapped input +2.1% / +2.0% in every column; ARKit prompt resized to 180x240 at 1440, as Apple's x8 loader does, +2.1% / +0.5%; prediction resized nearest +1.4% / +4.2% at 384, cubic +0.1% / +1.0%; validity gt > 0.01 m: no change. The paper differs from our base by +2.3% / +2.8% (384), +0.8% / +1.0% (768), +5.3% / +1.6% (1440): no single variable gives that pattern, and none was adopted. No evaluation code is released.",
+      "targets": [
+        {
+          "id": "t1_384_l1",
+          "source": "Table 1, row Ours (non-zero-shot), 384x512, L1",
+          "published": "0.0135",
+          "scale": 1,
+          "dataset": "arkit_upsampling_384",
+          "protocol": "metric",
+          "metric": "l1",
+          "gate": true,
+          "measured": 0.013207715306930452,
+          "within_tolerance": false
+        },
+        {
+          "id": "t1_384_rmse",
+          "source": "Table 1, row Ours (non-zero-shot), 384x512, RMSE",
+          "published": "0.0326",
+          "scale": 1,
+          "dataset": "arkit_upsampling_384",
+          "protocol": "metric",
+          "metric": "rmse",
+          "gate": true,
+          "measured": 0.03172034839921653,
+          "within_tolerance": false
+        },
+        {
+          "id": "t1_768_l1",
+          "source": "Table 1, row Ours (non-zero-shot), 768x1024, L1",
+          "published": "0.0132",
+          "scale": 1,
+          "dataset": "arkit_upsampling_768",
+          "protocol": "metric",
+          "metric": "l1",
+          "gate": true,
+          "measured": 0.013096946364958327,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_768_rmse",
+          "source": "Table 1, row Ours (non-zero-shot), 768x1024, RMSE",
+          "published": "0.0315",
+          "scale": 1,
+          "dataset": "arkit_upsampling_768",
+          "protocol": "metric",
+          "metric": "rmse",
+          "gate": true,
+          "measured": 0.031205377008709238,
+          "within_tolerance": true
+        },
+        {
+          "id": "t1_1440_l1",
+          "source": "Table 1, row Ours (non-zero-shot), 1440x1920, L1",
+          "published": "0.0138",
+          "scale": 1,
+          "dataset": "arkit_upsampling_1440",
+          "protocol": "metric",
+          "metric": "l1",
+          "gate": true,
+          "measured": 0.013072952737356359,
+          "within_tolerance": false
+        },
+        {
+          "id": "t1_1440_rmse",
+          "source": "Table 1, row Ours (non-zero-shot), 1440x1920, RMSE",
+          "published": "0.0316",
+          "scale": 1,
+          "dataset": "arkit_upsampling_1440",
+          "protocol": "metric",
+          "metric": "rmse",
+          "gate": true,
+          "measured": 0.031053561195955644,
+          "within_tolerance": true
+        },
+        {
+          "id": "t2_scannetpp_l1",
+          "source": "Table 2, row Ours (non-zero-shot), ScanNet++, L1",
+          "published": "0.0250",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "metric",
+          "metric": "l1",
+          "gate": false,
+          "why_not_gating": "20 scenes drawn at random from the 50 ScanNet++ validation scenes; the list is not published."
+        },
+        {
+          "id": "t2_scannetpp_rmse",
+          "source": "Table 2, row Ours (non-zero-shot), ScanNet++, RMSE",
+          "published": "0.0829",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "metric",
+          "metric": "rmse",
+          "gate": false,
+          "why_not_gating": "as t2_scannetpp_l1"
+        },
+        {
+          "id": "t2_scannetpp_absrel",
+          "source": "Table 2, row Ours (non-zero-shot), ScanNet++, AbsRel",
+          "published": "0.0175",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "metric",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "as t2_scannetpp_l1"
+        },
+        {
+          "id": "t2_scannetpp_delta05",
+          "source": "Table 2, row Ours (non-zero-shot), ScanNet++, delta0.5",
+          "published": "0.9781",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "metric",
+          "metric": "delta05",
+          "gate": false,
+          "why_not_gating": "as t2_scannetpp_l1"
+        }
+      ],
+      "runs": [
+        {
+          "date": "2026-10-03T22:53:40",
+          "commit": "e4a9013+dirty",
+          "job_id": "6321821",
+          "host": "clrv1107",
+          "note": "This run resized the RGB to each evaluated size before inference (378x504 for the 384x512 column). 768x1024 reproduced (0.0133 / 0.0319 vs 0.0132 / 0.0315); 384x512 did not (0.0161 / 0.0359 vs 0.0135 / 0.0326). Cause: the table's columns are evaluation resolutions of one prediction, not three inference resolutions -- upstream's loader always infers at long side <= 1008, the paper's three columns differ by under 5%, and our 768 column, the only one inferred at upstream's size, matched. Runner changed to one upstream-sized inference per frame scored at each size; rerun. No tolerance or target changed."
+        },
+        {
+          "date": "2026-10-04T00:07:25",
+          "commit": "e4a9013+dirty",
+          "job_id": "6322208",
+          "host": "clrv1103"
+        }
+      ]
+    }
+  }
+}

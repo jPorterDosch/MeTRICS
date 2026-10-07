@@ -39,6 +39,18 @@ Bonn is restricted to the five sequences of DepthCrafter's meta_bonn.csv (the
 published 5 x 110 protocol; MonST3R's list differs by one sequence); VDA's
 extractor takes every directory it sees.
 
+Two more trees exist because of what reproducing VDA's own table showed
+(src/eval/baselines/reproduction.json, arm `vda`):
+  * bonn_all: all 26 Bonn sequences, which is what VDA's extractor takes when
+    pointed at the dataset root and what its Bonn numbers are over (the 5 above
+    are DepthCrafter's). Raw sequences under $EVAL_RAW/bonn_full
+    (datasets_download/download_bonn.sh with BONN_ALL=1); only each
+    sequence's first 500 frames are extracted, the most any manifest lists.
+  * sintel_bgr: the Sintel tree with R and B swapped on disk, i.e. the colour
+    files VDA's shipped extractor writes (see the colour shim above). Built
+    from the sintel tree; exists ONLY to reproduce VDA's published Sintel
+    number, which was computed on such input. Never a benchmark dataset.
+
 After extraction every manifest gets GT cameras (K + cam2world pose per
 frame, see benchmark_cameras.py) -- VDA's gen_json writes none. `--cameras`
 re-attaches them to manifests that already exist.
@@ -89,13 +101,18 @@ MANIFEST = {
     "bonn": "bonn/bonn_video.json",
     "scannet": "scannet/scannet_video.json",
     "nyuv2": "nyuv2/nyuv2_test.json",
+    "bonn_all": "bonn_all/bonn_all_video.json",
+    "sintel_bgr": "sintel_bgr/sintel_bgr_video.json",
 }
+# reproduction-only trees that carry no GT cameras
+NO_CAMERAS = ("sintel_bgr",)
 # VDA's 500-frame manifests, written by the same extractors; cameras are
 # attached to these too so the *_500 benchmark variants can score TAE
 MANIFEST_500 = {
     "kitti": "kitti/kitti_video_500.json",
     "bonn": "bonn/bonn_video_500.json",
     "scannet": "scannet/scannet_video_500.json",
+    "bonn_all": "bonn_all/bonn_all_video_500.json",
 }
 
 
@@ -217,6 +234,77 @@ def prepare_bonn(raw: Path, out: Path) -> None:
     )
 
 
+def _rename_manifest(src: Path, dst: Path, old_key: str, new_key: str) -> None:
+    with open(src) as f:
+        data = json.load(f)
+    with open(dst, "w") as f:
+        json.dump({new_key: data[old_key]}, f, indent=4)
+
+
+def prepare_bonn_all(raw: Path, out: Path) -> None:
+    """All 26 sequences, same extractor and shims as prepare_bonn. The
+    extractor only knows the dataset name "bonn" (it picks the depth factor by
+    it), so it writes into a scratch directory that is then renamed to
+    <out>/bonn_all, never touching <out>/bonn."""
+    src = _require(
+        raw / "bonn_full", "all Bonn sequences (download_bonn.sh BONN_ALL=1)"
+    )
+    name = "bonn_all"
+    if (out / name).exists():
+        raise FileExistsError(f"{out / name} exists; remove it to rebuild")
+    # stage the first 500 frames of each stream: `static` alone has 10,000
+    stage = raw / "bonn_full_500"
+    for seq in sorted(os.listdir(src)):
+        for sub in ("rgb", "depth"):
+            names = sorted(f for f in os.listdir(src / seq / sub) if f.endswith(".png"))
+            (stage / seq / sub).mkdir(parents=True, exist_ok=True)
+            for fn in names[:500]:
+                link = stage / seq / sub / fn
+                if not link.exists():
+                    os.symlink((src / seq / sub / fn).resolve(), link)
+    scratch = out / "_bonn_all_extract"
+    dataset_extract_bonn.extract_bonn(
+        root=str(stage),
+        depth_root=str(stage),
+        saved_dir=str(scratch) + "/",
+        sample_len=-1,
+        datatset_name="bonn",
+    )
+    os.rename(scratch / "bonn", out / name)
+    os.rmdir(scratch)
+    for old, new in (
+        ("bonn_video.json", MANIFEST[name]),
+        ("bonn_video_500.json", MANIFEST_500[name]),
+    ):
+        _rename_manifest(out / name / old, out / new, "bonn", name)
+        os.remove(out / name / old)
+
+
+def prepare_sintel_bgr(raw: Path, out: Path) -> None:
+    """The sintel tree's colour files with R and B swapped on disk, depth
+    symlinked: what VDA's extract_sintel emits (PIL RGB -> cv2.imwrite)."""
+    name = "sintel_bgr"
+    with open(
+        _require(out / MANIFEST["sintel"], "the sintel tree (prepare it first)")
+    ) as f:
+        data = json.load(f)
+    for entry in data["sintel"]:
+        for frames in entry.values():
+            for fr in frames:
+                img = cv2.imread(str(out / "sintel" / fr["image"]))
+                if img is None:
+                    raise FileNotFoundError(out / "sintel" / fr["image"])
+                dst = out / name / fr["image"]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(dst), np.ascontiguousarray(img[..., ::-1]))
+                depth = out / name / fr["gt_depth"]
+                depth.parent.mkdir(parents=True, exist_ok=True)
+                if not depth.exists():
+                    os.symlink((out / "sintel" / fr["gt_depth"]).resolve(), depth)
+    with open(out / MANIFEST[name], "w") as f:
+        json.dump({name: data["sintel"]}, f, indent=4)
+
+
 def prepare_scannet(raw: Path, out: Path) -> None:
     root = _require(
         raw / "scannet" / "scans_test",
@@ -252,6 +340,7 @@ def prepare_nyuv2(raw: Path, out: Path, expect: int = 654) -> None:
     name = "nyuv2"
     a, b, c, d = NYU_CROP
     entries = []
+    entries_full = []
     with h5py.File(str(labeled), "r") as f:
         images = f["images"]  # (N, 3, 640, 480) as stored
         depths = f["depths"]  # (N, 640, 480)
@@ -266,6 +355,12 @@ def prepare_nyuv2(raw: Path, out: Path, expect: int = 654) -> None:
             # RGB pre-cropped like copy_crop_files; depth full-size, the eval
             # crops it (VDA's eval.py a/b/c/d), exactly as for their nyuv2
             Image.fromarray(rgb[a:b, c:d]).save(out_img)
+            # the uncropped frame too (nyuv2_full): single-image protocols
+            # (Marigold's, which Depth Any Video reports) feed the whole
+            # 480x640 image and score inside the same crop
+            out_full = out / name / seq / "rgb_full" / f"{i:04d}.png"
+            out_full.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(rgb).save(out_full)
             scaled = np.clip(
                 np.round(depth.astype(np.float64) * NYU_FACTOR), 0, 65535
             ).astype(np.uint16)
@@ -275,8 +370,18 @@ def prepare_nyuv2(raw: Path, out: Path, expect: int = 654) -> None:
             entries.append(
                 {seq: [{"image": rel_img, "gt_depth": rel_depth, "factor": NYU_FACTOR}]}
             )
+            rel_full = str(out_full.relative_to(out / name))
+            entries_full.append(
+                {
+                    seq: [
+                        {"image": rel_full, "gt_depth": rel_depth, "factor": NYU_FACTOR}
+                    ]
+                }
+            )
     with open(out / MANIFEST[name], "w") as f:
         json.dump({name: entries}, f, indent=4)
+    with open(out / name / "nyuv2_test_full.json", "w") as f:
+        json.dump({name: entries_full}, f, indent=4)
 
 
 PREPARE = {
@@ -285,6 +390,8 @@ PREPARE = {
     "bonn": prepare_bonn,
     "scannet": prepare_scannet,
     "nyuv2": prepare_nyuv2,
+    "bonn_all": prepare_bonn_all,
+    "sintel_bgr": prepare_sintel_bgr,
 }
 
 
@@ -346,7 +453,8 @@ def main() -> int:
     )
     args = ap.parse_args()
     if not args.datasets:
-        args.datasets = list(PREPARE)
+        # the benchmark's five; bonn_all and sintel_bgr are built on request
+        args.datasets = ["sintel", "kitti", "bonn", "scannet", "nyuv2"]
     unknown = [d for d in args.datasets if d not in PREPARE]
     if unknown:
         ap.error(f"unknown datasets {unknown}; choose from {list(PREPARE)}")
@@ -356,6 +464,9 @@ def main() -> int:
     failed = []
     for name in args.datasets:
         manifest = out / MANIFEST[name]
+        if args.cameras and name in NO_CAMERAS:
+            print(f"== {name}: carries no cameras, skipping")
+            continue
         if args.cameras:
             if not manifest.is_file():
                 print(
@@ -385,7 +496,8 @@ def main() -> int:
                 f"== {name}: {check_manifest(out, name)} sequences -> {manifest}",
                 flush=True,
             )
-            print(f"== {name}: cameras {cameras_for(out, name, raw)}", flush=True)
+            if name not in NO_CAMERAS:
+                print(f"== {name}: cameras {cameras_for(out, name, raw)}", flush=True)
         except Exception as e:  # keep going: one dataset's raw layout problem should not cost the others
             failed.append(name)
             print(f"== {name}: FAILED: {e!r}", file=sys.stderr, flush=True)

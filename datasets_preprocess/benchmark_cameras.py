@@ -296,10 +296,11 @@ def _sequence_cameras(
             M, N = sintel_cam_read(cam_dir / (Path(fr["image"]).stem + ".cam"))
             out.append((M, sintel_pose(N)))
         return out
-    if name == "bonn":
-        traj = read_tum_trajectory(
-            raw / "bonn" / "rgbd_bonn_dataset" / seq / "groundtruth.txt"
+    if name in ("bonn", "bonn_all"):
+        seq_root = (
+            raw / "bonn" / "rgbd_bonn_dataset" if name == "bonn" else raw / "bonn_full"
         )
+        traj = read_tum_trajectory(seq_root / seq / "groundtruth.txt")
         return [
             (BONN_K, _bonn_pose_or_none(traj, float(Path(fr["image"]).stem)))
             for fr in frames

@@ -42,6 +42,8 @@ class BenchSpec:
     base: str | None = (
         None  # tree dir + json key when they differ from name (the *_500 variants)
     )
+    # the manifest lists UNCROPPED frames (see Sequence.rgb_uncropped)
+    rgb_uncropped: bool = False
 
     @property
     def dirname(self) -> str:
@@ -60,7 +62,11 @@ SPECS: dict[str, BenchSpec] = {
         90,
         True,
         tae_json="scannet/scannet_video_tae.json",
-        tae_scenes=20,
+        # VDA's eval_scenes_num is 20, taken from a manifest whose order is an
+        # unsorted glob -- an arbitrary, unrepeatable 20 of the 100 scenes, and
+        # per-scene TAE ranges 0.22-1.20, so a 20-scene mean moves by +-0.04
+        # with the draw. All 100 are scored instead.
+        tae_scenes=100,
         tae_range=(10, 180),
     ),
     "kitti": BenchSpec(
@@ -74,6 +80,45 @@ SPECS: dict[str, BenchSpec] = {
     # still its own one-frame "sequence", with VDA's NYU crop and factor.
     "nyuv2": BenchSpec(
         "nyuv2", "nyuv2/nyuv2_test.json", 10.0, (45, 471, 41, 601), 1, False
+    ),
+    # All 26 Bonn sequences: what VDA's Bonn numbers are over (its extractor
+    # takes every directory of the dataset; the 5 of `bonn` are
+    # DepthCrafter's list). 110- and 500-frame protocols as for `bonn`.
+    "bonn_all": BenchSpec(
+        "bonn_all", "bonn_all/bonn_all_video.json", 10.0, (0, 480, 0, 640), 110, True
+    ),
+    "bonn_all_500": BenchSpec(
+        "bonn_all_500",
+        "bonn_all/bonn_all_video_500.json",
+        10.0,
+        (0, 480, 0, 640),
+        500,
+        True,
+        base="bonn_all",
+    ),
+    # Sintel with R and B swapped on disk, as VDA's shipped extractor writes
+    # its colour files. Only to reproduce VDA's published Sintel number; the
+    # benchmark's `sintel` has true colours.
+    "sintel_bgr": BenchSpec(
+        "sintel_bgr",
+        "sintel_bgr/sintel_bgr_video.json",
+        70.0,
+        (0, 436, 0, 1024),
+        100,
+        True,
+    ),
+    # the same 654 stills with the whole 480x640 frame as input and the same
+    # crop for scoring: the single-image protocol (Marigold's) that Depth Any
+    # Video reports. Only used to reproduce that table.
+    "nyuv2_full": BenchSpec(
+        "nyuv2_full",
+        "nyuv2/nyuv2_test_full.json",
+        10.0,
+        (45, 471, 41, 601),
+        1,
+        False,
+        base="nyuv2",
+        rgb_uncropped=True,
     ),
     # VDA's headline (Table 1) protocol: up to 500 frames per video, from the
     # *_video_500.json manifests their extractor writes alongside the short
@@ -143,10 +188,14 @@ def _as_K3(K) -> np.ndarray:
     return K
 
 
-def load_manifest(root: Path, spec: BenchSpec, tae: bool = False) -> list[Sequence]:
+def load_manifest(
+    root: Path, spec: BenchSpec, tae: bool = False, tae_slice: bool = True
+) -> list[Sequence]:
     """Every sequence of the manifest, frames truncated to the protocol's
     count (spec.max_len, or the TAE frame range for the TAE manifest --
-    VDA's eval slices [start_idx:end_idx] after loading)."""
+    VDA's eval slices [start_idx:end_idx] after loading). tae_slice=False
+    keeps every listed TAE frame, for a caller that -- like VDA's own
+    infer.py -- runs the model on all of them and slices the prediction."""
     rel = spec.tae_json if tae else spec.json
     if rel is None:
         raise ValueError(f"{spec.name} has no TAE manifest")
@@ -169,14 +218,15 @@ def load_manifest(root: Path, spec: BenchSpec, tae: bool = False) -> list[Sequen
             )
         ((name, frames),) = entry.items()
         if tae:
-            lo, hi = spec.tae_range
-            frames = frames[lo:hi]
+            if tae_slice:
+                lo, hi = spec.tae_range
+                frames = frames[lo:hi]
         else:
             frames = frames[: spec.max_len]
         seq = Sequence(
             spec.name,
             name,
-            rgb_uncropped=tae,
+            rgb_uncropped=tae or spec.rgb_uncropped,
             frames=[
                 Frame(
                     ds_root / fr["image"],

@@ -12,7 +12,7 @@ bidirectionally). The full forward also materialises an [S*P, S*P] mask
 Called once from finetune_depth.run() after the streaming eval (and in the
 --epochs 0 pure-eval path), never per epoch. Everything is logged under
 "final_bench/<dataset>/<mode>/d<density%>/<protocol>_<metric>" next to the
-val_* / final_stream series, and written to <output_dir>/bench_results.json
+val_* series, and written to <output_dir>/bench_results.json
 with the per-sequence rows behind every mean.
 
 Protocol definitions live in eval.protocols; dataset constants and loading
@@ -82,7 +82,10 @@ class BenchmarkCfg:
     enabled: bool = False
     root: Path = _BENCH_ROOT
     """Benchmark tree from datasets_preprocess/prepare_vda_benchmark.py."""
-    datasets: tuple[str, ...] = ("sintel", "scannet", "kitti", "bonn", "nyuv2")
+    datasets: tuple[str, ...] = ("sintel", "scannet", "kitti", "bonn_all", "nyuv2")
+    """bonn_all (all 26 Bonn sequences) is what Video Depth Anything's Bonn
+    numbers are over; `bonn` is DepthCrafter's 5-sequence list, kept for that
+    comparison (see README, "What reproducing VDA showed about the data")."""
     densities: tuple[float, ...] = (0.01, 0.05, 0.40)
     """Sparse depth densities (fraction of patches visible) swept per sequence. 5%
     is the training density; 40% is SPOT's real sensor."""
@@ -90,14 +93,16 @@ class BenchmarkCfg:
         "sintel",
         "scannet",
         "kitti",
-        "bonn",
+        "bonn_all",
         "scannet_500",
         "kitti_500",
+        "bonn_all_500",
+        "bonn",
         "bonn_500",
     )
     """Datasets scored for TAE (both definitions), per density -- every video
     dataset, whenever it is also in `datasets`. ScanNet uses VDA's TAE
-    manifest (20 x 170 consecutive frames, its own pass; the only split VDA
+    manifest (100 x 170 consecutive frames, its own pass; the only split VDA
     reports TAE on); every other one is scored on the predictions of its
     main pass with the GT cameras the preparer attached, so those rows are
     ours-only until the baselines are run."""
@@ -235,6 +240,15 @@ class Prediction:
     conf: np.ndarray  # [S,h,w]
     w2c: np.ndarray  # [S,3,4] predicted world->cam
     K: np.ndarray  # [S,3,3] predicted intrinsics at model resolution
+    output: str = "depth"
+    """"depth" (metres) or "disparity": a baseline's native output, held in
+    `depth` as-is. Decides how the protocols read it (score_sequence); only
+    a depth output can be scored under `metric`."""
+    at_gt: np.ndarray | None = None
+    """The same prediction already on the GT grid [S,H,W], when the caller
+    has it at a better resolution than `depth` (a baseline predicting at
+    frame resolution): `published` / `metric` / TAE then use it instead of
+    resizing `depth` up again. `depth` stays the sparse-fit copy."""
 
 
 def predict(net, accelerator: Accelerator, views: list[dict]) -> Prediction:
@@ -288,11 +302,14 @@ def score_sequence(
     the published-aligned depth, which score_tae_sequence takes so the
     resize + per-video least squares run once per (sequence, density)."""
     H, W = gt.shape[1:]
-    pred_gt = resize_to_gt(pred.depth, (H, W))
+    pred_gt = pred.at_gt if pred.at_gt is not None else resize_to_gt(pred.depth, (H, W))
+    if pred_gt.shape != gt.shape:
+        raise ValueError(f"prediction {pred_gt.shape} does not match gt {gt.shape}")
     sparse_depth, sparse_mask = _sparse_arrays(views)
     sparse_mask_gt = sparse_mask_to_gt(sparse_mask, (H, W))
+    disparity = pred.output == "disparity"
     published, aligned = P.published_metrics(
-        P.depth_to_disparity(pred_gt), gt, spec.max_depth
+        P.as_disparity(pred_gt, pred.output), gt, spec.max_depth
     )
     sparse = P.sparse_aligned_metrics(
         pred.depth,
@@ -302,8 +319,10 @@ def score_sequence(
         sparse_mask_gt,
         gt,
         spec.max_depth,
+        native_disparity=disparity,
     )
-    metric = P.metric_metrics(pred_gt, gt, spec.max_depth)
+    # an affine-invariant disparity has no metric scale: nothing to score
+    metric = P.EMPTY if disparity else P.metric_metrics(pred_gt, gt, spec.max_depth)
     row = {
         "dataset": spec.name,
         "sequence": seq.name,
@@ -347,9 +366,11 @@ def score_tae_sequence(
     published-aligned depth when the main pass already computed it."""
     H, W = gt.shape[1:]
     if aligned is None:
-        pred_gt = resize_to_gt(pred.depth, (H, W))
+        pred_gt = (
+            pred.at_gt if pred.at_gt is not None else resize_to_gt(pred.depth, (H, W))
+        )
         _, aligned = P.published_metrics(
-            P.depth_to_disparity(pred_gt), gt, spec.max_depth
+            P.as_disparity(pred_gt, pred.output), gt, spec.max_depth
         )
     Ks_raw = [fr.K for fr in seq.frames]
     if any(k is None for k in Ks_raw):
@@ -572,9 +593,7 @@ def _render_viewers(paths: list[Path], results: Path) -> None:
 # ---------------------------------------------------------------------------
 # aggregation
 # ---------------------------------------------------------------------------
-def _mean(values: list[float]) -> float:
-    vals = [v for v in values if v is not None and np.isfinite(v)]
-    return float(np.mean(vals)) if vals else float("nan")
+_mean = P.finite_mean
 
 
 def aggregate(rows: list[dict], tae_rows: list[dict]) -> dict[str, float]:

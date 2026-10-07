@@ -38,7 +38,7 @@ def driver() -> None:
     sys.path.insert(0, _SRC)
     sys.path.insert(0, _HERE)
 
-    # the entrypoint's progress lines ("Val Epoch: [0]", "Streaming eval:")
+    # the entrypoint's progress lines ("Val Epoch: [0]")
     # go through accelerate's get_logger; without a handler Python logging
     # drops INFO records silently and the orchestrator's stdout asserts can
     # never match, so give the driver an explicit stdout handler.
@@ -54,10 +54,8 @@ def driver() -> None:
     # downstream (accelerate.prepare, the epoch loop, saving, resume) is real.
     # build_train_loader is the module-level seam the train loop resolves at
     # call time, so replacing the attribute takes effect. It serves BOTH
-    # splits, so the val/streaming passes run on synthetic data too. The
-    # batch_size override (run() requests a batch-1 loader for streaming_eval
-    # when args.batch_size > 1) is ignored: synthetic_loader is already
-    # batch-1 by construction.
+    # splits, so the val pass runs on synthetic data too. The batch_size
+    # override is ignored: synthetic_loader is already batch-1 by construction.
     def fake_build_train_loader(args, split, accelerator, batch_size=None):
         # 224x224 (16x16 patch grid): large enough that the track head's
         # correlation pyramid does not pool down to 0x0 (it runs because
@@ -133,7 +131,6 @@ def run_checks() -> None:
             "mid-epoch checkpoint-last save never fired"
         )
         assert "Val Epoch: [0]" in rA.stdout, "val_loop never ran (val_freq=1 default)"
-        assert "Streaming eval:" in rA.stdout, "post-training streaming_eval never ran"
 
         # resolve_output_dir lays runs out as <save_dir>/<exp_group>/<run_id>
         group_dir = os.path.join(save_dir, "stage8")
@@ -150,7 +147,7 @@ def run_checks() -> None:
         ):
             assert os.path.isfile(os.path.join(out, fname)), f"missing {fname} in {out}"
         print(
-            "[stage8] run A: e2e train() completed; manifest + last + best checkpoints written; val + streaming eval ran"
+            "[stage8] run A: e2e train() completed; manifest + last + best checkpoints written; val ran"
         )
 
         # --- artifact is loadable from a process WITHOUT streamvggt on the path
@@ -184,8 +181,7 @@ def run_checks() -> None:
         # identical config. Resuming a completed 1-epoch run exercises the whole
         # path anyway: misc.load_model restores weights/optimizer/start_epoch,
         # the identity check passes against the owning manifest, the run
-        # continues INTO Run A's dir (no fork), and the post-training
-        # streaming eval runs again.
+        # continues INTO Run A's dir (no fork).
         rB = _run(
             {
                 **base_env,
@@ -200,9 +196,6 @@ def run_checks() -> None:
         new_dirs = os.listdir(group_dir) if os.path.isdir(group_dir) else []
         assert new_dirs == dirs, (
             f"resume forked a new output dir: {set(new_dirs) - set(dirs)}"
-        )
-        assert "Streaming eval:" in rB.stdout, (
-            "resumed run skipped the post-training streaming eval"
         )
         print(
             "[stage8] run B: --resume passed the identity check and continued INTO the same dir"
