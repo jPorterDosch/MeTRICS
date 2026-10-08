@@ -39,7 +39,8 @@
           "metric": "abs_rel",
           "gate": true,
           "measured": 0.08375992925040253,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t1_kitti_delta1",
@@ -51,7 +52,8 @@
           "metric": "delta1",
           "gate": true,
           "measured": 0.9400281997827383,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t1_scannet_absrel",
@@ -87,7 +89,8 @@
           "metric": "abs_rel",
           "gate": true,
           "measured": 0.0701842584123855,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t1_bonn_delta1",
@@ -99,7 +102,8 @@
           "metric": "delta1",
           "gate": true,
           "measured": 0.9615073547913477,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t1_nyuv2_absrel",
@@ -133,7 +137,8 @@
           "metric": "abs_rel",
           "gate": true,
           "measured": 0.29810527420735256,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t1_sintel_delta1",
@@ -145,7 +150,8 @@
           "metric": "delta1",
           "gate": true,
           "measured": 0.6393983927757844,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t1_scannet_tae",
@@ -169,7 +175,8 @@
           "metric": "abs_rel",
           "gate": true,
           "measured": 0.07964727056899842,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t7_kitti_delta1",
@@ -181,7 +188,8 @@
           "metric": "delta1",
           "gate": true,
           "measured": 0.9507544636726379,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t7_bonn_absrel",
@@ -193,7 +201,8 @@
           "metric": "abs_rel",
           "gate": true,
           "measured": 0.0532625429975652,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t7_bonn_delta1",
@@ -205,7 +214,8 @@
           "metric": "delta1",
           "gate": true,
           "measured": 0.9722860891085404,
-          "within_tolerance": true
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+1fb2f7a0"
         },
         {
           "id": "t7_scannet_absrel",
@@ -266,6 +276,12 @@
           "date": "2026-10-05T03:01:35",
           "commit": "e4a9013+dirty",
           "job_id": "6329347",
+          "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-08T02:53:00",
+          "commit": "0eed74f+1fb2f7a0",
+          "job_id": "6348526",
           "host": "clrv1205"
         }
       ]
@@ -526,159 +542,197 @@
         "file": "oVDA_c16.pth",
         "license": "NC-SA-UHDV1.0 (Heidelberg University, non-commercial, share-alike)"
       },
-      "settings": "Sec. 4: full-length sequences, max depth 80 m, prediction resized to the dataset resolution, scale+shift in inverse depth fitted on the FIRST frame only (Table 1) or on all frames (Table 8). input_size 518 gives the 280x924 the paper lists for KITTI; the '329x924' it lists for Sintel is not a multiple of 14 and is read as 392x924. Both tables are scored with the released align_utils semantics (a negative aligned inverse depth scores as depth 0), Table 8 as protocol `ovda_global`. GT beyond 80 m is clipped to 80 m and scored, as the Table 1 caption says (first two runs masked it out instead). The per-frame reduction and the Sintel pass are not stated; VDA's reduction and the clean pass are used.",
-      "status": "failed",
-      "status_note": "Sintel global table (Table 8) reproduced: 0.2943 / 0.6074 vs 0.294 / 0.604. Sintel first-frame table (Table 1) not: 0.3470 / 0.5312 vs 0.380 / 0.548. One variable at a time: R/B-swapped input 0.3506 / 0.5254 (job 6329350); fp16 0.3467 / 0.5313 (job 6329933); final pass 0.3849 / 0.5366 but then global 0.3096 / 0.5859; 12 combinations of fit mask x scored GT range x negative-disparity handling, offline -- none reproduces both tables. Bonn: the paper's average length (1118) identifies all 26 sequences; first-500 global gives 0.0858 / 0.9537 with index pairing and 0.0830 / 0.9573 with timestamp pairing (job 6329879) vs 0.079 / 0.961 (5 DepthCrafter sequences: 0.0967). KITTI: sequence set still unidentified (paper average 311 frames; the 13 validation drives average 263.5). No evaluation or data code is released.",
+      "settings": "The authors' own evaluation (third_party/ovda/evaluation, sent by the first author 2026-10-08), run through src/eval/ovda_paper.py: Sintel final pass with .dpt GT (23 sequences, 1064 frames); Bonn all 26 sequences, RGB/depth paired by timestamp (< 20 ms, greedy one-to-one; 29,064 pairs); KITTI the 138 data_depth_annotated/train drives, image_03 and image_02 as separate sequences (276 sequences, 85,898 frames), no crop. Only paired frames are fed; infer_video_depth(input_size=518) (fp32 here, fp16 in the paper). Their protocol: per-sequence fit of the inverse-depth prediction to 1/GT on frame 0 (ovda_first) or all frames (ovda_all), GT valid 0 < GT < limit (Sintel 10000, KITTI 255.9, Bonn 100 m) and unclipped in the fit, prediction clipped to [0, 80] m, scoring on GT < 80 m from frame 1, pixel-weighted over the dataset, delta1 <= 1.25.",
+      "status": "pending-gpu",
+      "status_note": "Retargeted 2026-10-08 to the authors' reference evaluation. Check before the retarget: their protocol.py on our saved Sintel final-pass predictions (job 6321823) gives first-frame 0.3799 / 0.5477 and global 0.2941 / 0.6035 against the paper's 0.380 / 0.548 and 0.294 / 0.604, so our inference was right and every earlier gap was scoring and data (the 'clip GT at 80 m' match of 2026-10-04 on the clean pass was two wrong settings cancelling). Needs a GPU run: Sintel and Bonn are on Lustre; KITTI needs the raw RGB of the 138 train drives.",
       "targets": [
         {
           "id": "t1_sintel_absrel",
           "source": "Table 1, row Our oVDA, Sintel, AbsRel (first-frame alignment)",
           "published": "0.380",
           "scale": 1,
-          "dataset": "sintel",
-          "protocol": "first_frame",
+          "dataset": "ovda_sintel",
+          "protocol": "ovda_first",
           "metric": "abs_rel",
-          "max_depth": 80.0,
           "gate": true,
-          "measured": 0.34695674082775196,
-          "within_tolerance": false
+          "measured": 0.3798716815270509,
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+645548fc"
         },
         {
           "id": "t1_sintel_delta1",
           "source": "Table 1, row Our oVDA, Sintel, delta1 (first-frame alignment)",
           "published": "0.548",
           "scale": 1,
-          "dataset": "sintel",
-          "protocol": "first_frame",
+          "dataset": "ovda_sintel",
+          "protocol": "ovda_first",
           "metric": "delta1",
-          "max_depth": 80.0,
           "gate": true,
-          "measured": 0.5312020973018978,
-          "within_tolerance": false
-        },
-        {
-          "id": "t8_sintel_absrel",
-          "source": "Table 8 (supplement), row Our oVDA, Sintel, AbsRel (global alignment, all frames)",
-          "published": "0.294",
-          "scale": 1,
-          "dataset": "sintel",
-          "protocol": "ovda_global",
-          "metric": "abs_rel",
-          "max_depth": 80.0,
-          "gate": true,
-          "measured": 0.29426756850421354,
-          "within_tolerance": true
-        },
-        {
-          "id": "t8_sintel_delta1",
-          "source": "Table 8 (supplement), row Our oVDA, Sintel, delta1 (global alignment, all frames)",
-          "published": "0.604",
-          "scale": 1,
-          "dataset": "sintel",
-          "protocol": "ovda_global",
-          "metric": "delta1",
-          "max_depth": 80.0,
-          "gate": true,
-          "measured": 0.6074394402296647,
-          "within_tolerance": true
-        },
-        {
-          "id": "t8_kitti500_absrel",
-          "source": "Table 8 (supplement), row Our oVDA, KITTI, AbsRel, '500' column (global alignment, first 500 frames)",
-          "published": "0.103",
-          "scale": 1,
-          "dataset": "kitti_500",
-          "protocol": "ovda_global",
-          "metric": "abs_rel",
-          "gate": false,
-          "why_not_gating": "Sequence list unpublished; run on the 13 DepthCrafter drives as a diagnostic only.",
-          "measured": 0.09728440325853208,
-          "within_tolerance": false
-        },
-        {
-          "id": "t8_kitti500_delta1",
-          "source": "Table 8 (supplement), row Our oVDA, KITTI, delta1, '500' column",
-          "published": "0.894",
-          "scale": 1,
-          "dataset": "kitti_500",
-          "protocol": "ovda_global",
-          "metric": "delta1",
-          "gate": false,
-          "why_not_gating": "as t8_kitti500_absrel",
-          "measured": 0.9155842065811157,
-          "within_tolerance": false
-        },
-        {
-          "id": "t8_bonn500_absrel",
-          "source": "Table 8 (supplement), row Our oVDA, Bonn, AbsRel, '500' column",
-          "published": "0.079",
-          "scale": 1,
-          "dataset": "bonn_all_500",
-          "protocol": "ovda_global",
-          "metric": "abs_rel",
-          "max_depth": 80.0,
-          "gate": false,
-          "why_not_gating": "Sequence set identified after the fact: the paper's average Bonn length (1118) is the mean depth-frame count of all 26 sequences (1117.8). Run on bonn_all_500 as a check; not gating until reviewed.",
-          "measured": 0.08579569348664012,
-          "within_tolerance": false
-        },
-        {
-          "id": "t8_bonn500_delta1",
-          "source": "Table 8 (supplement), row Our oVDA, Bonn, delta1, '500' column",
-          "published": "0.961",
-          "scale": 1,
-          "dataset": "bonn_all_500",
-          "protocol": "ovda_global",
-          "metric": "delta1",
-          "max_depth": 80.0,
-          "gate": false,
-          "why_not_gating": "Sequence set identified after the fact: the paper's average Bonn length (1118) is the mean depth-frame count of all 26 sequences (1117.8). Run on bonn_all_500 as a check; not gating until reviewed.",
-          "measured": 0.953659325838089,
-          "within_tolerance": true
+          "measured": 0.5476550756223459,
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+645548fc"
         },
         {
           "id": "t1_kitti_absrel",
           "source": "Table 1, row Our oVDA, KITTI, AbsRel (first-frame alignment, full length)",
           "published": "0.140",
           "scale": 1,
-          "dataset": null,
-          "protocol": "first_frame",
+          "dataset": "ovda_kitti",
+          "protocol": "ovda_first",
           "metric": "abs_rel",
-          "gate": false,
-          "why_not_gating": "Sequence list unpublished and no full-length manifest is built."
+          "gate": true
         },
         {
           "id": "t1_kitti_delta1",
           "source": "Table 1, row Our oVDA, KITTI, delta1",
           "published": "0.809",
           "scale": 1,
-          "dataset": null,
-          "protocol": "first_frame",
+          "dataset": "ovda_kitti",
+          "protocol": "ovda_first",
           "metric": "delta1",
-          "gate": false,
-          "why_not_gating": "as t1_kitti_absrel"
+          "gate": true
         },
         {
           "id": "t1_bonn_absrel",
           "source": "Table 1, row Our oVDA, Bonn, AbsRel (first-frame alignment, full length)",
           "published": "0.118",
           "scale": 1,
-          "dataset": null,
-          "protocol": "first_frame",
+          "dataset": "ovda_bonn",
+          "protocol": "ovda_first",
           "metric": "abs_rel",
-          "gate": false,
-          "why_not_gating": "as t1_kitti_absrel"
+          "gate": true,
+          "measured": 0.11828170766663341,
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+645548fc"
         },
         {
           "id": "t1_bonn_delta1",
           "source": "Table 1, row Our oVDA, Bonn, delta1",
           "published": "0.871",
           "scale": 1,
+          "dataset": "ovda_bonn",
+          "protocol": "ovda_first",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.8708126746726423,
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+645548fc"
+        },
+        {
+          "id": "t8_sintel_absrel",
+          "source": "Table 8 (supplement), row Our oVDA, Sintel, AbsRel (global alignment, all frames)",
+          "published": "0.294",
+          "scale": 1,
+          "dataset": "ovda_sintel",
+          "protocol": "ovda_all",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.2940774958429419,
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+645548fc"
+        },
+        {
+          "id": "t8_sintel_delta1",
+          "source": "Table 8 (supplement), row Our oVDA, Sintel, delta1 (global alignment, all frames)",
+          "published": "0.604",
+          "scale": 1,
+          "dataset": "ovda_sintel",
+          "protocol": "ovda_all",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.6034794212147627,
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+645548fc"
+        },
+        {
+          "id": "t8_kitti_all_absrel",
+          "source": "Table 8 (supplement), row Our oVDA, KITTI, AbsRel, 'all' column (global alignment, all frames)",
+          "published": "0.112",
+          "scale": 1,
+          "dataset": "ovda_kitti",
+          "protocol": "ovda_all",
+          "metric": "abs_rel",
+          "gate": true
+        },
+        {
+          "id": "t8_kitti_all_delta1",
+          "source": "Table 8 (supplement), row Our oVDA, KITTI, delta1, 'all' column",
+          "published": "0.876",
+          "scale": 1,
+          "dataset": "ovda_kitti",
+          "protocol": "ovda_all",
+          "metric": "delta1",
+          "gate": true
+        },
+        {
+          "id": "t8_bonn_all_absrel",
+          "source": "Table 8 (supplement), row Our oVDA, Bonn, AbsRel, 'all' column (global alignment, all frames)",
+          "published": "0.109",
+          "scale": 1,
+          "dataset": "ovda_bonn",
+          "protocol": "ovda_all",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.10923672680111124,
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+645548fc"
+        },
+        {
+          "id": "t8_bonn_all_delta1",
+          "source": "Table 8 (supplement), row Our oVDA, Bonn, delta1, 'all' column",
+          "published": "0.887",
+          "scale": 1,
+          "dataset": "ovda_bonn",
+          "protocol": "ovda_all",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.8870393542123141,
+          "within_tolerance": true,
+          "measured_commit": "0eed74f+645548fc"
+        },
+        {
+          "id": "t8_kitti500_absrel",
+          "source": "Table 8 (supplement), row Our oVDA, KITTI, AbsRel, '500' column",
+          "published": "0.103",
+          "scale": 1,
           "dataset": null,
-          "protocol": "first_frame",
+          "protocol": "ovda_all",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "Table 8's '500' column fits frames 0-499 and scores 1-500, a slicing variant the authors call historical and left out of their reference code; the full-sequence global column gates instead."
+        },
+        {
+          "id": "t8_kitti500_delta1",
+          "source": "Table 8 (supplement), row Our oVDA, KITTI, delta1, '500' column",
+          "published": "0.894",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "ovda_all",
           "metric": "delta1",
           "gate": false,
-          "why_not_gating": "as t1_kitti_absrel"
+          "why_not_gating": "Table 8's '500' column fits frames 0-499 and scores 1-500, a slicing variant the authors call historical and left out of their reference code; the full-sequence global column gates instead."
+        },
+        {
+          "id": "t8_bonn500_absrel",
+          "source": "Table 8 (supplement), row Our oVDA, Bonn, AbsRel, '500' column",
+          "published": "0.079",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "ovda_all",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "Table 8's '500' column fits frames 0-499 and scores 1-500, a slicing variant the authors call historical and left out of their reference code; the full-sequence global column gates instead."
+        },
+        {
+          "id": "t8_bonn500_delta1",
+          "source": "Table 8 (supplement), row Our oVDA, Bonn, delta1, '500' column",
+          "published": "0.961",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "ovda_all",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "Table 8's '500' column fits frames 0-499 and scores 1-500, a slicing variant the authors call historical and left out of their reference code; the full-sequence global column gates instead."
         }
       ],
       "runs": [
@@ -700,7 +754,8 @@
           "date": "2026-10-04T00:18:23",
           "commit": "e4a9013+dirty",
           "job_id": "6322718",
-          "host": "clrv1107"
+          "host": "clrv1107",
+          "note": ""
         },
         {
           "date": "2026-10-05T01:06:54",
@@ -711,7 +766,20 @@
           "date": "2026-10-05T01:47:51",
           "commit": "e4a9013+dirty",
           "job_id": "6329349",
-          "host": "clrv1103"
+          "host": "clrv1103",
+          "note": ""
+        },
+        {
+          "date": "2026-10-08",
+          "job_id": "none",
+          "commit": "none",
+          "note": "targets retargeted to the authors' reference evaluation (ovda_sintel / ovda_bonn / ovda_kitti x ovda_first / ovda_all); earlier measurements belong to the superseded first_frame / ovda_global protocols and were cleared with the targets"
+        },
+        {
+          "date": "2026-10-08T13:13:58",
+          "commit": "0eed74f+645548fc",
+          "job_id": "6350220",
+          "host": "clrv1105"
         }
       ]
     },

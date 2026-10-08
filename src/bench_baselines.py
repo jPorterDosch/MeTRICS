@@ -44,6 +44,7 @@ from PIL import Image
 from PIL.ImageOps import exif_transpose
 
 from eval import arkit_upsampling as ARKIT
+from eval import ovda_paper as OVDA
 from eval import protocols as P
 from eval.baselines import arms as A
 from eval.baselines import record as R
@@ -109,13 +110,6 @@ def score_main(arm, pred_gt: np.ndarray, gt: np.ndarray, keys: set) -> dict:
         if protocol == "published":
             m, _ = P.published_metrics(
                 P.as_disparity(pred_gt, arm.info.output), gt, max_depth
-            )
-        elif protocol in ("first_frame", "ovda_global"):
-            m = P.ovda_aligned_metrics(
-                P.as_disparity(pred_gt, arm.info.output),
-                gt,
-                max_depth,
-                protocol == "first_frame",
             )
         elif protocol == "metric":
             if arm.info.output != "depth":
@@ -236,6 +230,45 @@ def run_arkit(
     return measured, rows
 
 
+def run_ovda_paper(
+    arm, dataset: str, targets: list[dict], max_sequences: int
+) -> tuple[dict[str, float], list[dict]]:
+    """oVDA's tables with the authors' own pairing and scoring
+    (eval/ovda_paper.py): full sequences, only paired frames fed, one
+    inference per sequence scored under every alignment the targets name,
+    totals pixel-weighted over the dataset."""
+    if arm.info.output != "disparity":
+        raise ValueError(f"{arm.info.name}: the oVDA protocol fits inverse depth")
+    protocols = sorted({t["protocol"] for t in targets})
+    seqs = OVDA.pairs(dataset)
+    names = sorted(seqs)
+    if max_sequences:
+        names = names[:max_sequences]
+    totals: dict[str, list[dict]] = {p: [] for p in protocols}
+    rows = []
+    for name in names:
+        frames, gt = OVDA.read_sequence(dataset, seqs[name])
+        pred = arm.predict(frames)
+        if len(pred) != len(frames):
+            raise ValueError(
+                f"{arm.info.name} returned {len(pred)} frames for {len(frames)}"
+            )
+        pred = OVDA.to_gt_grid(pred, gt.shape[1:])
+        row = {"dataset": dataset, "sequence": name, "frames": len(frames)}
+        for p in protocols:
+            t = OVDA.evaluate(pred, gt, dataset, p)
+            totals[p].append(t)
+            row[p] = t
+        rows.append(row)
+        del frames, gt, pred
+        print(
+            f"[repro] {arm.info.name} {dataset}/{name}: {row['frames']} frames",
+            flush=True,
+        )
+    summary = {p: OVDA.summarize(v) for p, v in totals.items()}
+    return {t["id"]: summary[t["protocol"]][t["metric"]] for t in targets}, rows
+
+
 def _commit() -> str:
     """HEAD, plus a hash of the uncommitted CODE changes -- tracked diffs and
     untracked files under src/, datasets_preprocess/, experiments/ and
@@ -311,7 +344,14 @@ def reproduce(args) -> None:
     arkit = [t for t in targets if t["dataset"] in ARKIT.SIZES]
     if arkit:
         measured, rows = run_arkit(arm, arkit, args.arkit_root, args.max_sequences)
-    for dataset in sorted({t["dataset"] for t in targets} - set(ARKIT.SIZES)):
+    for dataset in sorted({t["dataset"] for t in targets} & set(OVDA.DATASETS)):
+        ts = [t for t in targets if t["dataset"] == dataset]
+        m, r = run_ovda_paper(arm, dataset, ts, args.max_sequences)
+        measured.update(m)
+        rows.extend(r)
+    for dataset in sorted(
+        {t["dataset"] for t in targets} - set(ARKIT.SIZES) - set(OVDA.DATASETS)
+    ):
         ts = [t for t in targets if t["dataset"] == dataset]
         m, r = run_video_dataset(arm, dataset, ts, args.bench_root, args.max_sequences)
         measured.update(m)

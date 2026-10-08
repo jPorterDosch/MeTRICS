@@ -19,7 +19,13 @@ What is used, and from where:
 |---|---|---|
 | `src/models/**` | `src/eval/baselines/arms.py::OVDAArm` | the model and its own `infer_video_depth` (per-frame cache loop, resize policy) |
 | `configs/oVDA_c16.yaml` | `OVDAArm` | the network arguments of the paper's context-16 model |
-| `src/utils/align_utils.py` | `src/eval/protocols.py::ovda_aligned_metrics` | `frame_align_lstsq`, the paper's scale+shift fit in inverse depth |
+| `evaluation/protocol.py` | `src/eval/ovda_paper.py` | the authors' scoring: per-sequence inverse-depth fit (first frame or all), [0, 80] m clip, GT < 80 m scored from frame 1, pixel-weighted totals |
+| `evaluation/data_sorting.py` | `src/eval/ovda_paper.py` | the authors' frame pairing: Sintel final pass, KITTI 138 train drives x 2 cameras, Bonn timestamp association |
+| `evaluation/README.md`, `sequences.csv`, `bonn_pairs.json` | reference, and `datasets_download/download_kitti_ovda.sh` (drive list) | the protocol in prose, the exact sequence lists and order, every Bonn pair |
+
+`src/utils/align_utils.py` was vendored earlier and removed again (2026-10-08): the
+evaluation package below superseded our re-implementation of the paper's alignment
+around it.
 
 Not vendored: `run.py`, the notebooks, `src/utils/loading_utils.py` (video and
 TIFF I/O, needs `tifffile`), `src/build_ONNX/` and `configs/oVDA_c8.yaml`.
@@ -41,3 +47,10 @@ Known upstream behaviour handled from outside:
 - The paper lists `329x924` as the Sintel processing resolution, which is not
   a multiple of 14; the code produces `392x924` at the default
   `input_size=518`, and that is what runs.
+
+`evaluation/` was sent by the first author on 2026-10-08 as the reference for
+the paper's numbers (`ovda-evaluation-handover`); it carries the same mixed
+NC-SA-UHDV1.0 / Apache-2.0 licence as this repository (`LICENSE`, identical
+file) and is checked in verbatim. Their protocol reproduces the paper's
+Sintel tables on our saved predictions (0.3799 / 0.5477 first-frame, 0.2941 /
+0.6035 global vs 0.380 / 0.548 and 0.294 / 0.604).

@@ -20,6 +20,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -221,67 +222,6 @@ def _gt(S=4, H=12, W=16, seed=0):
     return gt
 
 
-class FirstFrameProtocolTest(unittest.TestCase):
-    def test_consistent_affine_disparity_scores_perfectly(self):
-        gt = _gt()
-        disp = 3.0 / np.where(gt > 0, gt, 1.0) + 0.2
-        m = P.ovda_aligned_metrics(disp, gt, 10.0, True)
-        self.assertLess(m.abs_rel, 1e-5)
-        self.assertEqual(m.frames, 4)
-
-    def test_scale_drift_is_scored_not_absorbed(self):
-        gt = _gt()
-        disp = 1.0 / np.where(gt > 0, gt, 1.0)
-        disp[2:] *= 1.5  # the scale drifts after frame 1
-        first = P.ovda_aligned_metrics(disp, gt, 10.0, True)
-        per_video, _ = P.published_metrics(disp, gt, max_depth=10.0)
-        self.assertGreater(first.abs_rel, 0.15)  # frames 2-3 are 1/1.5 of GT
-        self.assertGreater(first.abs_rel, per_video.abs_rel)
-
-    def test_global_fit_absorbs_drift_and_scores_negatives_as_zero_depth(self):
-        gt = _gt()
-        disp = 1.0 / np.where(gt > 0, gt, 1.0)
-        disp[2:] *= 1.5
-        first = P.ovda_aligned_metrics(disp, gt, 10.0, True)
-        glob = P.ovda_aligned_metrics(disp, gt, 10.0, False)
-        self.assertLess(glob.abs_rel, first.abs_rel)
-
-    def test_negative_aligned_disparity_scores_as_zero_depth(self):
-        gt = _gt()
-        disp = 1.0 / np.where(gt > 0, gt, 1.0)
-        disp[1, 2, 2] = -50.0  # outside the fitted first frame
-        gt[1, 2, 2] = 2.0
-        m = P.ovda_aligned_metrics(disp, gt, 10.0, True)
-        # depth 0 -> AbsRel exactly 1 on that pixel (VDA's floor would score
-        # max_depth / gt - 1 = 4): 1 / (valid pixels of frame 1) / 4 frames
-        expected = 1.0 / (gt[1] > 0).sum() / 4
-        self.assertAlmostEqual(m.abs_rel, expected, places=5)
-
-    def test_gt_beyond_max_depth_is_clipped_and_scored(self):
-        gt = _gt()
-        gt[:, 0, :4] = 500.0  # "sky"
-        disp = 1.0 / np.minimum(np.where(gt > 0, gt, 1.0), 10.0)
-        m = P.ovda_aligned_metrics(disp, gt, 10.0, False)
-        self.assertLess(m.abs_rel, 1e-5)  # sky predicted at the clip: no error
-        disp[:, 0, :4] = 1.0  # sky predicted at 1 m: an error, because it IS scored
-        self.assertGreater(P.ovda_aligned_metrics(disp, gt, 10.0, False).abs_rel, 0.01)
-
-    def test_first_frame_without_gt_scores_nothing(self):
-        gt = _gt()
-        gt[0] = 0.0
-        m = P.ovda_aligned_metrics(1.0 / np.where(gt > 0, gt, 1.0), gt, 10.0, True)
-        self.assertEqual(m.frames, 0)
-
-    def test_nan_pixel_is_an_error_not_a_crash(self):
-        gt = _gt()
-        disp = 1.0 / np.where(gt > 0, gt, 1.0)
-        disp[1, 3, 3] = np.nan
-        gt[1, 3, 3] = 2.0
-        m = P.ovda_aligned_metrics(disp, gt, 10.0, True)
-        self.assertTrue(np.isfinite(m.abs_rel))
-        self.assertGreater(m.abs_rel, 0.0)
-
-
 class _FakeArm:
     """Returns an affine function of the true disparity at half resolution,
     so `published` must score ~0 after registration and alignment."""
@@ -346,11 +286,6 @@ class RunnerPlumbingTest(unittest.TestCase):
                 "metric": "abs_rel",
             },
             {
-                **_target(dataset="bonn", protocol="first_frame"),
-                "id": "ff",
-                "metric": "delta1",
-            },
-            {
                 **_target(dataset="bonn", protocol="published"),
                 "id": "pub80",
                 "metric": "abs_rel",
@@ -365,7 +300,6 @@ class RunnerPlumbingTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertLess(measured["pub"], 1e-3)
         self.assertLess(measured["pub80"], 1e-3)
-        self.assertGreater(measured["ff"], 0.999)
         self.assertEqual(
             set(rows[0]),
             {
@@ -373,7 +307,6 @@ class RunnerPlumbingTest(unittest.TestCase):
                 "sequence",
                 "frames",
                 "published@10",
-                "first_frame@10",
                 "published@80",
             },
         )
@@ -1114,6 +1047,96 @@ class MetricHoldsOutFedPixelsTest(unittest.TestCase):
         self.assertGreater(
             row["published"]["delta1"], 0.0
         )  # published still scores every valid pixel
+
+
+def _write_dpt(path: Path, depth: np.ndarray) -> None:
+    h, w = depth.shape
+    with open(path, "wb") as f:
+        np.array([202021.25], np.float32).tofile(f)
+        np.array([w, h], np.int32).tofile(f)
+        depth.astype(np.float32).tofile(f)
+
+
+class OvdaPaperTest(unittest.TestCase):
+    """oVDA's own evaluation (vendored third_party/ovda/evaluation)."""
+
+    def _sintel(self, root: Path, seqs=("alley_1", "bamboo_1"), S=3, far=500.0):
+        for q, name in enumerate(seqs):
+            (root / "training/final" / name).mkdir(parents=True)
+            (root / "training/depth" / name).mkdir(parents=True)
+            for i in range(1, S + 1):
+                depth = np.full((12, 16), 2.0 + q + i, np.float32)
+                depth[:2] = far  # sky: beyond 80 m
+                rgb = np.zeros((12, 16, 3), np.uint8)
+                rgb[..., 0] = int(depth[5, 5] * 20)  # red encodes depth...
+                rgb[:2, :, 0] = 0  # ...and 0 marks the sky
+                Image.fromarray(rgb).save(
+                    root / "training/final" / name / f"frame_{i:04d}.png"
+                )
+                _write_dpt(root / "training/depth" / name / f"frame_{i:04d}.dpt", depth)
+
+    def test_dpt_reader_round_trips(self):
+        from eval import ovda_paper as OV
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = np.random.default_rng(0).uniform(1, 9000, (5, 7)).astype(np.float32)
+            _write_dpt(Path(tmp) / "a.dpt", d)
+            np.testing.assert_array_equal(OV._read_dpt(Path(tmp) / "a.dpt"), d)
+
+    def test_runner_uses_their_pairing_and_scoring(self):
+        from eval import ovda_paper as OV
+
+        class Disp(_FakeArm):
+            def predict(self, frames, prompt=None):
+                self.calls.append(frames.shape)
+                red = frames[..., 0].astype(np.float32)
+                inv = np.where(red > 0, 20.0 / np.maximum(red, 1), 1.0 / 500.0)
+                return (3.0 * inv + 0.5).astype(np.float32)  # affine in inverse depth
+
+        targets = [
+            {
+                "id": "first_a",
+                "dataset": "ovda_sintel",
+                "protocol": "ovda_first",
+                "metric": "abs_rel",
+            },
+            {
+                "id": "all_d",
+                "dataset": "ovda_sintel",
+                "protocol": "ovda_all",
+                "metric": "delta1",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sintel(Path(tmp))
+            saved = dict(OV.DATASETS)
+            OV.DATASETS["ovda_sintel"] = ("sintel", "sintel_pairs", Path(tmp))
+            try:
+                arm = Disp(None)
+                measured, rows = BB.run_ovda_paper(arm, "ovda_sintel", targets, 0)
+            finally:
+                OV.DATASETS.clear()
+                OV.DATASETS.update(saved)
+        self.assertEqual(arm.calls, [(3, 12, 16, 3)] * 2)  # one inference per sequence
+        self.assertEqual(len(rows), 2)
+        # the sky (500 m, beyond 80 m) is in their fit but not scored: still exact
+        self.assertLess(measured["first_a"], 1e-4)
+        self.assertGreater(measured["all_d"], 0.999)
+        self.assertEqual(
+            set(rows[0]), {"dataset", "sequence", "frames", "ovda_first", "ovda_all"}
+        )
+
+    def test_runner_refuses_a_depth_arm(self):
+        with self.assertRaises(ValueError):
+            BB.run_ovda_paper(_FakeArm(None, "depth"), "ovda_sintel", [], 0)
+
+    def test_record_targets_route_to_their_evaluation(self):
+        from eval import ovda_paper as OV
+
+        e = R.arm_entry(R.load(), "ovda")
+        for t in R.runnable_targets(e):
+            self.assertIn(t["dataset"], OV.DATASETS)
+            self.assertIn(t["protocol"], OV.ALIGNMENT)
 
 
 class ParityTreesTest(unittest.TestCase):

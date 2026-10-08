@@ -23,12 +23,6 @@ Three protocols, kept apart because they answer different questions:
                   sparse-depth pixels held out like sparse_aligned (published
                   keeps VDA's scoring, fed pixels included, for parity).
 
-Two more exist only to reproduce a baseline's own tables and are not part
-of the comparison (ovda_aligned_metrics):
-  first_frame     Online Video Depth Anything's: scale+shift in inverse depth
-                  fitted on the first frame, applied to the whole video.
-  ovda_global     the same with the fit over all frames.
-
 Plus two temporal metrics on the published-aligned depth:
   tae_vda         VDA's TAE (bidirectional reprojection with GT K/poses,
                   relative error, x100), vendored.
@@ -59,14 +53,11 @@ _VDA_EVAL = (
     / "eval"
 )
 
-_OVDA_ALIGN = _VDA_EVAL.parents[2] / "ovda" / "src" / "utils" / "align_utils.py"
-
 # All are loaded by path rather than via sys.path: the vendored directory
 # holds an eval.py, which would shadow THIS package (src/eval) for any later
 # `import eval.*`.
 _METRIC_MODULE = None
 _TAE_MODULE = None
-_OVDA_ALIGN_MODULE = None
 
 
 def _load_by_path(name: str, path: pathlib.Path):
@@ -93,13 +84,6 @@ def vda_tae_module():
     if _TAE_MODULE is None:
         _TAE_MODULE = _load_by_path("vda_benchmark_eval_tae", _VDA_EVAL / "eval_tae.py")
     return _TAE_MODULE
-
-
-def ovda_align_module():
-    global _OVDA_ALIGN_MODULE
-    if _OVDA_ALIGN_MODULE is None:
-        _OVDA_ALIGN_MODULE = _load_by_path("ovda_align_utils", _OVDA_ALIGN)
-    return _OVDA_ALIGN_MODULE
 
 
 # Every protocol clips the scored prediction to this range, as VDA's eval.py
@@ -224,59 +208,6 @@ def published_metrics(
     are computed on."""
     aligned = vda_align_disparity(pred_disp, gt, max_depth)
     return vda_frame_metrics(aligned, gt, gt_valid_mask(gt, max_depth)), aligned
-
-
-def ovda_aligned_metrics(
-    pred_disp: np.ndarray, gt: np.ndarray, max_depth: float, first_frame_only: bool
-) -> FrameMetrics:
-    """Online Video Depth Anything's scoring. (scale, shift) is fitted in
-    inverse depth on the FIRST frame only and applied to the whole video
-    (their Table 1: scale drift is scored instead of absorbed), or on all
-    frames (their Table 8, "global").
-
-    The fit is the vendored one (align_utils.frame_align_lstsq, what their
-    align_prediction calls) and the inversion and clip repeat
-    align_prediction: an aligned inverse depth of exactly 0 becomes 1e-4, and
-    depth is clipped to [0, max_depth] -- a NEGATIVE aligned inverse depth
-    therefore scores as depth 0 (AbsRel 1), where VDA's eval floors the
-    inverse depth and scores max_depth (AbsRel up to max_depth / gt). That is
-    why their global table is not our `published` protocol.
-
-    GT beyond max_depth is CLIPPED to it and scored, not masked out ("The
-    maximum depth is clipped to 80m", their Table 1 caption): on Sintel, whose
-    sky is stored at hundreds of metres, that keeps the far pixels in the
-    score. The per-frame reduction is not stated in the paper; VDA's is used.
-    Fewer than 2 valid GT pixels in the fitted frames: nothing is scored."""
-    _check_seq("pred_disp", pred_disp, gt)
-    valid = gt > 1e-3
-    gt = np.minimum(gt, max_depth)
-    n = 1 if first_frame_only else len(gt)
-    fit = valid[:n] & np.isfinite(pred_disp[:n])
-    if fit.sum() < 2:
-        return _EMPTY
-    mod = ovda_align_module()
-    alignment = mod.frame_align_lstsq(
-        mod.DepthMap(
-            np.ma.array(pred_disp[:n].astype(np.float64), mask=~fit),
-            inverse=True,
-            range=None,
-            scale=None,
-            shift=None,
-        ),
-        mod.DepthMap(
-            np.ma.array(gt[:n].astype(np.float64), mask=~fit),
-            inverse=False,
-            range=None,
-            scale=1,
-            shift=0,
-        ),
-    )
-    aligned = (pred_disp.astype(np.float64) - alignment.shift) / alignment.scale
-    aligned = np.where(aligned == 0.0, 1e-4, aligned)
-    # a non-finite prediction pixel scores as depth 0, i.e. as an error
-    depth = np.nan_to_num(1.0 / aligned, nan=0.0, posinf=0.0, neginf=0.0)
-    depth = np.clip(depth, 0.0, max_depth).astype(np.float32)
-    return vda_frame_metrics(depth, gt, valid)
 
 
 def depth_to_disparity(depth: np.ndarray) -> np.ndarray:
