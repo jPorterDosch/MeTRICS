@@ -670,7 +670,9 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
             {
                 "img": torch.zeros(1, 3, 12, 16),
                 "sparse_depth": torch.ones(1, 12, 16),
-                "sparse_depth_mask": torch.ones(1, 12, 16, dtype=torch.bool),
+                "sparse_depth_mask": torch.zeros(
+                    1, 12, 16, dtype=torch.bool
+                ).index_fill_(1, torch.tensor([0, 1]), True),
             }
         ]
         coarse = cv2.resize(depth[0], (16, 12), interpolation=cv2.INTER_NEAREST)[None]
@@ -906,6 +908,159 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
         )
         with self.assertRaises(R.GateError):
             BB.benchmark(args)
+
+
+class FinalReviewFixesTest(unittest.TestCase):
+    def test_nan_prediction_is_an_error_in_published_and_depth_sparse_fit(self):
+        gt = _gt()
+        gt[gt == 0] = 2.0
+        disp = 1.0 / gt
+        clean, _ = P.published_metrics(disp, gt, 10.0)
+        bad_disp = disp.copy()
+        bad_disp[0, 3, 3] = np.nan
+        bad, aligned = P.published_metrics(bad_disp, gt, 10.0)
+        self.assertAlmostEqual(
+            float(aligned[0, 3, 3]), 10.0, places=4
+        )  # max_depth: an error
+        self.assertGreater(bad.abs_rel, clean.abs_rel)
+        depth = gt.copy()
+        depth[0, 3, 3] = np.nan
+        mask = np.zeros_like(gt, bool)
+        mask[:, ::3, ::4] = True
+        mask[0, 3, 3] = False
+        m = P.sparse_aligned_metrics(depth, gt, mask, depth, mask, gt, 10.0)
+        self.assertGreater(
+            m.abs_rel, 0.5 / gt[0].size / gt.shape[0]
+        )  # scored at 1e-3 m
+
+    def test_promptda_frame_without_prompt_gives_nan_not_exit(self):
+        fake = _FakePromptDA()
+        arm = _bare(
+            A.PromptDAArm,
+            A.ArmInfo("promptda", "depth", True, True),
+            model=fake,
+            device=torch.device("cpu"),
+        )
+        frames = np.full((2, 28, 28, 3), 128, np.uint8)
+        depth = np.full((2, 6, 8), 2.0, np.float32)
+        valid = np.ones((2, 6, 8), bool)
+        valid[1] = False
+        out = arm.predict(frames, (depth, valid))
+        self.assertTrue(np.isfinite(out[0]).all())
+        self.assertTrue(np.isnan(out[1]).all())
+        self.assertEqual(len(fake.seen), 1)
+
+    def test_tae_manifest_only_required_for_datasets_that_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "kitti").mkdir()
+            (Path(tmp) / "kitti" / "kitti_video.json").write_text("{}")
+            self.assertEqual(
+                VB.bench_root_ok(Path(tmp), ("kitti",), ("kitti", "scannet")), []
+            )
+            self.assertIn(
+                "scannet/tae", VB.bench_root_ok(Path(tmp), ("scannet",), ("scannet",))
+            )
+
+
+class BenchmarkSettingsTest(unittest.TestCase):
+    def test_baseline_cli_defaults_match_benchmark_cfg(self):
+        import bench_eval as BE
+
+        cfg = BE.BenchmarkCfg()
+        import argparse
+
+        orig = argparse.ArgumentParser.parse_args
+        try:
+            argparse.ArgumentParser.parse_args = lambda self, *a, **k: orig(
+                self, ["benchmark", "--arm", "vda"]
+            )
+            captured = {}
+            real_benchmark = BB.benchmark
+            BB.benchmark = lambda args: captured.update(vars(args))
+            BB.main()
+        finally:
+            argparse.ArgumentParser.parse_args = orig
+            BB.benchmark = real_benchmark
+        self.assertEqual(captured["seed"], cfg.seed)
+        self.assertEqual(captured["patch_size"], cfg.patch_size)
+        self.assertEqual(captured["image_size"], cfg.image_size)
+        self.assertEqual(list(captured["datasets"]), list(cfg.datasets))
+
+    def test_tae_window_slices_every_field(self):
+        import bench_eval as BE
+
+        S = 192
+        spec = VB.SPECS["scannet"]
+        seq = VB.Sequence("scannet", "s", list(range(S)))
+        gt = np.arange(S, dtype=np.float32)[:, None, None] * np.ones(
+            (S, 2, 2), np.float32
+        )
+        pred = BE.Prediction(
+            gt.copy(),
+            gt.copy(),
+            np.zeros((S, 3, 4)),
+            np.zeros((S, 3, 3)),
+            at_gt=gt.copy(),
+        )
+        win, wgt, wp = BE.tae_window(spec, seq, gt, pred)
+        lo, hi = spec.tae_range
+        self.assertEqual(
+            (len(win.frames), len(wgt), len(wp.depth), len(wp.at_gt), len(wp.K)),
+            (hi - lo,) * 5,
+        )
+        self.assertEqual(win.frames[0], lo)
+        self.assertEqual(float(wgt[0, 0, 0]), lo)
+        self.assertEqual(float(wp.at_gt[-1, 0, 0]), hi - 1)
+
+    def test_benchmark_seed_is_not_the_training_seed(self):
+        import inspect
+
+        import bench_eval as BE
+
+        self.assertNotIn("seed", inspect.signature(BE.run_benchmark).parameters)
+        self.assertIn("amp", inspect.signature(BE.run_benchmark).parameters)
+        with self.assertRaises(ValueError):
+            BE.BenchmarkCfg(patch_size=0).validate()
+
+
+class MetricHoldsOutFedPixelsTest(unittest.TestCase):
+    def test_metric_holds_out_fed_pixels_published_does_not(self):
+        import bench_eval as BE
+
+        gt = _gt(S=1, H=24, W=32)
+        gt[gt == 0] = 2.0
+        fed = np.zeros((1, 24, 32), bool)
+        fed[0, :12] = True
+        pred_d = gt.copy()
+        pred_d[~fed] *= 1.5  # perfect on the fed pixels only: a model that copies
+        views = [
+            {
+                "img": torch.zeros(1, 3, 24, 32),
+                "sparse_depth": torch.from_numpy(gt[0])[None],
+                "sparse_depth_mask": torch.from_numpy(fed[0])[None],
+            }
+        ]
+        pred = BE.Prediction(
+            pred_d, np.zeros_like(pred_d), np.zeros((1, 3, 4)), np.zeros((1, 3, 3))
+        )
+        row, _ = BE.score_sequence(
+            VB.SPECS["bonn"],
+            VB.Sequence("bonn", "s", []),
+            gt,
+            views,
+            pred,
+            "stream",
+            0.5,
+            0.5,
+        )
+        self.assertAlmostEqual(
+            row["metric"]["abs_rel"], 0.5, places=5
+        )  # copied half not rewarded
+        unmasked = P.metric_metrics(pred_d, gt, 10.0)
+        self.assertLess(unmasked.abs_rel, 0.3)
+        self.assertGreater(
+            row["published"]["delta1"], 0.0
+        )  # published still scores every valid pixel
 
 
 class ParityTreesTest(unittest.TestCase):

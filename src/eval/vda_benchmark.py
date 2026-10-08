@@ -447,6 +447,8 @@ def bench_root_ok(
             missing.append(name)
     for name in tae_datasets:
         spec = SPECS[name]
+        if name not in datasets:  # its TAE pass only runs alongside its main pass
+            continue
         if spec.tae_json and not (Path(root) / spec.tae_json).is_file():
             missing.append(f"{name}/tae")
     return missing

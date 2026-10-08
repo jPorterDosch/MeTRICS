@@ -372,7 +372,7 @@ trusting Bonn TAE or Bonn snapshots.
 |---|---|---|
 | `published` | one scale+shift per **video**, in **disparity**, against dense GT (VDA's `eval.py`, verbatim) | the only mode in which numbers from their tables are comparable |
 | `sparse_aligned` | one scale+shift per **frame**, fitted on the **sparse-depth pixels only**, in each model's native output space; sparse-depth pixels held out of the score | given the same sparse sensor, who completes it best -- causal, and symmetric between models that consume the sparse depth and models that only see it post hoc |
-| `metric` | none | calibration |
+| `metric` | none; sparse-depth pixels held out of the score, as in `sparse_aligned` | calibration -- of the completion, not of the copied input |
 
 plus two TAEs on the published-aligned depth: `tae_vda` (theirs, vendored,
 x100) and `tae_ours` (`eval/temporal_consistency/metrics.py`). They differ in
@@ -410,8 +410,12 @@ same pass whenever `scannet_500` is benchmarked.
 
 **Sparse depth.** One `TUBE_MASK` patch mask per sequence (the same pixels in every
 frame, like a static sensor pattern -- no mask flicker in the TAE), seeded by
-(dataset, sequence, density), so every mode, checkpoint and baseline gets the
-identical pixel set. Density is swept: `--bench.densities 0.01 0.05 0.4` by
+(dataset, sequence, density) and `--bench.seed` / `--bench.patch-size` (42 /
+14; benchmark settings, independent of the run's training seed and patch
+size), so every mode, checkpoint and baseline gets the identical pixel set.
+The ScanNet TAE clips are predicted in full (192 frames) and scored on frames
+10-180, as VDA does, so no model is scored on its warm-up. The benchmark
+runs at the run's own `--amp`. Density is swept: `--bench.densities 0.01 0.05 0.4` by
 default (1%, the 5% training density, and 40% ~ SPOT's real sensor).
 
 **Mode.** Ours runs streaming only -- the per-frame KV-cache path, i.e.

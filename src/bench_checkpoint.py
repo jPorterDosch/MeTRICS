@@ -44,7 +44,6 @@ class BenchCheckpointCfg:
     """Pretrained StreamVGGT weights for --base; default: the path the
     checkpoint recorded."""
     out_dir: str | None = None
-    seed: int = 42
     bench: BenchmarkCfg = field(default_factory=lambda: BenchmarkCfg(enabled=True))
 
 
@@ -98,7 +97,16 @@ def main(cfg: BenchCheckpointCfg) -> None:
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     cfg.bench.enabled = True
-    run_benchmark(model, accelerator, cfg.bench, mcfg, out_dir, step=0, seed=cfg.seed)
+    # the run's own precision; sparse draws come from cfg.bench.seed
+    run_benchmark(
+        model,
+        accelerator,
+        cfg.bench,
+        mcfg,
+        out_dir,
+        step=0,
+        amp=bool(raw.get("amp", 1)),
+    )
     print(f"done -> {out_dir}/bench_results.json")
 
 

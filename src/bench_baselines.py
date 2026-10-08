@@ -237,10 +237,11 @@ def run_arkit(
 
 
 def _commit() -> str:
-    """HEAD, plus a hash of the uncommitted CODE changes (src/,
-    datasets_preprocess/, experiments/, the record itself excluded, since
-    every run rewrites it): two runs with the same string ran the same code,
-    which is what `verified` requires of its measurements."""
+    """HEAD, plus a hash of the uncommitted CODE changes -- tracked diffs and
+    untracked files under src/, datasets_preprocess/, experiments/ and
+    third_party/, the record itself excluded since every run rewrites it: two
+    runs with the same string ran the same code, which is what `verified`
+    requires of its measurements."""
     repo = Path(__file__).resolve().parents[1]
     try:
         head = subprocess.check_output(
@@ -254,18 +255,36 @@ def _commit() -> str:
                 "diff",
                 "HEAD",
                 "--",
-                "src",
-                "datasets_preprocess",
-                "experiments",
+                *_CODE_PATHS,
                 f":!{R.RECORD_PATH.relative_to(repo)}",
             ],
             text=True,
         )
+        untracked = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--",
+                *_CODE_PATHS,
+            ],
+            text=True,
+        ).split()
     except (OSError, subprocess.CalledProcessError, ValueError):
         return "unknown"
-    if not diff.strip():
+    h = hashlib.sha1(diff.encode())
+    for rel in sorted(untracked):
+        h.update(rel.encode())
+        h.update((repo / rel).read_bytes())
+    if not diff.strip() and not untracked:
         return head
-    return f"{head}+{hashlib.sha1(diff.encode()).hexdigest()[:8]}"
+    return f"{head}+{h.hexdigest()[:8]}"
+
+
+_CODE_PATHS = ("src", "datasets_preprocess", "experiments", "third_party")
 
 
 def reproduce(args) -> None:
@@ -438,9 +457,10 @@ def benchmark(args) -> None:
             del views
             print(f"[bench] {arm.info.name} {tag}: {len(frames)} frames", flush=True)
         if spec.name in cfg.tae_datasets and spec.tae_json:
-            # the sliced 170 frames, exactly what our model is run on here
-            # (`reproduce` feeds all 192 for parity with VDA's infer.py)
-            tseqs = load_manifest(cfg.root, spec, tae=True)
+            # every listed frame (192), predicted in full and scored on the
+            # [lo:hi] window -- VDA's protocol, and what run_benchmark does
+            # for our model (bench_eval.tae_window)
+            tseqs = load_manifest(cfg.root, spec, tae=True, tae_slice=False)
             if cfg.max_sequences:
                 tseqs = tseqs[: cfg.max_sequences]
             for seq in tseqs:
@@ -464,9 +484,10 @@ def benchmark(args) -> None:
                         pred = _pred(
                             raw, seq, spec, frames.shape[1:3], gt.shape[1:], native_hw
                         )
+                    win, win_gt, win_pred = BE.tae_window(spec, seq, gt, pred)
                     tae_rows.append(
                         BE.score_tae_sequence(
-                            spec, seq, gt, pred, mode, density, realized
+                            spec, win, win_gt, win_pred, mode, density, realized
                         )
                     )
                 del views
@@ -583,13 +604,13 @@ def main() -> None:
         "--patch-size",
         type=int,
         default=14,
-        help="sparse-depth patch (depth_cond.sim_patch_size)",
+        help="sparse-depth patch: must equal --bench.patch-size of the run compared",
     )
     bench.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="sparse-depth seed (bench_checkpoint.py --seed)",
+        help="sparse-depth seed: must equal --bench.seed of the run compared",
     )
     bench.add_argument("--max-sequences", type=int, default=0)
     bench.add_argument(

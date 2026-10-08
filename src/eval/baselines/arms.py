@@ -471,6 +471,12 @@ class PromptDAArm:
         h, w = int(H * scale // 14 * 14), int(W * scale // 14 * 14)
         out = []
         for i, frame in enumerate(frames):
+            if not (valid[i] & (depth[i] <= PROMPT_DEPTH_MAX_M)).any():
+                # no prompt to normalise against (e.g. 1% patches that all miss
+                # KITTI's LiDAR): no prediction. NaN is scored as an error by
+                # every protocol and dropped by sparse_aligned's own rule.
+                out.append(np.full((h, w), np.nan, np.float32))
+                continue
             img = frame.astype(np.float32) / 255.0
             if (h, w) != (H, W):
                 img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)

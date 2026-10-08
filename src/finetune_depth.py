@@ -744,7 +744,7 @@ def run(
             mcfg,
             args.output_dir,
             step=args.epochs * len(data_loader_train),
-            seed=args.seed,
+            amp=bool(args.amp),
         )
 
     # No separate checkpoint-final.pth: the `epoch == args.epochs` branch above

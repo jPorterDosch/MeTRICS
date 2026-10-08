@@ -19,7 +19,9 @@ Three protocols, kept apart because they answer different questions:
                   dense GT with the sparse-depth pixels held out. Causal, and
                   symmetric across arms: a model that consumes the sparse depth and
                   one that only sees it post hoc get the same pixels.
-  metric          No alignment at all: raw metric depth against GT.
+  metric          No alignment at all: raw metric depth against GT, with the
+                  sparse-depth pixels held out like sparse_aligned (published
+                  keeps VDA's scoring, fed pixels included, for parity).
 
 Two more exist only to reproduce a baseline's own tables and are not part
 of the comparison (ovda_aligned_metrics):
@@ -201,6 +203,11 @@ def vda_align_disparity(
     X = np.linalg.lstsq(A, gt_disp_masked, rcond=None)[0]
     scale, shift = X
     aligned_pred = scale * infs + shift
+    # identical to upstream for finite input; a non-finite pixel (which
+    # upstream would carry as NaN) is put at the disparity floor AFTER the
+    # affine, i.e. scored at max_depth -- an error, not wherever the fit
+    # happens to map a floored disparity
+    aligned_pred[~np.isfinite(pred_disp)] = DEPTH_FLOOR
     aligned_pred = np.clip(aligned_pred, a_min=DEPTH_FLOOR, a_max=None)
     pred_depth = np.zeros_like(aligned_pred)
     pos = aligned_pred > 0
@@ -289,14 +296,25 @@ def as_disparity(pred: np.ndarray, output: str) -> np.ndarray:
 
 
 def metric_metrics(
-    pred_depth: np.ndarray, gt: np.ndarray, max_depth: float
+    pred_depth: np.ndarray,
+    gt: np.ndarray,
+    max_depth: float,
+    held_out: np.ndarray | None = None,
 ) -> FrameMetrics:
-    """The `metric` protocol: no alignment, raw metric depth against GT."""
+    """The `metric` protocol: no alignment, raw metric depth against GT.
+    `held_out` [S,H,W] bool: GT pixels excluded from the score -- the
+    benchmark passes the sparse-depth pixels, so a model that is fed them is
+    scored on completion, not on copying its input (the same pixels are held
+    out for every model, fed or not)."""
     _check_seq("pred_depth", pred_depth, gt)
     clipped = np.clip(_finite_or_floor(pred_depth), DEPTH_FLOOR, max_depth).astype(
         np.float32
     )
-    return vda_frame_metrics(clipped, gt, gt_valid_mask(gt, max_depth))
+    valid = gt_valid_mask(gt, max_depth)
+    if held_out is not None:
+        _check_seq("held_out", held_out, gt)
+        valid = valid & ~held_out
+    return vda_frame_metrics(clipped, gt, valid)
 
 
 def affine_fit(pred: np.ndarray, target: np.ndarray) -> tuple[float, float]:
@@ -375,8 +393,9 @@ def sparse_aligned_metrics(
             aligned[i] = np.clip(1.0 / disp, DEPTH_FLOOR, max_depth)
         else:
             s, t = affine_fit(pred_native[i][m], sparse_depth[i][m])
+            # floored AFTER the affine: a non-finite pixel scores at 1e-3 m
             aligned[i] = np.clip(
-                s * _finite_or_floor(pred_gt_res[i]) + t, DEPTH_FLOOR, max_depth
+                _finite_or_floor(s * pred_gt_res[i] + t), DEPTH_FLOOR, max_depth
             )
     return vda_frame_metrics(aligned, gt, valid)
 

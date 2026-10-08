@@ -453,8 +453,9 @@ def main() -> int:
     )
     args = ap.parse_args()
     if not args.datasets:
-        # the benchmark's five; bonn_all and sintel_bgr are built on request
-        args.datasets = ["sintel", "kitti", "bonn", "scannet", "nyuv2"]
+        # the benchmark's datasets (bonn_all is its default Bonn set; needs
+        # BONN_ALL=1 download_bonn.sh); sintel_bgr is built on request
+        args.datasets = ["sintel", "kitti", "bonn", "bonn_all", "scannet", "nyuv2"]
     unknown = [d for d in args.datasets if d not in PREPARE]
     if unknown:
         ap.error(f"unknown datasets {unknown}; choose from {list(PREPARE)}")
