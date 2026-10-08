@@ -423,9 +423,9 @@ deployment. There is no separate "offline" row for this model on purpose:
 `StreamVGGT.forward` applies the same causal mask the cache reproduces
 incrementally, so the full-sequence forward is the same function up to
 kernel numerics (and it materialises an `[S·P, S·P]` mask that does not fit
-at 110+ frames). VDA's offline and streaming rows are both reported, from
-their table and their released cache mode. NYUv2 stills are one-frame
-sequences.
+at 110+ frames). Baseline arms carry their own mode: VDA, Depth Any Video
+and Metric-VDA are offline (whole-clip windows), oVDA and PromptDA causal.
+NYUv2 stills are one-frame sequences.
 
 ```bash
 # in a training script, or a pure eval of an existing checkpoint:

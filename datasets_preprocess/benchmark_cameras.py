@@ -128,8 +128,8 @@ def bonn_camera_pose(marker_pose: np.ndarray) -> np.ndarray:
 def _bonn_pose_or_none(traj: np.ndarray, t: float) -> np.ndarray | None:
     """Camera cam2world for timestamp t. A frame with no mocap pose within
     tolerance (balloon2 has one 54 ms gap, outside the protocol's frames
-    30-140) gets no pose: that sequence is then skipped for TAE in the
-    manifest it appears in, instead of failing the whole dataset."""
+    30-140) gets no pose instead of failing the whole dataset; TAE then drops
+    the pairs touching that frame (bench_eval.score_tae_sequence)."""
     try:
         return bonn_camera_pose(nearest_tum_pose(traj, t))
     except ValueError:

@@ -75,18 +75,45 @@ def paper_uses(entry: dict) -> set[tuple[str, str]]:
     return {(t["dataset"], t["protocol"]) for t in runnable_targets(entry)}
 
 
+def _identifiable(commit) -> bool:
+    """A code string two runs can be matched on: present, known, and not the
+    legacy '+dirty' marker that named no code state."""
+    return (
+        isinstance(commit, str)
+        and commit not in ("", "unknown")
+        and not commit.endswith("+dirty")
+    )
+
+
+def computed_status(entry: dict) -> str:
+    """The status the stored measurements support: `verified` needs every
+    gating target measured, within tolerance, and by ONE identifiable code
+    state; any gating miss is `failed`."""
+    gating = [t for t in entry["targets"] if t["gate"]]
+    commits = {t.get("measured_commit") for t in gating}
+    same_code = len(commits) == 1 and _identifiable(next(iter(commits), None))
+    if any(t.get("within_tolerance") is False for t in gating):
+        return FAILED
+    if gating and all(t.get("within_tolerance") for t in gating) and same_code:
+        return VERIFIED
+    return PENDING
+
+
 def require_allowed(
     record: dict, arm: str, uses: list[tuple[str, str]] | set[tuple[str, str]]
 ) -> None:
     """Raise GateError unless every (dataset, protocol) in `uses` is open to
     `arm`: all of them once it is verified, only its paper's before."""
     entry = arm_entry(record, arm)
-    if entry["status"] == VERIFIED:
+    # recomputed, never read from the stored string: a hand-edited or stale
+    # `verified` does not open the gate
+    status = computed_status(entry)
+    if status == VERIFIED:
         return
     blocked = sorted(set(uses) - paper_uses(entry))
     if blocked:
         raise GateError(
-            f"baseline arm {arm!r} is {entry['status']!r}, not verified: it may run "
+            f"baseline arm {arm!r} is {status!r}, not verified: it may run "
             f"only its paper's settings {sorted(paper_uses(entry))}, not {blocked}. "
             "Reproduce it first (src/bench_baselines.py reproduce)."
         )
@@ -113,13 +140,6 @@ def apply_measurements(
             t["measured"] = float(measured[t["id"]])
             t["within_tolerance"] = within(t, t["measured"], tol)
             t["measured_commit"] = run.get("commit")
-    gating = [t for t in entry["targets"] if t["gate"]]
-    same_code = len({t.get("measured_commit") for t in gating}) == 1
-    if any(t.get("within_tolerance") is False for t in gating):
-        entry["status"] = FAILED
-    elif gating and all(t.get("within_tolerance") for t in gating) and same_code:
-        entry["status"] = VERIFIED
-    else:
-        entry["status"] = PENDING
+    entry["status"] = computed_status(entry)
     entry["runs"].append(run)
     return entry["status"]

@@ -9,7 +9,7 @@ streaming-vs-offline gap to measure (unlike VDA, whose offline model attends
 bidirectionally). The full forward also materialises an [S*P, S*P] mask
 (~24 GB at 110 frames, 58 GB at the 170-frame TAE sequences) and would OOM.
 
-Called once from finetune_depth.run() after the streaming eval (and in the
+Called once from finetune_depth.run() on the final weights (and in the
 --epochs 0 pure-eval path), never per epoch. Everything is logged under
 "final_bench/<dataset>/<mode>/d<density%>/<protocol>_<metric>" next to the
 val_* series, and written to <output_dir>/bench_results.json
@@ -71,6 +71,10 @@ _BENCH_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench")
 _SPOT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/spot_data")
 
 PROTOCOLS = ("published", "sparse_aligned", "metric")
+# trees that reproduce one baseline table and are never benchmark datasets:
+# sintel_bgr (VDA's channel-swapped colour files), nyuv2_full (the whole
+# 480x640 frame; the benchmark's loaders apply the Eigen crop to it anyway)
+REPRODUCE_ONLY = ("sintel_bgr", "nyuv2_full")
 MODE_STREAM = "stream"  # the only mode; kept in the keys so a baseline arm's offline rows can sit next to it
 
 
@@ -145,6 +149,12 @@ class BenchmarkCfg:
     the top 4:3 window at 518x392, as the earlier SPOT GIFs. Not comparable."""
 
     def validate(self) -> "BenchmarkCfg":
+        reproduce_only = [d for d in self.datasets if d in REPRODUCE_ONLY]
+        if reproduce_only:
+            raise ValueError(
+                f"bench.datasets {reproduce_only} exist only to reproduce a "
+                "baseline's published number (src/bench_baselines.py reproduce)"
+            )
         unknown = [d for d in self.datasets if d not in SPECS]
         if unknown:
             raise ValueError(
@@ -359,8 +369,8 @@ def score_sequence(
 def has_cameras(seq: Sequence) -> bool:
     """Every frame carries K -- what TAE needs to be scored at all. Poses may
     be missing or non-finite (ScanNet's -inf on tracking failure, a Bonn
-    mocap gap): the TAE functions handle those per pair, tae_vda as upstream
-    does (pair scored 0), tae_ours by dropping the pair."""
+    mocap gap): the TAE functions handle those per pair (score_tae_sequence:
+    upstream's 0 only on VDA's TAE manifest, otherwise the pair is dropped)."""
     return len(seq.frames) > 1 and all(fr.K is not None for fr in seq.frames)
 
 
@@ -379,10 +389,14 @@ def score_tae_sequence(
     aligned: np.ndarray | None = None,
 ) -> dict:
     """One TAE row on the published-aligned depth, both definitions.
-    tae_vda takes VDA's K as written (their eval does not shift the
-    principal point for the 8/11 crop); tae_ours takes the crop-corrected K,
-    since that one is ours to get right. `aligned` is score_sequence's
-    published-aligned depth when the main pass already computed it."""
+    On VDA's own TAE manifest (the uncropped-frame ScanNet split, the only one
+    with a published number), tae_vda is upstream's verbatim: K as written
+    (their eval does not shift the principal point for the 8/11 crop) and a
+    pair touching a non-finite pose scored 0. Everywhere else it uses the
+    crop-corrected K and drops such pairs, like tae_ours, since there is no
+    upstream number to match and both quirks only bias it. `aligned` is
+    score_sequence's published-aligned depth when the main pass already
+    computed it."""
     H, W = gt.shape[1:]
     if aligned is None:
         pred_gt = (
@@ -401,6 +415,7 @@ def score_tae_sequence(
         if not (np.isfinite(a).all() and np.isfinite(b).all())
     )
     Ks_ours = [scaled_intrinsics(k, spec.crop, (H, W), (H, W)) for k in Ks_raw]
+    parity = spec.tae_json is not None and seq.rgb_uncropped
     valid = P.gt_valid_mask(gt, spec.max_depth)
     tae_abs, tae_sq = P.tae_ours(aligned, valid, Ks_ours, poses)
     return {
@@ -410,10 +425,15 @@ def score_tae_sequence(
         "density": density,
         "realized_density": realized,
         "frames": int(gt.shape[0]),
-        "tae_vda": P.tae_vda(aligned, Ks_raw, poses),
+        "tae_vda": (
+            P.tae_vda(aligned, Ks_raw, poses)
+            if parity
+            else P.tae_vda(aligned, Ks_ours, poses, bad_pose_pairs_score_zero=False)
+        ),
         "tae_ours": tae_abs,
         "tae_ours_sq": tae_sq,
-        # pairs touching a non-finite pose: scored 0 in tae_vda, dropped in tae_ours
+        # pairs touching a non-finite pose: scored 0 in tae_vda on VDA's TAE
+        # manifest, dropped everywhere else and always in tae_ours
         "tae_bad_pose_pairs": bad_pairs,
     }
 
@@ -787,6 +807,14 @@ def run_benchmark(
                             cloud_dir
                             / f"{spec.name}_{seq.name}_{density_key(density)}_{MODE_STREAM}.npz"
                         )
+                        # the viewer's stats on the pixels `metric` scores:
+                        # GT-valid, fed sparse pixels held out
+                        score = torch.stack(
+                            [
+                                v["valid_mask"][0] & ~v["sparse_depth_mask"][0].bool()
+                                for v in views
+                            ]
+                        )
                         save_cloud(
                             path,
                             spec,
@@ -796,6 +824,7 @@ def run_benchmark(
                             density,
                             MODE_STREAM,
                             cfg.cloud_frames,
+                            score_mask=score.cpu().numpy(),
                         )
                         _render_cloud(path)
                         cloud_paths.append(path)

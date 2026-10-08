@@ -260,25 +260,30 @@ def _commit() -> str:
             ],
             text=True,
         )
-        untracked = subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "--",
-                *_CODE_PATHS,
-            ],
-            text=True,
-        ).split()
+        untracked = [
+            p
+            for p in subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "ls-files",
+                    "-z",
+                    "--others",
+                    "--exclude-standard",
+                    "--",
+                    *_CODE_PATHS,
+                ],
+                text=True,
+            ).split("\0")
+            if p
+        ]
+        h = hashlib.sha1(diff.encode())
+        for rel in sorted(untracked):
+            h.update(rel.encode())
+            h.update((repo / rel).read_bytes())
     except (OSError, subprocess.CalledProcessError, ValueError):
         return "unknown"
-    h = hashlib.sha1(diff.encode())
-    for rel in sorted(untracked):
-        h.update(rel.encode())
-        h.update((repo / rel).read_bytes())
     if not diff.strip() and not untracked:
         return head
     return f"{head}+{h.hexdigest()[:8]}"
@@ -367,6 +372,8 @@ def benchmark(args) -> None:
         densities=tuple(args.densities),
         tae_datasets=tuple(args.tae_datasets),
         image_size=args.image_size,
+        seed=args.seed,
+        patch_size=args.patch_size,
         max_sequences=args.max_sequences,
         clouds_per_dataset=0,
         spot=False,
@@ -436,7 +443,7 @@ def benchmark(args) -> None:
             )
             for density in cfg.densities:
                 realized = BE.attach_sparse_depth(
-                    views, density, tag, args.patch_size, args.seed, device
+                    views, density, tag, cfg.patch_size, cfg.seed, device
                 )
                 # a RGB-only arm's output does not depend on the draw: one inference
                 if pred is None or arm.info.prompted:
@@ -475,8 +482,8 @@ def benchmark(args) -> None:
                         views,
                         density,
                         f"{spec.name}/tae/{seq.name}",
-                        args.patch_size,
-                        args.seed,
+                        cfg.patch_size,
+                        cfg.seed,
                         device,
                     )
                     if pred is None or arm.info.prompted:
@@ -517,8 +524,6 @@ def benchmark(args) -> None:
                     )
                     for k, v in vars(cfg).items()
                 },
-                "sparse_seed": args.seed,
-                "patch_size": args.patch_size,
                 "commit": _commit(),
                 "job_id": os.environ.get("SLURM_JOB_ID", "none"),
                 "aggregate": result,

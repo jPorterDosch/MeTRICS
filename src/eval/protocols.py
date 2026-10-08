@@ -280,8 +280,12 @@ def ovda_aligned_metrics(
 
 
 def depth_to_disparity(depth: np.ndarray) -> np.ndarray:
-    """1/depth with the same floor VDA applies to its own disparity."""
-    return 1.0 / np.clip(depth.astype(np.float64), DEPTH_FLOOR, None)
+    """1/depth with the same floor VDA applies to its own disparity. A
+    non-finite depth (a bf16 head overflowing to +-inf, or NaN) becomes a NaN
+    disparity, which every protocol excludes from its fit and scores as an
+    error -- never a finite value the fit could map to a plausible depth."""
+    d = depth.astype(np.float64)
+    return np.where(np.isfinite(d), 1.0 / np.clip(d, DEPTH_FLOOR, None), np.nan)
 
 
 def as_disparity(pred: np.ndarray, output: str) -> np.ndarray:
@@ -413,6 +417,7 @@ def tae_vda(
     Ks: list[np.ndarray],
     poses: list[np.ndarray],
     device: torch.device | str | None = None,
+    bad_pose_pairs_score_zero: bool = True,
 ) -> float:
     """VDA's TAE over a sequence, verbatim from eval_tae.py::eval_TAE minus
     the file I/O: for every adjacent pair, project frame i's depth into frame
@@ -427,8 +432,11 @@ def tae_vda(
     code -- NaN reprojections leave no valid pixel -- so it is scored 0 and
     counted in the mean here too, explicitly rather than through a NaN->long
     cast whose result is platform-defined. Upstream parity, not correctness:
-    tae_ours drops those pairs instead. Runs on `device` (default: cuda when
-    available -- 170 frames at 464x618 is minutes on a CPU)."""
+    tae_ours drops those pairs instead. bad_pose_pairs_score_zero=False drops
+    them here too: for every split but VDA's ScanNet TAE manifest there is no
+    upstream number to stay in parity with, and a 0 would only bias the mean
+    low. Runs on `device` (default: cuda when available -- 170 frames at
+    464x618 is minutes on a CPU)."""
     _check_seq("depth", depth)
     S = depth.shape[0]
     if S < 2:
@@ -441,9 +449,12 @@ def tae_vda(
     depth_t = torch.from_numpy(np.ascontiguousarray(depth)).double().to(device)
     ones = torch.ones(depth.shape[1:], dtype=torch.bool, device=device)
     error_sum = 0.0
+    n_pairs = S - 1
     for i in range(S - 1):
         if not (np.isfinite(poses[i]).all() and np.isfinite(poses[i + 1]).all()):
-            continue  # upstream scores this pair 0 (see docstring); denominator unchanged
+            if not bad_pose_pairs_score_zero:
+                n_pairs -= 1  # dropped
+            continue  # upstream: scored 0, denominator unchanged
         d1, d2 = depth_t[i], depth_t[i + 1]
         R_2_1, t_2_1 = _relative_pose(poses[i], poses[i + 1])
         R_1_2, t_1_2 = _relative_pose(poses[i + 1], poses[i])
@@ -455,7 +466,9 @@ def tae_vda(
             d2, d1, torch.from_numpy(R_1_2).double().to(device), t_1_2, K, ones
         )
         error_sum += float(e1) + float(e2)
-    return error_sum / (2 * (S - 1)) * 100.0
+    if n_pairs == 0:
+        return float("nan")
+    return error_sum / (2 * n_pairs) * 100.0
 
 
 def tae_ours(

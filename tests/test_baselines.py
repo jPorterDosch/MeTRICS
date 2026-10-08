@@ -8,7 +8,6 @@ reproduction runner's plumbing, on CPU with fake models (no weights).
 
 from __future__ import annotations
 
-import copy
 import importlib.util
 import json
 import os
@@ -63,6 +62,19 @@ def _record(*targets, status=R.PENDING):
     }
 
 
+def _verified_entry():
+    """An arm entry the gate accepts: one gating target, measured within
+    tolerance by one identifiable code state (status is recomputed, never
+    trusted)."""
+    t = {
+        **_target("0.100"),
+        "measured": 0.1,
+        "within_tolerance": True,
+        "measured_commit": "abc1234",
+    }
+    return {"status": R.VERIFIED, "status_note": "", "targets": [t], "runs": []}
+
+
 class ToleranceTest(unittest.TestCase):
     def test_larger_of_relative_and_last_digit(self):
         # 2% of 0.944 beats two units of the third decimal
@@ -102,7 +114,7 @@ class GateTest(unittest.TestCase):
             R.require_allowed(rec, "fake", [("kitti", "published")])
 
     def test_verified_arm_is_open(self):
-        rec = _record(_target(dataset="sintel"), status=R.VERIFIED)
+        rec = {"tolerance": TOL, "arms": {"fake": _verified_entry()}}
         R.require_allowed(
             rec, "fake", [("kitti", "sparse_aligned"), ("spot", "metric")]
         )
@@ -137,7 +149,10 @@ class StatusTest(unittest.TestCase):
     def _apply(self, **measured):
         ids = {"a": self.a["id"], "b": self.b["id"], "info": self.info["id"]}
         return R.apply_measurements(
-            self.rec, "fake", {ids[k]: v for k, v in measured.items()}, {"job_id": "1"}
+            self.rec,
+            "fake",
+            {ids[k]: v for k, v in measured.items()},
+            {"job_id": "1", "commit": "abc1234"},
         )
 
     def test_verified_needs_every_gating_target(self):
@@ -195,14 +210,8 @@ class RecordFileTest(unittest.TestCase):
             if entry["status"] == R.VERIFIED:
                 self.assertTrue(entry["runs"], name)
                 self.assertTrue(all(t.get("within_tolerance") for t in gating), name)
-            # recomputing the status from the stored measurements must agree
-            again = copy.deepcopy(rec)
-            stored = {
-                t["id"]: t["measured"] for t in entry["targets"] if "measured" in t
-            }
-            self.assertEqual(
-                R.apply_measurements(again, name, stored, {}), entry["status"], name
-            )
+            # the stored status is what the stored measurements support
+            self.assertEqual(R.computed_status(entry), entry["status"], name)
 
 
 def _gt(S=4, H=12, W=16, seed=0):
@@ -739,12 +748,7 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
         import argparse
 
         rec = R.load()
-        rec["arms"]["fake"] = {
-            "status": R.VERIFIED,
-            "status_note": "",
-            "targets": [],
-            "runs": [],
-        }
+        rec["arms"]["fake"] = _verified_entry()
         with tempfile.TemporaryDirectory() as tmp:
             _fake_bonn_tree(Path(tmp))
             rec_path = Path(tmp) / "rec.json"
@@ -804,12 +808,7 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
                 return self.gt_of(frames)[:, ::2, ::2].astype(np.float32)
 
         rec = R.load()
-        rec["arms"]["fakep"] = {
-            "status": R.VERIFIED,
-            "status_note": "",
-            "targets": [],
-            "runs": [],
-        }
+        rec["arms"]["fakep"] = _verified_entry()
         with tempfile.TemporaryDirectory() as tmp:
             _fake_bonn_tree(Path(tmp))
             rec_path = Path(tmp) / "rec.json"
@@ -845,12 +844,7 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
         import argparse
 
         rec = R.load()
-        rec["arms"]["fake"] = {
-            "status": R.VERIFIED,
-            "status_note": "",
-            "targets": [],
-            "runs": [],
-        }
+        rec["arms"]["fake"] = _verified_entry()
         with tempfile.TemporaryDirectory() as tmp:
             _fake_bonn_tree(Path(tmp))
             rec_path = Path(tmp) / "rec.json"
@@ -908,6 +902,65 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
         )
         with self.assertRaises(R.GateError):
             BB.benchmark(args)
+
+
+class SecondFullReviewTest(unittest.TestCase):
+    def test_infinite_depth_is_an_error_in_published(self):
+        gt = _gt()
+        gt[gt == 0] = 2.0
+        depth = gt.copy()
+        clean, _ = P.published_metrics(P.as_disparity(depth, "depth"), gt, 10.0)
+        for bad in (np.inf, -np.inf):
+            d = depth.copy()
+            d[0, 3, 3] = bad
+            m, aligned = P.published_metrics(P.as_disparity(d, "depth"), gt, 10.0)
+            self.assertAlmostEqual(float(aligned[0, 3, 3]), 10.0, places=4)
+            self.assertLess(
+                abs(m.abs_rel - clean.abs_rel), 0.05
+            )  # the fit is not corrupted
+
+    def test_gate_needs_an_identifiable_single_code_state(self):
+        t = _target("0.100")
+        for commit in (None, "unknown", "e4a9013+dirty"):
+            rec = _record(dict(t))
+            R.apply_measurements(rec, "fake", {t["id"]: 0.1}, {"commit": commit})
+            self.assertEqual(rec["arms"]["fake"]["status"], R.PENDING, commit)
+        rec = _record(dict(t))
+        R.apply_measurements(
+            rec, "fake", {t["id"]: 0.1}, {"commit": "abc1234+deadbeef"}
+        )
+        self.assertEqual(rec["arms"]["fake"]["status"], R.VERIFIED)
+        # a hand-typed `verified` does not open the gate
+        rec2 = _record(dict(t), status=R.VERIFIED)
+        with self.assertRaises(R.GateError):
+            R.require_allowed(rec2, "fake", [("kitti", "sparse_aligned")])
+
+    def test_tae_vda_drops_bad_pose_pairs_outside_parity(self):
+        S = 4
+        depth = np.ones((S, 6, 8), np.float32) * 2.0
+        K = [np.array([[4.0, 0, 4], [0, 4.0, 3], [0, 0, 1]])] * S
+        poses = [np.eye(4) for _ in range(S)]
+        poses[2] = np.full((4, 4), np.nan)
+        self.assertEqual(P.tae_vda(depth, K, poses, device="cpu"), 0.0)
+        self.assertEqual(
+            P.tae_vda(depth, K, poses, device="cpu", bad_pose_pairs_score_zero=False),
+            0.0,
+        )
+        allbad = [np.full((4, 4), np.nan)] * S
+        self.assertTrue(
+            np.isnan(
+                P.tae_vda(
+                    depth, K, allbad, device="cpu", bad_pose_pairs_score_zero=False
+                )
+            )
+        )
+
+    def test_reproduce_only_trees_are_not_benchmark_datasets(self):
+        import bench_eval as BE
+
+        for d in BE.REPRODUCE_ONLY:
+            with self.assertRaises(ValueError):
+                BE.BenchmarkCfg(datasets=(d,)).validate()
 
 
 class FinalReviewFixesTest(unittest.TestCase):
