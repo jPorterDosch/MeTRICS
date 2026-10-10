@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=repro_baseline
 #SBATCH --account=isaac-utk0256
-#SBATCH --partition=ai-tenn
-#SBATCH --qos=ai-tenn
+#SBATCH --partition=campus-gpu-large
+#SBATCH --qos=campus-gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:v100s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=10:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/repro_baseline_%j.out
 #SBATCH --error=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/repro_baseline_%j.out
 
@@ -20,10 +20,16 @@
 #
 #   ARM=vda        sbatch -J repro_vda        experiments/baselines/reproduce.sh
 #   ARM=vda_metric sbatch -J repro_vda_metric experiments/baselines/reproduce.sh
-#   ARM=ovda       sbatch -J repro_ovda       experiments/baselines/reproduce.sh
+#   ARM=ovda       sbatch -J repro_ovda --mem=300G experiments/baselines/reproduce.sh
 #   ARM=promptda   sbatch -J repro_promptda   experiments/baselines/reproduce.sh
 #   ARM=dav        sbatch -J repro_dav        experiments/baselines/reproduce.sh
-#   ARM=vda MAX_SEQ=2 sbatch -p ai-tenn-debug -q ai-tenn-debug --time=01:00:00 ...   # smoke test, record untouched
+#   ARM=vda MAX_SEQ=2 sbatch -p ai-tenn-debug -q ai-tenn-debug --gres=gpu:h100:1 --time=01:00:00 ...   # smoke test, record untouched
+#
+# Defaults are what verified vda and ovda (2026-10-08): one 32 GB V100S;
+# 16 GB cards run out of memory on VDA-L. ovda needs --mem=300G: the
+# authors' scoring holds a whole sequence in memory, and the 10,000-frame
+# Bonn sequence peaked at 215 GB. Split a long arm with --datasets (any
+# subset; jobs at the same commit combine into one verification).
 #
 # Before the first run of an arm, on a login node (compute nodes are offline):
 #   python src/bench_baselines.py fetch --arm <arm>          # weights -> Lustre
@@ -32,8 +38,10 @@
 #       --video_id_csv datasets_download/raw/upsampling_train_val_splits.csv --num_workers 8
 # dav runs from its own venv (experiments/baselines/setup_dav_env.sh).
 #
-# Rough cost on one H100 (estimates, not measured): vda ~4 h (scannet_500 is
-# 100 x 500 frames), the others under 2 h each.
+# Measured on one V100S (2026-10-08): vda scannet 3.3 h, scannet_500 5.8 h,
+# kitti kitti_500 bonn_all bonn_all_500 sintel_bgr 2.3 h; ovda ovda_kitti
+# 3.5 h, ovda_sintel ovda_bonn 1.3-1.5 h. The other arms: under 2 h each on
+# an H100 (estimate).
 
 set -euo pipefail
 

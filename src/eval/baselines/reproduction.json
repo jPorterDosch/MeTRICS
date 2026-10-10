@@ -26,8 +26,8 @@
         "license": "CC-BY-NC-4.0"
       },
       "settings": "benchmark/infer/infer.py: input_size 518 (short side, reduced when aspect > 1.78), fp32, 32-frame windows. Data settings found by running VDA's own unmodified scripts on variants of the tree (2026-10-04, jobs 6327481, 6327549, 6327659, 6327762): Bonn = all 26 sequences (`bonn_all`, `bonn_all_500`), which is what its extractor takes; Sintel = colour files with R and B swapped on disk (`sintel_bgr`), which is what its extractor writes; ScanNet TAE over all 100 scenes, because its 20 are the first 20 of an unsorted glob and cannot be recovered.",
-      "status": "pending-gpu",
-      "status_note": "Stored measurements match the paper (15/15 within tolerance) but were taken before measured_commit existed and under the legacy '+dirty' code string, so they identify no code state; status recomputed to pending-gpu 2026-10-07. Rerun `reproduce --arm vda` at the merge commit (all datasets in one job, or split jobs at the same commit) to verify. Verified 2026-10-05 through this pipeline (jobs 6329345, 6329347): 15 of 15 gating targets. What it took, each measured with VDA's own unmodified scripts first: Bonn over all 26 sequences (bonn_all, bonn_all_500; the 5 DepthCrafter sequences give 0.0592 / 0.0821 instead of 0.053 / 0.071); Sintel on R/B-swapped colour files, as its extractor writes them (sintel_bgr 0.2981; true colours 0.3010; paper 0.295); ScanNet TAE over all 100 scenes (0.5659; paper 0.570 on an unrecoverable 20 -- the first 20 of an unsorted glob; a 20-scene mean has std 0.038). Ruled out along the way: Sintel depth encoding and depth cap; colour order for Bonn and TAE; TAE colour resolution (1296x968: 0.6020); Bonn timestamp pairing (other side of the paper: 0.0506 / 0.0681 on 5 sequences).",
+      "status": "verified",
+      "status_note": "Verified 2026-10-08 at code 210603e+1fb2f7a0 (jobs 6351249, 6353003, 6353004): 15 of 15 gating targets, all measured by that one code state. First verified 2026-10-05 (jobs 6329345, 6329347) under the legacy '+dirty' code string, which identified no code state. What it took, each measured with VDA's own unmodified scripts first: Bonn over all 26 sequences (bonn_all, bonn_all_500; the 5 DepthCrafter sequences give 0.0592 / 0.0821 instead of 0.053 / 0.071); Sintel on R/B-swapped colour files, as its extractor writes them (sintel_bgr 0.2981; true colours 0.3010; paper 0.295); ScanNet TAE over all 100 scenes (0.5659; paper 0.570 on an unrecoverable 20 -- the first 20 of an unsorted glob; a 20-scene mean has std 0.038). Ruled out along the way: Sintel depth encoding and depth cap; colour order for Bonn and TAE; TAE colour resolution (1296x968: 0.6020); Bonn timestamp pairing (other side of the paper: 0.0506 / 0.0681 on 5 sequences).",
       "targets": [
         {
           "id": "t1_kitti_absrel",
@@ -40,7 +40,7 @@
           "gate": true,
           "measured": 0.08375992925040253,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_kitti_delta1",
@@ -53,7 +53,7 @@
           "gate": true,
           "measured": 0.9400281997827383,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_scannet_absrel",
@@ -64,8 +64,9 @@
           "protocol": "published",
           "metric": "abs_rel",
           "gate": true,
-          "measured": 0.08924886089829061,
-          "within_tolerance": true
+          "measured": 0.08928312091976441,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_scannet_delta1",
@@ -76,8 +77,9 @@
           "protocol": "published",
           "metric": "delta1",
           "gate": true,
-          "measured": 0.9257990634441375,
-          "within_tolerance": true
+          "measured": 0.925478405058384,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_bonn_absrel",
@@ -90,7 +92,7 @@
           "gate": true,
           "measured": 0.0701842584123855,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_bonn_delta1",
@@ -103,7 +105,7 @@
           "gate": true,
           "measured": 0.9615073547913477,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_nyuv2_absrel",
@@ -138,7 +140,7 @@
           "gate": true,
           "measured": 0.29810527420735256,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_sintel_delta1",
@@ -151,7 +153,7 @@
           "gate": true,
           "measured": 0.6393983927757844,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_scannet_tae",
@@ -162,8 +164,9 @@
           "protocol": "tae",
           "metric": "tae_vda",
           "gate": true,
-          "measured": 0.565853168287351,
-          "within_tolerance": true
+          "measured": 0.5632903579406797,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t7_kitti_absrel",
@@ -176,7 +179,7 @@
           "gate": true,
           "measured": 0.07964727056899842,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t7_kitti_delta1",
@@ -189,7 +192,7 @@
           "gate": true,
           "measured": 0.9507544636726379,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t7_bonn_absrel",
@@ -202,7 +205,7 @@
           "gate": true,
           "measured": 0.0532625429975652,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t7_bonn_delta1",
@@ -215,7 +218,7 @@
           "gate": true,
           "measured": 0.9722860891085404,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+1fb2f7a0"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t7_scannet_absrel",
@@ -226,8 +229,9 @@
           "protocol": "published",
           "metric": "abs_rel",
           "gate": true,
-          "measured": 0.074726482335527,
-          "within_tolerance": true
+          "measured": 0.07472558494059972,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t7_scannet_delta1",
@@ -238,8 +242,9 @@
           "protocol": "published",
           "metric": "delta1",
           "gate": true,
-          "measured": 0.9547513157129288,
-          "within_tolerance": true
+          "measured": 0.9546821147203446,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         }
       ],
       "runs": [
@@ -283,6 +288,36 @@
           "commit": "0eed74f+1fb2f7a0",
           "job_id": "6348526",
           "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-08T15:43:48",
+          "commit": "0eed74f+2f3804c5",
+          "job_id": "6351229",
+          "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-08T16:47:55",
+          "commit": "0eed74f+2f3804c5",
+          "job_id": "6351228",
+          "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-08T19:06:21",
+          "commit": "210603e+1fb2f7a0",
+          "job_id": "6351249",
+          "host": "clrv1105"
+        },
+        {
+          "date": "2026-10-08T21:48:48",
+          "commit": "210603e+1fb2f7a0",
+          "job_id": "6353004",
+          "host": "clrv1201"
+        },
+        {
+          "date": "2026-10-08T22:37:34",
+          "commit": "210603e+1fb2f7a0",
+          "job_id": "6353003",
+          "host": "clrv0703"
         }
       ]
     },
@@ -543,8 +578,8 @@
         "license": "NC-SA-UHDV1.0 (Heidelberg University, non-commercial, share-alike)"
       },
       "settings": "The authors' own evaluation (third_party/ovda/evaluation, sent by the first author 2026-10-08), run through src/eval/ovda_paper.py: Sintel final pass with .dpt GT (23 sequences, 1064 frames); Bonn all 26 sequences, RGB/depth paired by timestamp (< 20 ms, greedy one-to-one; 29,064 pairs); KITTI the 138 data_depth_annotated/train drives, image_03 and image_02 as separate sequences (276 sequences, 85,898 frames), no crop. Only paired frames are fed; infer_video_depth(input_size=518) (fp32 here, fp16 in the paper). Their protocol: per-sequence fit of the inverse-depth prediction to 1/GT on frame 0 (ovda_first) or all frames (ovda_all), GT valid 0 < GT < limit (Sintel 10000, KITTI 255.9, Bonn 100 m) and unclipped in the fit, prediction clipped to [0, 80] m, scoring on GT < 80 m from frame 1, pixel-weighted over the dataset, delta1 <= 1.25.",
-      "status": "pending-gpu",
-      "status_note": "Retargeted 2026-10-08 to the authors' reference evaluation. Check before the retarget: their protocol.py on our saved Sintel final-pass predictions (job 6321823) gives first-frame 0.3799 / 0.5477 and global 0.2941 / 0.6035 against the paper's 0.380 / 0.548 and 0.294 / 0.604, so our inference was right and every earlier gap was scoring and data (the 'clip GT at 80 m' match of 2026-10-04 on the clean pass was two wrong settings cancelling). Needs a GPU run: Sintel and Bonn are on Lustre; KITTI needs the raw RGB of the 138 train drives.",
+      "status": "verified",
+      "status_note": "Retargeted 2026-10-08 to the authors' reference evaluation. Check before the retarget: their protocol.py on our saved Sintel final-pass predictions (job 6321823) gives first-frame 0.3799 / 0.5477 and global 0.2941 / 0.6035 against the paper's 0.380 / 0.548 and 0.294 / 0.604, so our inference was right and every earlier gap was scoring and data (the 'clip GT at 80 m' match of 2026-10-04 on the clean pass was two wrong settings cancelling). Verified 2026-10-08 at code 210603e+1fb2f7a0 (jobs 6352383 KITTI, 6353005 Sintel + Bonn): 12 of 12 gating targets. The four Table 8 '500' targets are non-gating and not run.",
       "targets": [
         {
           "id": "t1_sintel_absrel",
@@ -557,7 +592,7 @@
           "gate": true,
           "measured": 0.3798716815270509,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+645548fc"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_sintel_delta1",
@@ -570,7 +605,7 @@
           "gate": true,
           "measured": 0.5476550756223459,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+645548fc"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_kitti_absrel",
@@ -580,7 +615,10 @@
           "dataset": "ovda_kitti",
           "protocol": "ovda_first",
           "metric": "abs_rel",
-          "gate": true
+          "gate": true,
+          "measured": 0.13986465749985263,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_kitti_delta1",
@@ -590,7 +628,10 @@
           "dataset": "ovda_kitti",
           "protocol": "ovda_first",
           "metric": "delta1",
-          "gate": true
+          "gate": true,
+          "measured": 0.8094185650657748,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_bonn_absrel",
@@ -603,7 +644,7 @@
           "gate": true,
           "measured": 0.11828170766663341,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+645548fc"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t1_bonn_delta1",
@@ -616,7 +657,7 @@
           "gate": true,
           "measured": 0.8708126746726423,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+645548fc"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t8_sintel_absrel",
@@ -629,7 +670,7 @@
           "gate": true,
           "measured": 0.2940774958429419,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+645548fc"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t8_sintel_delta1",
@@ -642,7 +683,7 @@
           "gate": true,
           "measured": 0.6034794212147627,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+645548fc"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t8_kitti_all_absrel",
@@ -652,7 +693,10 @@
           "dataset": "ovda_kitti",
           "protocol": "ovda_all",
           "metric": "abs_rel",
-          "gate": true
+          "gate": true,
+          "measured": 0.11234770134469808,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t8_kitti_all_delta1",
@@ -662,7 +706,10 @@
           "dataset": "ovda_kitti",
           "protocol": "ovda_all",
           "metric": "delta1",
-          "gate": true
+          "gate": true,
+          "measured": 0.8761554393172942,
+          "within_tolerance": true,
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t8_bonn_all_absrel",
@@ -675,7 +722,7 @@
           "gate": true,
           "measured": 0.10923672680111124,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+645548fc"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t8_bonn_all_delta1",
@@ -688,7 +735,7 @@
           "gate": true,
           "measured": 0.8870393542123141,
           "within_tolerance": true,
-          "measured_commit": "0eed74f+645548fc"
+          "measured_commit": "210603e+1fb2f7a0"
         },
         {
           "id": "t8_kitti500_absrel",
@@ -780,6 +827,24 @@
           "commit": "0eed74f+645548fc",
           "job_id": "6350220",
           "host": "clrv1105"
+        },
+        {
+          "date": "2026-10-08T18:22:50",
+          "commit": "0eed74f+2f3804c5",
+          "job_id": "6352384",
+          "host": "clrv1105"
+        },
+        {
+          "date": "2026-10-08T20:15:25",
+          "commit": "210603e+1fb2f7a0",
+          "job_id": "6352383",
+          "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-08T21:30:45",
+          "commit": "210603e+1fb2f7a0",
+          "job_id": "6353005",
+          "host": "clrv1205"
         }
       ]
     },
