@@ -35,7 +35,8 @@ Known, deliberate differences from upstream's inference scripts:
 - Upstream's `load_local_checkpoint` only warns when nothing matched; ours
   makes a zero-key-overlap checkpoint fatal.
 - Prompt validity: upstream derives it as `(d > 0) & (d < 1000)`; we intersect
-  the dataset/sensor mask with a 100 m cutoff (`_PROMPT_DEPTH_MAX_M`, matching
+  the dataset/sensor mask with a 100 m cutoff (`PROMPT_DEPTH_MAX_M` in
+  `src/eval/baselines/arms.py`, matching
   the ONNX export graph's `depth_max`). Neither bound is reachable by real
   data here — the loaders read uint16-millimetre PNGs (65.535 m max) and
   SPOT's float32 depth tops out near 6 m — so this only catches garbage.

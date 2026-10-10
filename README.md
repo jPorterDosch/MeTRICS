@@ -338,8 +338,8 @@ MeTRICS
 The end-of-training benchmark scores the final weights on the datasets of
 [Video Depth Anything](https://github.com/DepthAnything/Video-Depth-Anything)'s
 protocol -- Sintel 23 x 50, ScanNet 100 x 90 (every 3rd frame), KITTI 13 x 110,
-Bonn 5 x 110, NYUv2 654 stills -- so a row of ours sits next to a row of
-theirs. It runs once, after the streaming eval, never per epoch, and also in
+Bonn 26 x 110 (`bonn_all`; `bonn` is DepthCrafter's 5-sequence list), NYUv2
+654 stills -- so a row of ours sits next to a row of theirs. It runs once, on the final weights, never per epoch, and also in
 the `--epochs 0` pure-eval path, so any checkpoint or baseline arm can be
 rescored under the identical code. Implementation: `src/bench_eval.py`
 (orchestration), `src/eval/protocols.py` (scoring), `src/eval/vda_benchmark.py`
@@ -372,13 +372,14 @@ trusting Bonn TAE or Bonn snapshots.
 |---|---|---|
 | `published` | one scale+shift per **video**, in **disparity**, against dense GT (VDA's `eval.py`, verbatim) | the only mode in which numbers from their tables are comparable |
 | `sparse_aligned` | one scale+shift per **frame**, fitted on the **sparse-depth pixels only**, in each model's native output space; sparse-depth pixels held out of the score | given the same sparse sensor, who completes it best -- causal, and symmetric between models that consume the sparse depth and models that only see it post hoc |
-| `metric` | none | calibration |
+| `metric` | none; sparse-depth pixels held out of the score, as in `sparse_aligned` | calibration -- of the completion, not of the copied input |
 
 plus two TAEs on the published-aligned depth: `tae_vda` (theirs, vendored,
 x100) and `tae_ours` (`eval/temporal_consistency/metrics.py`). They differ in
 definition and are never blended. Both reproject with the manifest's GT
 cameras, never the model's, on every video dataset: ScanNet on VDA's TAE
-split (20 scenes x 170 consecutive frames, their own manifest -- the one
+split (all 100 scenes x 170 consecutive frames, their own manifest; VDA
+scores an arbitrary 20 of them, see "Baseline arms" -- the one
 dataset they report it on), the others on their main-pass predictions with
 the cameras the preparer attached (ours-only rows until the baselines are
 run). `--bench.tae-datasets` narrows it.
@@ -399,7 +400,7 @@ snapshot (its first `--bench.cloud-frames` frames); they use the predicted camer
 skips it; `--bench.spot-*` sets sequences, windows, stride and holdout.
 
 **500-frame variant.** VDA's headline table scores up to 500 frames per
-video; `--bench.datasets scannet_500 kitti_500 bonn_500` runs that protocol
+video; `--bench.datasets scannet_500 kitti_500 bonn_all_500` runs that protocol
 from the `*_video_500.json` manifests the same extractor writes (ScanNet at
 stride 1 there). Opt-in, ~4.5x the frames of the short protocol; run it on
 the final checkpoint. Sintel is 50 frames either way, and NYU's 500-frame
@@ -409,8 +410,12 @@ same pass whenever `scannet_500` is benchmarked.
 
 **Sparse depth.** One `TUBE_MASK` patch mask per sequence (the same pixels in every
 frame, like a static sensor pattern -- no mask flicker in the TAE), seeded by
-(dataset, sequence, density), so every mode, checkpoint and baseline gets the
-identical pixel set. Density is swept: `--bench.densities 0.01 0.05 0.4` by
+(dataset, sequence, density) and `--bench.seed` / `--bench.patch-size` (42 /
+14; benchmark settings, independent of the run's training seed and patch
+size), so every mode, checkpoint and baseline gets the identical pixel set.
+The ScanNet TAE clips are predicted in full (192 frames) and scored on frames
+10-180, as VDA does, so no model is scored on its warm-up. The benchmark
+runs at the run's own `--amp`. Density is swept: `--bench.densities 0.01 0.05 0.4` by
 default (1%, the 5% training density, and 40% ~ SPOT's real sensor).
 
 **Mode.** Ours runs streaming only -- the per-frame KV-cache path, i.e.
@@ -418,9 +423,9 @@ deployment. There is no separate "offline" row for this model on purpose:
 `StreamVGGT.forward` applies the same causal mask the cache reproduces
 incrementally, so the full-sequence forward is the same function up to
 kernel numerics (and it materialises an `[S·P, S·P]` mask that does not fit
-at 110+ frames). VDA's offline and streaming rows are both reported, from
-their table and their released cache mode. NYUv2 stills are one-frame
-sequences.
+at 110+ frames). Baseline arms carry their own mode: VDA, Depth Any Video
+and Metric-VDA are offline (whole-clip windows), oVDA and PromptDA causal.
+NYUv2 stills are one-frame sequences.
 
 ```bash
 # in a training script, or a pure eval of an existing checkpoint:
@@ -461,6 +466,52 @@ python src/serve_glb.py --glb-dir <run>/bench_clouds      # port-forward, then h
 python src/cloud_viewer.py <run>/bench_clouds/*.npz --every 1   # rebuild at full resolution, or --cameras pred
 python src/render_clouds.py <run>/bench_clouds/*.npz --mask-to-gt   # GLB with other options
 ```
+
+### Baseline arms and the reproduction gate
+
+Four baselines are vendored under `third_party/` (each with a
+`README_VENDORED.md`): Prompt Depth Anything (per frame, prompted, metric),
+Video Depth Anything (VDA-L, and Metric-VDA-L for the `metric` table), Depth
+Any Video, and Online Video Depth Anything (oVDA, the causal one). One adapter
+per model lives in `src/eval/baselines/arms.py`; each calls the model's own
+inference entry point with the settings its paper evaluates at.
+
+**Gate.** `src/eval/baselines/reproduction.json` lists, per arm, the numbers
+its own paper prints (table and row cited), what our loaders and scoring
+measure for them, and a status. Until an arm is `verified` -- every gating
+target within max(2% relative, 2 units of the last printed digit) --
+`arms.build_arm` refuses to build it for anything but its paper's (dataset,
+protocol) pairs: no `sparse_aligned`, no density sweep, no SPOT. The status
+is computed from a complete run (`record.apply_measurements`), never typed. A
+miss is diagnosed and recorded as `failed` with its cause; the tolerance and
+the protocol are not adjusted to fit. Targets whose split or sequence list
+the paper does not publish are recorded but do not gate, each with the
+reason.
+
+```bash
+python src/bench_baselines.py status                        # per arm: status, gating targets met
+python src/bench_baselines.py fetch --arm vda               # login node: released weights -> Lustre
+ARM=vda sbatch -J repro_vda experiments/baselines/reproduce.sh   # GPU: the arm's paper targets
+```
+
+**What reproducing VDA showed about the data.** VDA's own unmodified scripts
+give the same numbers as this pipeline to four digits on the same tree, so
+its gaps to the paper were data preparation, found by varying the tree:
+
+| paper number | needs | our benchmark uses |
+|---|---|---|
+| Bonn (0.053 / 0.071) | all 26 Bonn sequences -- its extractor takes every directory; the 5-sequence list is DepthCrafter's | both: `bonn` (5) and `bonn_all` / `bonn_all_500` (26) |
+| Sintel (0.295) | colour files with R and B swapped on disk, as its extractor writes them (PIL array through `cv2.imwrite`) | true colours (`sintel`); `sintel_bgr` exists only to reproduce the number |
+| ScanNet TAE (0.570) | an unrecoverable 20 of the 100 scenes (first 20 of an unsorted glob; a 20-scene mean moves by +-0.04 with the draw) | all 100 scenes |
+
+`python datasets_preprocess/prepare_vda_benchmark.py bonn_all sintel_bgr`
+builds the two extra trees (`BONN_ALL=1 bash datasets_download/download_bonn.sh`
+first). The method -- their scripts on our data, then one data variable at a
+time -- is the `reproduce-parity` skill.
+
+Environments, data prerequisites (PromptDA needs the ARKitScenes upsampling
+Validation fold; Depth Any Video its own venv) and the per-arm commands are in
+the header of `experiments/baselines/reproduce.sh`.
 
 ### Visualizing SPOT sequences
 

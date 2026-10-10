@@ -35,7 +35,7 @@ REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 CKPT_ROOT=/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd
 PRETRAINED=${PRETRAINED:-/lustre/isaac24/proj/UTK0516/ckpt/checkpoints.pth}
 BENCH_ROOT=${BENCH_ROOT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench}
-DATASETS=${DATASETS:-sintel scannet kitti bonn nyuv2}
+DATASETS=${DATASETS:-sintel scannet kitti bonn_all nyuv2}
 DENSITIES=${DENSITIES:-0.05}
 MAX_SEQ=${MAX_SEQ:-1}
 

@@ -9,10 +9,10 @@ streaming-vs-offline gap to measure (unlike VDA, whose offline model attends
 bidirectionally). The full forward also materialises an [S*P, S*P] mask
 (~24 GB at 110 frames, 58 GB at the 170-frame TAE sequences) and would OOM.
 
-Called once from finetune_depth.run() after the streaming eval (and in the
+Called once from finetune_depth.run() on the final weights (and in the
 --epochs 0 pure-eval path), never per epoch. Everything is logged under
 "final_bench/<dataset>/<mode>/d<density%>/<protocol>_<metric>" next to the
-val_* / final_stream series, and written to <output_dir>/bench_results.json
+val_* series, and written to <output_dir>/bench_results.json
 with the per-sequence rows behind every mean.
 
 Protocol definitions live in eval.protocols; dataset constants and loading
@@ -71,6 +71,10 @@ _BENCH_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench")
 _SPOT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/spot_data")
 
 PROTOCOLS = ("published", "sparse_aligned", "metric")
+# trees that reproduce one baseline table and are never benchmark datasets:
+# sintel_bgr (VDA's channel-swapped colour files), nyuv2_full (the whole
+# 480x640 frame; the benchmark's loaders apply the Eigen crop to it anyway)
+REPRODUCE_ONLY = ("sintel_bgr", "nyuv2_full")
 MODE_STREAM = "stream"  # the only mode; kept in the keys so a baseline arm's offline rows can sit next to it
 
 
@@ -82,7 +86,10 @@ class BenchmarkCfg:
     enabled: bool = False
     root: Path = _BENCH_ROOT
     """Benchmark tree from datasets_preprocess/prepare_vda_benchmark.py."""
-    datasets: tuple[str, ...] = ("sintel", "scannet", "kitti", "bonn", "nyuv2")
+    datasets: tuple[str, ...] = ("sintel", "scannet", "kitti", "bonn_all", "nyuv2")
+    """bonn_all (all 26 Bonn sequences) is what Video Depth Anything's Bonn
+    numbers are over; `bonn` is DepthCrafter's 5-sequence list, kept for that
+    comparison (see README, "What reproducing VDA showed about the data")."""
     densities: tuple[float, ...] = (0.01, 0.05, 0.40)
     """Sparse depth densities (fraction of patches visible) swept per sequence. 5%
     is the training density; 40% is SPOT's real sensor."""
@@ -90,14 +97,16 @@ class BenchmarkCfg:
         "sintel",
         "scannet",
         "kitti",
-        "bonn",
+        "bonn_all",
         "scannet_500",
         "kitti_500",
+        "bonn_all_500",
+        "bonn",
         "bonn_500",
     )
     """Datasets scored for TAE (both definitions), per density -- every video
     dataset, whenever it is also in `datasets`. ScanNet uses VDA's TAE
-    manifest (20 x 170 consecutive frames, its own pass; the only split VDA
+    manifest (100 x 170 consecutive frames, its own pass; the only split VDA
     reports TAE on); every other one is scored on the predictions of its
     main pass with the GT cameras the preparer attached, so those rows are
     ours-only until the baselines are run."""
@@ -108,6 +117,13 @@ class BenchmarkCfg:
     """The density whose streaming pass is snapshotted; must be swept."""
     image_size: int = 518
     """Long side the model runs at (dust3r load_images_for_eval convention)."""
+    seed: int = 42
+    """Seed of every sparse-depth draw (and SPOT hold-out). Part of the
+    benchmark, NOT the training seed: every checkpoint and every baseline arm
+    gets the identical pixels whatever seed it was trained with."""
+    patch_size: int = 14
+    """Sparse-depth patch size of the TUBE_MASK draw, fixed for the same
+    reason (not the run's depth_cond.sim_patch_size)."""
     max_sequences: int = 0
     """Cap on sequences per dataset, for smoke tests. 0 = all."""
     spot: bool = True
@@ -133,6 +149,12 @@ class BenchmarkCfg:
     the top 4:3 window at 518x392, as the earlier SPOT GIFs. Not comparable."""
 
     def validate(self) -> "BenchmarkCfg":
+        reproduce_only = [d for d in self.datasets if d in REPRODUCE_ONLY]
+        if reproduce_only:
+            raise ValueError(
+                f"bench.datasets {reproduce_only} exist only to reproduce a "
+                "baseline's published number (src/bench_baselines.py reproduce)"
+            )
         unknown = [d for d in self.datasets if d not in SPECS]
         if unknown:
             raise ValueError(
@@ -158,6 +180,10 @@ class BenchmarkCfg:
         if self.cloud_frames <= 0:
             raise ValueError(
                 f"bench.cloud_frames must be positive, got {self.cloud_frames}"
+            )
+        if self.patch_size <= 0:
+            raise ValueError(
+                f"bench.patch_size must be positive, got {self.patch_size}"
             )
         if self.image_size % 14 != 0:
             raise ValueError(
@@ -235,12 +261,23 @@ class Prediction:
     conf: np.ndarray  # [S,h,w]
     w2c: np.ndarray  # [S,3,4] predicted world->cam
     K: np.ndarray  # [S,3,3] predicted intrinsics at model resolution
+    output: str = "depth"
+    """"depth" (metres) or "disparity": a baseline's native output, held in
+    `depth` as-is. Decides how the protocols read it (score_sequence); only
+    a depth output can be scored under `metric`."""
+    at_gt: np.ndarray | None = None
+    """The same prediction already on the GT grid [S,H,W], when the caller
+    has it at a better resolution than `depth` (a baseline predicting at
+    frame resolution): `published` / `metric` / TAE then use it instead of
+    resizing `depth` up again. `depth` stays the sparse-fit copy."""
 
 
-def predict(net, accelerator: Accelerator, views: list[dict]) -> Prediction:
+def predict(
+    net, accelerator: Accelerator, views: list[dict], amp: bool = True
+) -> Prediction:
     """One streaming pass over a sequence: the per-frame KV-cache path
     (MetricStreamVGGT.inference via loss_of_one_batch(inference=True)),
-    i.e. deployment."""
+    i.e. deployment. `amp` is the run's own --amp."""
     with torch.no_grad():
         result = loss_of_one_batch(
             views,
@@ -249,7 +286,7 @@ def predict(net, accelerator: Accelerator, views: list[dict]) -> Prediction:
             accelerator,
             inference=True,
             symmetrize_batch=False,
-            use_amp=True,
+            use_amp=amp,
         )
     preds = result["pred"]
     depth = (
@@ -288,11 +325,14 @@ def score_sequence(
     the published-aligned depth, which score_tae_sequence takes so the
     resize + per-video least squares run once per (sequence, density)."""
     H, W = gt.shape[1:]
-    pred_gt = resize_to_gt(pred.depth, (H, W))
+    pred_gt = pred.at_gt if pred.at_gt is not None else resize_to_gt(pred.depth, (H, W))
+    if pred_gt.shape != gt.shape:
+        raise ValueError(f"prediction {pred_gt.shape} does not match gt {gt.shape}")
     sparse_depth, sparse_mask = _sparse_arrays(views)
     sparse_mask_gt = sparse_mask_to_gt(sparse_mask, (H, W))
+    disparity = pred.output == "disparity"
     published, aligned = P.published_metrics(
-        P.depth_to_disparity(pred_gt), gt, spec.max_depth
+        P.as_disparity(pred_gt, pred.output), gt, spec.max_depth
     )
     sparse = P.sparse_aligned_metrics(
         pred.depth,
@@ -302,8 +342,16 @@ def score_sequence(
         sparse_mask_gt,
         gt,
         spec.max_depth,
+        native_disparity=disparity,
     )
-    metric = P.metric_metrics(pred_gt, gt, spec.max_depth)
+    # an affine-invariant disparity has no metric scale: nothing to score
+    # fed pixels held out (as in sparse_aligned); `published` keeps them, for
+    # parity with VDA's scoring
+    metric = (
+        P.EMPTY
+        if disparity
+        else P.metric_metrics(pred_gt, gt, spec.max_depth, held_out=sparse_mask_gt)
+    )
     row = {
         "dataset": spec.name,
         "sequence": seq.name,
@@ -321,8 +369,8 @@ def score_sequence(
 def has_cameras(seq: Sequence) -> bool:
     """Every frame carries K -- what TAE needs to be scored at all. Poses may
     be missing or non-finite (ScanNet's -inf on tracking failure, a Bonn
-    mocap gap): the TAE functions handle those per pair, tae_vda as upstream
-    does (pair scored 0), tae_ours by dropping the pair."""
+    mocap gap): the TAE functions handle those per pair (score_tae_sequence:
+    upstream's 0 only on VDA's TAE manifest, otherwise the pair is dropped)."""
     return len(seq.frames) > 1 and all(fr.K is not None for fr in seq.frames)
 
 
@@ -341,15 +389,21 @@ def score_tae_sequence(
     aligned: np.ndarray | None = None,
 ) -> dict:
     """One TAE row on the published-aligned depth, both definitions.
-    tae_vda takes VDA's K as written (their eval does not shift the
-    principal point for the 8/11 crop); tae_ours takes the crop-corrected K,
-    since that one is ours to get right. `aligned` is score_sequence's
-    published-aligned depth when the main pass already computed it."""
+    On VDA's own TAE manifest (the uncropped-frame ScanNet split, the only one
+    with a published number), tae_vda is upstream's verbatim: K as written
+    (their eval does not shift the principal point for the 8/11 crop) and a
+    pair touching a non-finite pose scored 0. Everywhere else it uses the
+    crop-corrected K and drops such pairs, like tae_ours, since there is no
+    upstream number to match and both quirks only bias it. `aligned` is
+    score_sequence's published-aligned depth when the main pass already
+    computed it."""
     H, W = gt.shape[1:]
     if aligned is None:
-        pred_gt = resize_to_gt(pred.depth, (H, W))
+        pred_gt = (
+            pred.at_gt if pred.at_gt is not None else resize_to_gt(pred.depth, (H, W))
+        )
         _, aligned = P.published_metrics(
-            P.depth_to_disparity(pred_gt), gt, spec.max_depth
+            P.as_disparity(pred_gt, pred.output), gt, spec.max_depth
         )
     Ks_raw = [fr.K for fr in seq.frames]
     if any(k is None for k in Ks_raw):
@@ -361,6 +415,7 @@ def score_tae_sequence(
         if not (np.isfinite(a).all() and np.isfinite(b).all())
     )
     Ks_ours = [scaled_intrinsics(k, spec.crop, (H, W), (H, W)) for k in Ks_raw]
+    parity = spec.tae_json is not None and seq.rgb_uncropped
     valid = P.gt_valid_mask(gt, spec.max_depth)
     tae_abs, tae_sq = P.tae_ours(aligned, valid, Ks_ours, poses)
     return {
@@ -370,10 +425,15 @@ def score_tae_sequence(
         "density": density,
         "realized_density": realized,
         "frames": int(gt.shape[0]),
-        "tae_vda": P.tae_vda(aligned, Ks_raw, poses),
+        "tae_vda": (
+            P.tae_vda(aligned, Ks_raw, poses)
+            if parity
+            else P.tae_vda(aligned, Ks_ours, poses, bad_pose_pairs_score_zero=False)
+        ),
         "tae_ours": tae_abs,
         "tae_ours_sq": tae_sq,
-        # pairs touching a non-finite pose: scored 0 in tae_vda, dropped in tae_ours
+        # pairs touching a non-finite pose: scored 0 in tae_vda on VDA's TAE
+        # manifest, dropped everywhere else and always in tae_ours
         "tae_bad_pose_pairs": bad_pairs,
     }
 
@@ -572,9 +632,7 @@ def _render_viewers(paths: list[Path], results: Path) -> None:
 # ---------------------------------------------------------------------------
 # aggregation
 # ---------------------------------------------------------------------------
-def _mean(values: list[float]) -> float:
-    vals = [v for v in values if v is not None and np.isfinite(v)]
-    return float(np.mean(vals)) if vals else float("nan")
+_mean = P.finite_mean
 
 
 def aggregate(rows: list[dict], tae_rows: list[dict]) -> dict[str, float]:
@@ -627,6 +685,25 @@ def _prepare_sequence(
     return gt, views
 
 
+def tae_window(
+    spec: BenchSpec, seq: Sequence, gt: np.ndarray, pred: Prediction
+) -> tuple[Sequence, np.ndarray, Prediction]:
+    """The scored [lo:hi] window of a TAE clip that was predicted IN FULL, as
+    VDA does it (infer.py runs all 192 frames, eval_tae.py scores 10..180):
+    the model has its context before frame lo, so warm-up is not scored."""
+    lo, hi = spec.tae_range
+    win = Sequence(seq.dataset, seq.name, seq.frames[lo:hi], seq.rgb_uncropped)
+    sl = Prediction(
+        pred.depth[lo:hi],
+        pred.conf[lo:hi],
+        pred.w2c[lo:hi],
+        pred.K[lo:hi],
+        output=pred.output,
+        at_gt=None if pred.at_gt is None else pred.at_gt[lo:hi],
+    )
+    return win, gt[lo:hi], sl
+
+
 def run_benchmark(
     model: torch.nn.Module,
     accelerator: Accelerator,
@@ -634,11 +711,13 @@ def run_benchmark(
     mcfg,
     output_dir: str,
     step: int,
-    seed: int,
+    amp: bool = True,
 ) -> dict[str, float]:
     """Score every configured dataset and log/write the results. Sequences
     are sharded round-robin over ranks and the per-sequence rows gathered on
-    the main process, so a multi-GPU run finishes proportionally faster."""
+    the main process, so a multi-GPU run finishes proportionally faster.
+    Sparse draws use cfg.seed / cfg.patch_size, never the run's training
+    values; `amp` is the run's own --amp."""
     cfg.validate()
     missing = bench_root_ok(cfg.root, cfg.datasets, cfg.tae_datasets)
     missing += spot_missing(cfg)
@@ -652,7 +731,7 @@ def run_benchmark(
     net.eval()
     device = accelerator.device
     rank, world = accelerator.process_index, accelerator.num_processes
-    patch = mcfg.depth_cond.sim_patch_size
+    patch, seed = cfg.patch_size, cfg.seed
     cloud_dir = Path(output_dir) / "bench_clouds"
 
     rows: list[dict] = []
@@ -705,7 +784,7 @@ def run_benchmark(
                     realized = attach_sparse_depth(
                         views, density, tag, patch, seed, device
                     )
-                    pred = predict(net, accelerator, views)
+                    pred = predict(net, accelerator, views, amp)
                     row, aligned = score_sequence(
                         spec, seq, gt, views, pred, MODE_STREAM, density, realized
                     )
@@ -728,6 +807,14 @@ def run_benchmark(
                             cloud_dir
                             / f"{spec.name}_{seq.name}_{density_key(density)}_{MODE_STREAM}.npz"
                         )
+                        # the viewer's stats on the pixels `metric` scores:
+                        # GT-valid, fed sparse pixels held out
+                        score = torch.stack(
+                            [
+                                v["valid_mask"][0] & ~v["sparse_depth_mask"][0].bool()
+                                for v in views
+                            ]
+                        )
                         save_cloud(
                             path,
                             spec,
@@ -737,6 +824,7 @@ def run_benchmark(
                             density,
                             MODE_STREAM,
                             cfg.cloud_frames,
+                            score_mask=score.cpu().numpy(),
                         )
                         _render_cloud(path)
                         cloud_paths.append(path)
@@ -756,7 +844,9 @@ def run_benchmark(
             tseqs = (
                 _guard(
                     f"{spec.name}/tae/<manifest>",
-                    lambda: load_manifest(cfg.root, spec, tae=True),
+                    # every listed frame (192): predicted in full, scored on
+                    # the [lo:hi] window (tae_window), as VDA does
+                    lambda: load_manifest(cfg.root, spec, tae=True, tae_slice=False),
                 )
                 or []
             )
@@ -777,16 +867,23 @@ def run_benchmark(
                         realized = attach_sparse_depth(
                             views, density, tag, patch, seed, device
                         )
-                        pred = predict(net, accelerator, views)
+                        pred = predict(net, accelerator, views, amp)
+                        win, win_gt, win_pred = tae_window(spec, seq, gt, pred)
                         new_tae.append(
                             score_tae_sequence(
-                                spec, seq, gt, pred, MODE_STREAM, density, realized
+                                spec,
+                                win,
+                                win_gt,
+                                win_pred,
+                                MODE_STREAM,
+                                density,
+                                realized,
                             )
                         )
                         del pred
                     del views
                     tae_rows.extend(new_tae)
-                    accelerator.print(f"[bench] {tag}: {len(seq)} frames done")
+                    accelerator.print(f"[bench] {tag}: {len(seq)} frames predicted")
 
                 _guard(tag, _one_tae_sequence)
         if device.type == "cuda":
@@ -816,7 +913,7 @@ def run_benchmark(
                     cfg.spot_holdout,
                     _sparse_seed(seed, tag, cfg.spot_holdout),
                 )
-                pred = predict(net, accelerator, views)
+                pred = predict(net, accelerator, views, amp)
                 row = score_spot_window(
                     seq, sensor, fed, held, pred, cfg.spot_max_depth
                 )

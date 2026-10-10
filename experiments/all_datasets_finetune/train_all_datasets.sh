@@ -232,7 +232,7 @@ python finetune_depth.py \
     `# ARKitScenes Test (lowres) / Validation (highres), HAMMER test (naked`   \
     `# twins excluded). ScanNet++ and TartanAir are preprocessed train-only`   \
     `# and their loaders reject Split.TEST. 1000 clips each, one loader per`   \
-    `# dataset, so final_stream/<dataset>/* is logged per dataset. The`        \
+    `# dataset, so val/<dataset>/* is logged per dataset. The`                \
     `# lowres entry's highres-root excludes the highres Validation scenes.`    \
     `# Checkpoint-best is chosen on the blend of all four (equal weight).`     \
     `# stride-range 1 1 (consecutive) is required for TEST and enforced by`    \

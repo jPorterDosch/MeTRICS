@@ -7,4 +7,6 @@
 force-exclude = true
 extend-exclude = [
     "third_party/video_depth_anything",
+    "third_party/ovda",
+    "third_party/depth_any_video",
 ]

@@ -1,0 +1,15 @@
+net:
+  encoder: vits
+  features: 64
+  out_channels:
+  - 48
+  - 96
+  - 192
+  - 384
+  use_bn: false
+  use_clstoken: false
+  cache_size: 16
+  pe: ape
+  use_xformers: False
+
+pretrained_path: './checkpoints/oVDA_c16.pth'

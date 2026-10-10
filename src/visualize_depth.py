@@ -20,7 +20,6 @@
 # --------------------------------------------------------
 import argparse
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -32,8 +31,6 @@ import torch
 import torch.nn.functional as F
 import trimesh
 from accelerate import Accelerator
-from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file
 from scipy.ndimage import distance_transform_edt
 
 from dust3r.inference import loss_of_one_batch, sample_query_points  # noqa
@@ -59,16 +56,13 @@ from streamvggt.depth_cond import (
 )
 
 # Third comparison arm: PromptDA (Prompt Depth Anything), vendored verbatim in
-# third_party/promptda (see its README). promptda is a namespace package (no
-# __init__.py), so the vendor DIR goes on sys.path, not the package itself --
-# which is why this import must sit below the path setup (hence the noqa).
-_PROMPTDA_REPO = os.environ.get(
-    "PROMPTDA_REPO",
-    str(Path(__file__).resolve().parent.parent / "third_party" / "promptda"),
+# third_party/promptda (see its README); loading and the sparse-prompt infill
+# live with the other baseline arms.
+from eval.baselines.arms import (
+    PROMPTDA_CKPT_DEFAULT,
+    infill_sparse_depth,
+    load_promptda,
 )
-if _PROMPTDA_REPO not in sys.path:
-    sys.path.insert(0, _PROMPTDA_REPO)
-from promptda.promptda import PromptDA  # noqa: E402
 
 # Checkpoint basenames finetune_depth.py writes, best -> worst preference when
 # --checkpoint is left at "auto". The pipeline no longer writes a separate
@@ -119,128 +113,6 @@ def _run_streaming_inference(model, views, frame_times_ms=None):
     return {"views": output.views, "pred": output.ress}
 
 
-# PromptDA is frame-independent (no KV cache) and consumes the same [0,1] RGB
-# + sparse-depth prompt the other arms see.
-_PROMPTDA_CKPT_DEFAULT = os.environ.get(
-    "PROMPTDA_CKPT", "depth-anything/prompt-depth-anything-vitl"
-)
-
-
-def load_local_checkpoint(
-    model: torch.nn.Module,
-    checkpoint_path: str,
-    device: torch.device,
-    strict: bool = False,
-) -> None:
-    """Overlay a local fine-tuned checkpoint onto an already-built model.
-
-    Ported from PromptDA's run_inference.py (`load_local_checkpoint`): accepts
-    .safetensors or a torch file, unwraps a "model_state"/"state_dict" wrapper,
-    strips DataParallel's "module." prefix, and loads non-strict so a partial
-    fine-tune (e.g. depth head only) applies cleanly.
-
-    Deviation from upstream, deliberate: upstream only WARNS when every key is
-    missing, which silently keeps the base weights (or random ones) and looks
-    like a successful load. That case is fatal here.
-    """
-    print(f"Attempting to load checkpoint from {checkpoint_path} with strict={strict}")
-    if checkpoint_path.endswith(".safetensors"):
-        model_sd = load_file(checkpoint_path, device=str(device))
-    else:
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        if "model_state" in ckpt:
-            model_sd = ckpt["model_state"]
-        elif "state_dict" in ckpt:
-            model_sd = ckpt["state_dict"]
-        else:
-            model_sd = ckpt  # assume a bare state_dict
-    model_sd = {k[7:] if k.startswith("module.") else k: v for k, v in model_sd.items()}
-
-    missing, unexpected = model.load_state_dict(model_sd, strict=strict)
-    if missing:
-        print(f"Missing keys in state_dict: {missing}")
-    if unexpected:
-        print(f"Unexpected keys in state_dict: {unexpected}")
-    if len(missing) == len(model.state_dict()):
-        raise SystemExit(
-            f"{checkpoint_path!r} shares no parameter names with PromptDA; "
-            "nothing was loaded"
-        )
-    print("Checkpoint loaded.")
-
-
-def _load_promptda(ckpt: str, device, local_ckpt: str | None = None) -> torch.nn.Module:
-    """Build the vendored PromptDA in eval mode, mirroring PromptDA's own
-    run_inference.py: `from_pretrained` for the base weights, then an optional
-    non-strict overlay of a local fine-tune.
-
-    The base checkpoint is resolved here (local path, else HF hub download) and
-    its existence asserted BEFORE construction: PromptDA.load_checkpoint only
-    warns on a missing file and would silently run with random depth-head
-    weights. Post-resolution, from_pretrained takes its local-path branch, so
-    the loaded weights are exactly what upstream loads.
-    """
-    if os.path.exists(ckpt):
-        resolved = ckpt
-    else:
-        try:
-            resolved = hf_hub_download(
-                repo_id=ckpt, repo_type="model", filename="model.ckpt"
-            )
-        except Exception as exc:
-            raise SystemExit(
-                f"could not resolve PromptDA checkpoint {ckpt!r}: {exc}\n"
-                "pre-download on a login node with\n"
-                '  python -c "from huggingface_hub import hf_hub_download; '
-                f"hf_hub_download('{ckpt}', 'model.ckpt')\"\n"
-                "or pass --promptda-ckpt /abs/path/to/model.ckpt"
-            ) from exc
-    if not os.path.exists(resolved):
-        raise SystemExit(f"PromptDA checkpoint {resolved!r} does not exist")
-
-    print(f"PROMPTDA model: loading weights {resolved}")
-    model = PromptDA.from_pretrained(resolved).to(device)
-    if local_ckpt is not None:
-        if not os.path.exists(local_ckpt):
-            raise SystemExit(f"PromptDA local checkpoint {local_ckpt!r} does not exist")
-        load_local_checkpoint(model, local_ckpt, device, strict=False)
-    return model.eval()
-
-
-# Far cutoff for a prompt measurement, matching the ONNX export graph's
-# depth_max (streamvggt/export/wrapper.py) so both deployment paths call the
-# same pixels valid. Upstream PromptDA uses 1000 m; nothing in these datasets
-# reaches either bound (uint16-millimetre PNGs cap at 65.535 m, SPOT's float32
-# depth tops out near 6 m), so this only fires on garbage.
-_PROMPT_DEPTH_MAX_M = 100.0
-
-
-def _infill_sparse_depth(depth: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Nearest-neighbor infill of a sparse depth map ([H,W] meters, [H,W] bool).
-
-    PromptDA normalizes the prompt by its min/max over the WHOLE map, and the
-    fusion blocks bilinearly resample it, so sparse zeros both wreck the
-    normalization range and bleed into valid measurements. PromptDA's own
-    pipelines densify first with exactly this distance-transform gather.
-
-    Upstream derives validity as (d > 0) & (d < 1000) rather than from a sensor
-    mask; the far cutoff is folded in here (at _PROMPT_DEPTH_MAX_M, inclusive
-    like the export graph's) so one garbage far pixel cannot set the
-    normalization max for the whole frame."""
-    mask = mask & (depth <= _PROMPT_DEPTH_MAX_M)
-    if not mask.any():
-        raise SystemExit(
-            "frame has 0 valid sparse-depth pixels; PromptDA has no prompt "
-            "to normalize against"
-        )
-    if mask.all():
-        return depth
-    _, idx = distance_transform_edt(~mask, return_indices=True)
-    out = depth.copy()
-    out[~mask] = depth[idx[0][~mask], idx[1][~mask]]
-    return out
-
-
 # iPhone ARKit LiDAR's native depth resolution, and the resolution PromptDA
 # downsamples its training prompt to ("exactly the depth resolution of iPhone
 # ARKit Depth", Prompt Depth Anything, arXiv 2412.14015 §3.3). (height, width).
@@ -258,7 +130,7 @@ def arkit_prompt(depth: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, floa
     zeros and drags every cell near an occlusion boundary toward 0. Cells with
     no support at all are then nearest-neighbor filled, because a prompt has no
     "invalid" value -- both PromptDA and the conditioner read every prompt pixel
-    as a measurement (same reason _infill_sparse_depth densifies).
+    as a measurement (same reason infill_sparse_depth densifies).
 
     This is the DENSE end of the prompt-sparsity axis. 192x256 rather than the
     frame's native resolution on purpose: it is the density PromptDA was
@@ -349,7 +221,7 @@ def _run_promptda_inference(pmodel, views, frame_times_ms=None) -> list[dict]:
             sd = view["sparse_depth"].float().cpu().numpy()  # [B,H,W] meters
             sm = view["sparse_depth_mask"].cpu().numpy().astype(bool)
             prompt = np.stack(
-                [_infill_sparse_depth(sd[b], sm[b]) for b in range(sd.shape[0])]
+                [infill_sparse_depth(sd[b], sm[b]) for b in range(sd.shape[0])]
             )
             prompt = torch.from_numpy(prompt).unsqueeze(1).to(device)  # [B,1,H,W]
             depth = pmodel.predict(img, prompt)
@@ -1107,9 +979,9 @@ def main() -> None:
     )
     ap.add_argument(
         "--promptda-ckpt",
-        default=_PROMPTDA_CKPT_DEFAULT,
+        default=PROMPTDA_CKPT_DEFAULT,
         help="PromptDA checkpoint: local model.ckpt path or HF repo id "
-        f"(default {_PROMPTDA_CKPT_DEFAULT}; env PROMPTDA_CKPT). The vendored "
+        f"(default {PROMPTDA_CKPT_DEFAULT}; env PROMPTDA_CKPT). The vendored "
         "package dir is env-overridable via PROMPTDA_REPO (import-time).",
     )
     ap.add_argument(
@@ -1377,7 +1249,7 @@ def main() -> None:
         # The StreamVGGT checkpoint is still loaded above: its saved config
         # rebuilds the val dataset, so PromptDA sees the exact clips/frames and
         # simulated sparsity the other arms see.
-        pmodel = _load_promptda(args.promptda_ckpt, device, args.promptda_local_ckpt)
+        pmodel = load_promptda(args.promptda_ckpt, device, args.promptda_local_ckpt)
         model = None
     elif args.base:
         # load_pretrained=True folds the base StreamVGGT weights in; no

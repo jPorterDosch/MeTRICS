@@ -19,7 +19,9 @@ Three protocols, kept apart because they answer different questions:
                   dense GT with the sparse-depth pixels held out. Causal, and
                   symmetric across arms: a model that consumes the sparse depth and
                   one that only sees it post hoc get the same pixels.
-  metric          No alignment at all: raw metric depth against GT.
+  metric          No alignment at all: raw metric depth against GT, with the
+                  sparse-depth pixels held out like sparse_aligned (published
+                  keeps VDA's scoring, fed pixels included, for parity).
 
 Plus two temporal metrics on the published-aligned depth:
   tae_vda         VDA's TAE (bidirectional reprojection with GT K/poses,
@@ -51,7 +53,7 @@ _VDA_EVAL = (
     / "eval"
 )
 
-# Both are loaded by path rather than via sys.path: the vendored directory
+# All are loaded by path rather than via sys.path: the vendored directory
 # holds an eval.py, which would shadow THIS package (src/eval) for any later
 # `import eval.*`.
 _METRIC_MODULE = None
@@ -61,8 +63,8 @@ _TAE_MODULE = None
 def _load_by_path(name: str, path: pathlib.Path):
     if not path.is_file():
         raise FileNotFoundError(
-            f"vendored VDA benchmark file missing: {path} (see third_party/"
-            "video_depth_anything/README_VENDORED.md)"
+            f"vendored file missing: {path} (see the README_VENDORED.md of "
+            "its third_party directory)"
         )
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -115,7 +117,15 @@ class FrameMetrics:
         }
 
 
-_EMPTY = FrameMetrics(float("nan"), float("nan"), float("nan"), 0)
+EMPTY = FrameMetrics(float("nan"), float("nan"), float("nan"), 0)
+"""Nothing scored: no valid pixel, or a protocol that does not apply."""
+_EMPTY = EMPTY
+
+
+def finite_mean(values) -> float:
+    """Mean over the finite entries (None and NaN skipped); NaN if none."""
+    vals = [v for v in values if v is not None and np.isfinite(v)]
+    return float(np.mean(vals)) if vals else float("nan")
 
 
 def gt_valid_mask(gt: np.ndarray, max_depth: float) -> np.ndarray:
@@ -177,6 +187,11 @@ def vda_align_disparity(
     X = np.linalg.lstsq(A, gt_disp_masked, rcond=None)[0]
     scale, shift = X
     aligned_pred = scale * infs + shift
+    # identical to upstream for finite input; a non-finite pixel (which
+    # upstream would carry as NaN) is put at the disparity floor AFTER the
+    # affine, i.e. scored at max_depth -- an error, not wherever the fit
+    # happens to map a floored disparity
+    aligned_pred[~np.isfinite(pred_disp)] = DEPTH_FLOOR
     aligned_pred = np.clip(aligned_pred, a_min=DEPTH_FLOOR, a_max=None)
     pred_depth = np.zeros_like(aligned_pred)
     pos = aligned_pred > 0
@@ -196,19 +211,45 @@ def published_metrics(
 
 
 def depth_to_disparity(depth: np.ndarray) -> np.ndarray:
-    """1/depth with the same floor VDA applies to its own disparity."""
-    return 1.0 / np.clip(depth.astype(np.float64), DEPTH_FLOOR, None)
+    """1/depth with the same floor VDA applies to its own disparity. A
+    non-finite depth (a bf16 head overflowing to +-inf, or NaN) becomes a NaN
+    disparity, which every protocol excludes from its fit and scores as an
+    error -- never a finite value the fit could map to a plausible depth."""
+    d = depth.astype(np.float64)
+    return np.where(np.isfinite(d), 1.0 / np.clip(d, DEPTH_FLOOR, None), np.nan)
+
+
+def as_disparity(pred: np.ndarray, output: str) -> np.ndarray:
+    """A prediction as disparity, whatever the model emits: `output` is
+    "disparity" (returned as is) or "depth" (inverted). The one place that
+    decides how a prediction enters the disparity-space protocols."""
+    if output == "disparity":
+        return pred
+    if output == "depth":
+        return depth_to_disparity(pred)
+    raise ValueError(f"output must be 'depth' or 'disparity', got {output!r}")
 
 
 def metric_metrics(
-    pred_depth: np.ndarray, gt: np.ndarray, max_depth: float
+    pred_depth: np.ndarray,
+    gt: np.ndarray,
+    max_depth: float,
+    held_out: np.ndarray | None = None,
 ) -> FrameMetrics:
-    """The `metric` protocol: no alignment, raw metric depth against GT."""
+    """The `metric` protocol: no alignment, raw metric depth against GT.
+    `held_out` [S,H,W] bool: GT pixels excluded from the score -- the
+    benchmark passes the sparse-depth pixels, so a model that is fed them is
+    scored on completion, not on copying its input (the same pixels are held
+    out for every model, fed or not)."""
     _check_seq("pred_depth", pred_depth, gt)
     clipped = np.clip(_finite_or_floor(pred_depth), DEPTH_FLOOR, max_depth).astype(
         np.float32
     )
-    return vda_frame_metrics(clipped, gt, gt_valid_mask(gt, max_depth))
+    valid = gt_valid_mask(gt, max_depth)
+    if held_out is not None:
+        _check_seq("held_out", held_out, gt)
+        valid = valid & ~held_out
+    return vda_frame_metrics(clipped, gt, valid)
 
 
 def affine_fit(pred: np.ndarray, target: np.ndarray) -> tuple[float, float]:
@@ -236,6 +277,7 @@ def sparse_aligned_metrics(
     gt: np.ndarray,
     max_depth: float,
     min_sparse_pixels: int = 2,
+    native_disparity: bool = False,
 ) -> FrameMetrics:
     """The `sparse_aligned` protocol.
 
@@ -248,7 +290,13 @@ def sparse_aligned_metrics(
     the model was handed would measure copying, not completion.
 
     A frame with fewer than min_sparse_pixels sparse-depth pixels cannot be aligned
-    and is dropped (counted out of `frames`)."""
+    and is dropped (counted out of `frames`).
+
+    native_disparity: the prediction (both arrays) IS disparity, a baseline's
+    native output. The fit is then s*disparity + t ~ 1/sparse depth, the
+    aligned disparity is floored like VDA's and inverted; everything else is
+    the same, so a disparity model and a depth model get the same pixels and
+    the same scoring."""
     _check_seq("pred_native", pred_native, sparse_depth)
     _check_seq("sparse_mask", sparse_mask, sparse_depth)
     _check_seq("pred_gt_res", pred_gt_res, gt)
@@ -270,11 +318,20 @@ def sparse_aligned_metrics(
             valid[i] = False
             continue
         # design decision: the fit lives in each model's NATIVE output space
-        # (depth here); a disparity model fits 1/depth against 1/sparse depth
-        s, t = affine_fit(pred_native[i][m], sparse_depth[i][m])
-        aligned[i] = np.clip(
-            s * _finite_or_floor(pred_gt_res[i]) + t, DEPTH_FLOOR, max_depth
-        )
+        if native_disparity:
+            s, t = affine_fit(pred_native[i][m], 1.0 / sparse_depth[i][m])
+            disp = s * pred_gt_res[i] + t
+            # a non-finite pixel scores as an error here too: floored AFTER
+            # the affine, so it lands at max_depth rather than at whatever
+            # depth the fit would map a floored disparity to
+            disp = np.clip(_finite_or_floor(disp), DEPTH_FLOOR, None)
+            aligned[i] = np.clip(1.0 / disp, DEPTH_FLOOR, max_depth)
+        else:
+            s, t = affine_fit(pred_native[i][m], sparse_depth[i][m])
+            # floored AFTER the affine: a non-finite pixel scores at 1e-3 m
+            aligned[i] = np.clip(
+                _finite_or_floor(s * pred_gt_res[i] + t), DEPTH_FLOOR, max_depth
+            )
     return vda_frame_metrics(aligned, gt, valid)
 
 
@@ -291,6 +348,7 @@ def tae_vda(
     Ks: list[np.ndarray],
     poses: list[np.ndarray],
     device: torch.device | str | None = None,
+    bad_pose_pairs_score_zero: bool = True,
 ) -> float:
     """VDA's TAE over a sequence, verbatim from eval_tae.py::eval_TAE minus
     the file I/O: for every adjacent pair, project frame i's depth into frame
@@ -305,8 +363,11 @@ def tae_vda(
     code -- NaN reprojections leave no valid pixel -- so it is scored 0 and
     counted in the mean here too, explicitly rather than through a NaN->long
     cast whose result is platform-defined. Upstream parity, not correctness:
-    tae_ours drops those pairs instead. Runs on `device` (default: cuda when
-    available -- 170 frames at 464x618 is minutes on a CPU)."""
+    tae_ours drops those pairs instead. bad_pose_pairs_score_zero=False drops
+    them here too: for every split but VDA's ScanNet TAE manifest there is no
+    upstream number to stay in parity with, and a 0 would only bias the mean
+    low. Runs on `device` (default: cuda when available -- 170 frames at
+    464x618 is minutes on a CPU)."""
     _check_seq("depth", depth)
     S = depth.shape[0]
     if S < 2:
@@ -319,9 +380,12 @@ def tae_vda(
     depth_t = torch.from_numpy(np.ascontiguousarray(depth)).double().to(device)
     ones = torch.ones(depth.shape[1:], dtype=torch.bool, device=device)
     error_sum = 0.0
+    n_pairs = S - 1
     for i in range(S - 1):
         if not (np.isfinite(poses[i]).all() and np.isfinite(poses[i + 1]).all()):
-            continue  # upstream scores this pair 0 (see docstring); denominator unchanged
+            if not bad_pose_pairs_score_zero:
+                n_pairs -= 1  # dropped
+            continue  # upstream: scored 0, denominator unchanged
         d1, d2 = depth_t[i], depth_t[i + 1]
         R_2_1, t_2_1 = _relative_pose(poses[i], poses[i + 1])
         R_1_2, t_1_2 = _relative_pose(poses[i + 1], poses[i])
@@ -333,7 +397,9 @@ def tae_vda(
             d2, d1, torch.from_numpy(R_1_2).double().to(device), t_1_2, K, ones
         )
         error_sum += float(e1) + float(e2)
-    return error_sum / (2 * (S - 1)) * 100.0
+    if n_pairs == 0:
+        return float("nan")
+    return error_sum / (2 * n_pairs) * 100.0
 
 
 def tae_ours(
