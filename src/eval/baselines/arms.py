@@ -490,6 +490,80 @@ class PromptDAArm:
 
 
 # ---------------------------------------------------------------------------
+# Depth Anything 3, monocular metric model (DA3METRIC-LARGE)
+# ---------------------------------------------------------------------------
+def load_da3(path: str):
+    """DepthAnything3.from_pretrained on a local snapshot. Built inside the
+    import block: the config names its classes by module path
+    (cfg.create_object imports them on demand). api.py imports
+    depth_anything_3.utils.export at module level, whose dependencies
+    (moviepy, plyfile, ...) the metrics venv lacks; inference never exports,
+    so an empty module stands in for it."""
+    import types
+
+    name = "depth_anything_3.utils.export"
+    stub = sys.modules.setdefault(name, types.ModuleType(name))
+    if not hasattr(stub, "export"):
+        stub.export = None
+    with _vendored(THIRD_PARTY / "depth_anything_3" / "src"):
+        from depth_anything_3.api import DepthAnything3
+
+        return DepthAnything3.from_pretrained(path)
+
+
+class DA3MetricArm:
+    """DepthAnything3.inference with the short side at 504 (process_res=504,
+    lower_bound_resize, each side then rounded to a multiple of 14): the
+    paper's base resolution for the metric model (Sec. 4.4); the API's default
+    upper_bound_resize puts the LONG side at 504 (KITTI AbsRel 0.097 against
+    0.083, probe round 2). One image per call, with DA3's own sky
+    post-process. The network output is canonical depth; metric depth =
+    output * mean(fx, fy) / 300 with the intrinsics scaled to the processed
+    resolution (README; apply_metric_scaling in utils/alignment.py), so
+    `predict` needs the focal length of the input frames. Returns metres at
+    the processed resolution.
+
+    Sensitive to input encoding: 4:2:0 chroma subsampling of KITTI PNGs (as
+    JPEG does) lowers its KITTI AbsRel from 0.083 to 0.073 (probe round 12,
+    reproduction.json), so frames are fed exactly as the dataset stores them.
+    Trained at aspect ratios up to 1:2 only: wider frames are the caller's to
+    crop (eval/da_metric_paper.py does for the paper's table)."""
+
+    PROCESS_RES = 504
+    METHOD = "lower_bound_resize"
+
+    def __init__(self, device: torch.device, record: dict | None = None):
+        self.info = ArmInfo("da3_metric", "depth", causal=True, prompted=False)
+        model = load_da3(str(weights_file("da3_metric", record)))
+        self.model = model.to(device).eval()
+        self.device = device
+
+    def predict(
+        self,
+        frames: np.ndarray,
+        prompt: Prompt | None = None,
+        focal: tuple[float, float] | None = None,
+    ) -> np.ndarray:
+        _check_frames(frames)
+        _no_prompt(self.info, prompt)
+        if focal is None:
+            raise ValueError(
+                "da3_metric needs the frames' focal length (fx, fy) in pixels: "
+                "its output is metric only once scaled by it"
+            )
+        fx, fy = focal
+        H, W = frames.shape[1:3]
+        out = []
+        for frame in frames:
+            raw = self.model.inference(
+                [frame], process_res=self.PROCESS_RES, process_res_method=self.METHOD
+            ).depth[0]
+            sx, sy = raw.shape[1] / W, raw.shape[0] / H
+            out.append(raw * 0.5 * (fx * sx + fy * sy) / 300.0)
+        return np.stack(out).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
 # registry + gate
 # ---------------------------------------------------------------------------
 ARMS = {
@@ -498,6 +572,7 @@ ARMS = {
     "dav": DAVArm,
     "ovda": OVDAArm,
     "promptda": PromptDAArm,
+    "da3_metric": DA3MetricArm,
 }
 
 

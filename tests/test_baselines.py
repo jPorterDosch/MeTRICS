@@ -1215,5 +1215,188 @@ class ParityTreesTest(unittest.TestCase):
                 self.assertEqual(json.load(f), {"bonn_all": [{"s": []}]})
 
 
+class _FakeDA3:
+    """DepthAnything3.inference's shape: a Prediction whose depth is
+    [1, h, w] canonical depth at the processed resolution."""
+
+    def __init__(self, hw=(14, 28), value=3.0):
+        self.hw, self.value, self.seen = hw, value, []
+
+    def inference(self, images, process_res, process_res_method):
+        import types
+
+        self.seen.append(
+            (len(images), images[0].shape, process_res, process_res_method)
+        )
+        return types.SimpleNamespace(
+            depth=np.full((1, *self.hw), self.value, np.float32)
+        )
+
+
+class DA3MetricTest(unittest.TestCase):
+    """Depth Anything 3's metric arm and its Table 11 evaluation
+    (eval/da_metric_paper.py, DA2's vendored eval_depth)."""
+
+    def _arm(self, fake):
+        return _bare(
+            A.DA3MetricArm,
+            A.ArmInfo("da3_metric", "depth", True, False),
+            model=fake,
+            device=torch.device("cpu"),
+        )
+
+    def test_arm_runs_short_side_504_and_scales_by_processed_focal(self):
+        fake = _FakeDA3(hw=(14, 28), value=3.0)
+        arm = self._arm(fake)
+        frames = np.zeros((2, 30, 50, 3), np.uint8)
+        out = arm.predict(frames, focal=(100.0, 120.0))
+        self.assertEqual(out.shape, (2, 14, 28))
+        self.assertEqual(out.dtype, np.float32)
+        # one image per call, short side at 504
+        self.assertEqual(fake.seen, [(1, (30, 50, 3), 504, "lower_bound_resize")] * 2)
+        # focal at the processed resolution: fx * 28/50, fy * 14/30, averaged
+        f = 0.5 * (100.0 * 28 / 50 + 120.0 * 14 / 30)
+        np.testing.assert_allclose(out, 3.0 * f / 300.0, rtol=1e-6)
+
+    def test_arm_needs_a_focal_and_refuses_sparse_depth(self):
+        arm = self._arm(_FakeDA3())
+        frames = np.zeros((1, 28, 28, 3), np.uint8)
+        with self.assertRaises(ValueError):
+            arm.predict(frames)
+        prompt = (np.ones((1, 28, 28), np.float32), np.ones((1, 28, 28), bool))
+        with self.assertRaises(ValueError):
+            arm.predict(frames, prompt, focal=(1.0, 1.0))
+
+    def test_evaluate_is_da2_eval_loop_with_its_outdoor_range(self):
+        from eval import da_metric_paper as DAM
+
+        gt = np.full((20, 30), 4.0, np.float32)
+        gt[:2] = 100.0  # beyond 80 m: not scored
+        gt[2:4] = 0.0  # invalid
+        pred = np.full((10, 15), 4.0, np.float32)  # half resolution, exact
+        pred_up = pred.copy()
+        r = DAM.evaluate(pred, gt, "da3_table11")
+        self.assertAlmostEqual(r["abs_rel"], 0.0, places=6)
+        self.assertAlmostEqual(r["delta1"], 1.0, places=6)
+        self.assertNotIn("d1", r)
+        r = DAM.evaluate(pred_up * 1.1, gt, "da3_table11")
+        self.assertAlmostEqual(r["abs_rel"], 0.1, places=5)
+        # no clip: a prediction far beyond 80 m is scored as it is
+        r = DAM.evaluate(np.full((10, 15), 400.0, np.float32), gt, "da3_table11")
+        self.assertAlmostEqual(r["abs_rel"], 99.0, places=3)
+        tiny = np.zeros((20, 30), np.float32)
+        tiny[0, :9] = 4.0  # 9 valid pixels: DA2 skips the image
+        self.assertIsNone(DAM.evaluate(pred, tiny, "da3_table11"))
+
+    def test_runner_passes_each_images_focal_and_averages_per_image(self):
+        from eval import da_metric_paper as DAM
+
+        gts = [np.full((20, 30), d, np.float32) for d in (2.0, 4.0, 8.0)]
+        samples = [
+            DAM.Sample(
+                f"s{i}", np.full((20, 30, 3), i, np.uint8), g, (10.0 + i, 10.0 + i)
+            )
+            for i, g in enumerate(gts)
+        ]
+
+        class Arm(_FakeArm):
+            def predict(self, frames, prompt=None, focal=None):
+                self.calls.append(focal)
+                i = int(frames[0, 0, 0, 0])
+                return np.full((1, 10, 15), gts[i][0, 0] * (1.0 + 0.1 * i), np.float32)
+
+        targets = [
+            {
+                "id": "a",
+                "dataset": "kitti_eigen_652",
+                "protocol": "da3_table11",
+                "metric": "abs_rel",
+            },
+            {
+                "id": "d",
+                "dataset": "kitti_eigen_652",
+                "protocol": "da3_table11",
+                "metric": "delta1",
+            },
+        ]
+        saved = DAM.samples
+        DAM.samples = lambda dataset: iter(samples)
+        try:
+            arm = Arm(None, "depth")
+            measured, rows = BB.run_da_metric(arm, "kitti_eigen_652", targets, 0)
+            capped, _ = BB.run_da_metric(
+                Arm(None, "depth"), "kitti_eigen_652", targets, 2
+            )
+        finally:
+            DAM.samples = saved
+        self.assertEqual(arm.calls, [(10.0, 10.0), (11.0, 11.0), (12.0, 12.0)])
+        self.assertEqual(len(rows), 3)
+        self.assertAlmostEqual(measured["a"], (0.0 + 0.1 + 0.2) / 3, places=5)
+        self.assertAlmostEqual(measured["d"], 1.0)
+        self.assertAlmostEqual(capped["a"], 0.05, places=5)  # first two images only
+
+    def test_frames_wider_than_1_to_2_are_centre_cropped_with_their_gt(self):
+        from eval import da_metric_paper as DAM
+
+        rgb = np.arange(375 * 1242 * 3, dtype=np.uint32).reshape(375, 1242, 3)
+        gt = np.arange(375 * 1242, dtype=np.float32).reshape(375, 1242)
+        s = DAM.crop_to_aspect(DAM.Sample("k", rgb, gt, (700.0, 700.0)))
+        self.assertEqual(s.rgb.shape[:2], (375, 750))
+        self.assertEqual(s.gt.shape, (375, 750))
+        np.testing.assert_array_equal(s.gt, gt[:, 246:996])  # centred
+        np.testing.assert_array_equal(s.rgb, rgb[:, 246:996])
+        self.assertEqual(s.focal, (700.0, 700.0))  # a crop keeps the focal
+        tall = DAM.crop_to_aspect(
+            DAM.Sample("t", rgb[:100, :40], gt[:100, :40], (1, 1))
+        )
+        self.assertEqual(tall.gt.shape, (80, 40))
+        nyu = DAM.Sample("n", rgb[:480, :640], gt[:480, :640], (1, 1))
+        self.assertIs(DAM.crop_to_aspect(nyu), nyu)  # 4:3 is in the trained range
+
+    def test_kitti_focal_is_p_rect_02_of_the_date(self):
+        from eval import da_metric_paper as DAM
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "2011_09_28").mkdir()
+            (Path(tmp) / "2011_09_28" / "calib_cam_to_cam.txt").write_text(
+                "P_rect_00: 1 0 0 0 0 1 0 0 0 0 1 0\n"
+                "P_rect_02: 7.070493e+02 0.000000e+00 6.040814e+02 4.575831e+01 "
+                "0 7.070493e+02 1.805066e+02 -3.454157e-01 0 0 1 4.981016e-03\n"
+            )
+            saved = DAM.KITTI
+            DAM.KITTI = Path(tmp)
+            try:
+                self.assertAlmostEqual(DAM._kitti_focal("2011_09_28", {}), 707.0493)
+            finally:
+                DAM.KITTI = saved
+
+    def test_kitti_split_is_da2s_652_eigen_frames(self):
+        from eval import da_metric_paper as DAM
+
+        lines = (
+            (DAM._DA2 / "dataset" / "splits" / "kitti" / "val.txt")
+            .read_text()
+            .splitlines()
+        )
+        self.assertEqual(len(lines), 652)
+        for line in lines:
+            img, depth = line.split()
+            self.assertTrue(img.startswith(DAM._DA2_PREFIX + "raw_data/"), img)
+            self.assertTrue(
+                depth.startswith(DAM._DA2_PREFIX + "data_depth_annotated/"), depth
+            )
+
+    def test_record_targets_route_to_this_evaluation(self):
+        from eval import da_metric_paper as DAM
+
+        e = R.arm_entry(R.load(), "da3_metric")
+        runnable = R.runnable_targets(e)
+        self.assertEqual(len(runnable), 4)
+        for t in runnable:
+            self.assertIn(t["dataset"], DAM.DATASETS)
+            self.assertIn(t["protocol"], DAM.PROTOCOLS)
+            self.assertIn(t["metric"], ("abs_rel", "delta1"))
+
+
 if __name__ == "__main__":
     unittest.main()

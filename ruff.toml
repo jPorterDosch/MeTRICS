@@ -9,4 +9,6 @@ extend-exclude = [
     "third_party/video_depth_anything",
     "third_party/ovda",
     "third_party/depth_any_video",
+    "third_party/depth_anything_3",
+    "third_party/depth_anything_v2_metric",
 ]

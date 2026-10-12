@@ -23,6 +23,7 @@
 #   ARM=ovda       sbatch -J repro_ovda --mem=300G experiments/baselines/reproduce.sh
 #   ARM=promptda   sbatch -J repro_promptda   experiments/baselines/reproduce.sh
 #   ARM=dav        sbatch -J repro_dav        experiments/baselines/reproduce.sh
+#   ARM=da3_metric sbatch -J repro_da3_metric --time=01:00:00 experiments/baselines/reproduce.sh
 #   ARM=vda MAX_SEQ=2 sbatch -p ai-tenn-debug -q ai-tenn-debug --gres=gpu:h100:1 --time=01:00:00 ...   # smoke test, record untouched
 #
 # Defaults are what verified vda and ovda (2026-10-08): one 32 GB V100S;
@@ -41,11 +42,12 @@
 # Measured on one V100S (2026-10-08): vda scannet 3.3 h, scannet_500 5.8 h,
 # kitti kitti_500 bonn_all bonn_all_500 sintel_bgr 2.3 h; ovda ovda_kitti
 # 3.5 h, ovda_sintel ovda_bonn 1.3-1.5 h. The other arms: under 2 h each on
-# an H100 (estimate).
+# an H100 (estimate). da3_metric: about 10 min on one V100S (the probe's
+# equivalent jobs, eval_jd/baselines/da3_probe).
 
 set -euo pipefail
 
-ARM="${ARM:?set ARM to one of: vda vda_metric ovda promptda dav}"
+ARM="${ARM:?set ARM to one of: vda vda_metric ovda promptda dav da3_metric}"
 MAX_SEQ=${MAX_SEQ:-0}
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 ENVS=/lustre/isaac24/proj/UTK0516/metrics_data/envs_jd

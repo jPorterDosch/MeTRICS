@@ -996,6 +996,150 @@
           "host": "clrv1103"
         }
       ]
+    },
+    "da3_metric": {
+      "name": "Depth Anything 3, monocular metric (DA3METRIC-LARGE)",
+      "paper": "arXiv:2511.10647v1",
+      "code": {
+        "repo": "https://github.com/ByteDance-Seed/Depth-Anything-3",
+        "commit": "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4"
+      },
+      "weights": {
+        "hf_repo": "depth-anything/DA3METRIC-LARGE",
+        "file": "(repo snapshot: config.json, model.safetensors)",
+        "license": "Apache-2.0"
+      },
+      "settings": "The paper (Sec. 7.4, Table 11) names no evaluation protocol and the repository ships no metric-depth evaluation; the protocol is built from what Sec. 4.4 states about the metric model: base resolution 504, aspect ratios 1:1 to 1:2. Frames wider than 1:2 are centre-cropped to 1:2 with their GT (KITTI 375x1242 -> 375x750; NYUv2 4:3 untouched), then DA3's API with the short side at 504 (process_res=504, lower_bound_resize, sky post-process on), metric depth = output * mean(fx, fy) / 300 at the processed resolution (README). Scored with Depth Anything V2's metric_depth eval loop (third_party/depth_anything_v2_metric; src/eval/da_metric_paper.py): prediction bilinear (align_corners) to GT, valid 0.001 <= GT <= 80 m, no clip, per-image eval_depth, mean over images. NYUv2: the 654 official test frames of nyu_depth_v2_labeled.mat, lossless RGB, rawDepths GT. KITTI: DA2's 652-frame Eigen list with annotated GT, image_02 PNG, focal from P_rect_02 per date.",
+      "status": "verified",
+      "status_note": "Verified 2026-10-11 at code 5db3f2d+81ad99cc (job 6372550): 4 of 4 gating targets, NYUv2 0.0701 / 0.9671 and KITTI 0.0866 / 0.9499, matching the probe to 1e-4. ETH3D, SUN-RGBD and DIODE are non-gating and not run. Protocol found by a probe outside this pipeline (2026-10-10/11, 25 GPU jobs 6366320-6372440, scripts and results in eval_jd/baselines/da3_probe/), one variable at a time. Probe values for this protocol: NYUv2 0.0700 / 0.9671 (lossless frames; 0.0709 / 0.9648 with the BTS JPEG frames), KITTI 0.0866 / 0.9499 (job 6372440); also within tolerance with a 1:1.8 crop (0.0875 / 0.9495) and a 20 m cap (0.0864 / 0.9595). The decisive step was the 1:2 crop: without it, short side 504 gives KITTI 0.0833 / 0.9509, and DA3's default resize (long side 504) 0.0969 / 0.9164 with an 80 m cap or 0.0857 / 0.9502 with DA2's default 20 m cap, which in turn misses NYUv2 (0.0726). Fitting KITTI into 504x1008 by padding (Metric3D style) gives 0.0668, so the paper cropped. Ruled out (change < 0.001 or away from the paper): fp16 / bf16 / fp32 and V100S / A40 / H100 (identical to 1e-4), the first public code (6c58ec9, 2025-11-14; within 5e-4), crop vs resize to a multiple of 14, prediction clipping, Eigen and Garg crops, flip TTA, raw LiDAR GT (0.108), pixel-pooled metrics, scoring at the network resolution, KITTI val_selection_cropped, sky post-process, one focal for every KITTI date. Also found: KITTI AbsRel depends on the parity of the processed height in patches (odd 0.090-0.097, even 0.081-0.088) and on input chroma (4:2:0 subsampling 0.0729 vs PNG 0.0833; JPEG 4:4:4 = PNG). arXiv v1 is the only version; the HF weights have one upload (2025-11-13).",
+      "targets": [
+        {
+          "id": "t11_nyuv2_delta1",
+          "source": "Table 11, row DA3-metric, NYUv2, delta1",
+          "published": "0.963",
+          "scale": 1,
+          "dataset": "nyu_official_test",
+          "protocol": "da3_table11",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9670615405789847,
+          "within_tolerance": true,
+          "measured_commit": "5db3f2d+81ad99cc"
+        },
+        {
+          "id": "t11_nyuv2_absrel",
+          "source": "Table 11, row DA3-metric, NYUv2, AbsRel",
+          "published": "0.070",
+          "scale": 1,
+          "dataset": "nyu_official_test",
+          "protocol": "da3_table11",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.07007505676341713,
+          "within_tolerance": true,
+          "measured_commit": "5db3f2d+81ad99cc"
+        },
+        {
+          "id": "t11_kitti_delta1",
+          "source": "Table 11, row DA3-metric, KITTI, delta1",
+          "published": "0.953",
+          "scale": 1,
+          "dataset": "kitti_eigen_652",
+          "protocol": "da3_table11",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9498877619261756,
+          "within_tolerance": true,
+          "measured_commit": "5db3f2d+81ad99cc"
+        },
+        {
+          "id": "t11_kitti_absrel",
+          "source": "Table 11, row DA3-metric, KITTI, AbsRel",
+          "published": "0.086",
+          "scale": 1,
+          "dataset": "kitti_eigen_652",
+          "protocol": "da3_table11",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.08661174287368184,
+          "within_tolerance": true,
+          "measured_commit": "5db3f2d+81ad99cc"
+        },
+        {
+          "id": "t11_eth3d_delta1",
+          "source": "Table 11, row DA3-metric, ETH3D, delta1",
+          "published": "0.917",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "da3_table11",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "ETH3D single-image metric split not built here; the paper names no frame list."
+        },
+        {
+          "id": "t11_eth3d_absrel",
+          "source": "Table 11, row DA3-metric, ETH3D, AbsRel",
+          "published": "0.104",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "da3_table11",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "ETH3D single-image metric split not built here; the paper names no frame list."
+        },
+        {
+          "id": "t11_sunrgbd_delta1",
+          "source": "Table 11, row DA3-metric, SUN-RGBD, delta1",
+          "published": "0.973",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "da3_table11",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "SUN-RGBD test split not built here."
+        },
+        {
+          "id": "t11_sunrgbd_absrel",
+          "source": "Table 11, row DA3-metric, SUN-RGBD, AbsRel",
+          "published": "0.105",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "da3_table11",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "SUN-RGBD test split not built here."
+        },
+        {
+          "id": "t11_diode_delta1",
+          "source": "Table 11, row DA3-metric, DIODE, delta1",
+          "published": "0.838",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "da3_table11",
+          "metric": "delta1",
+          "gate": false,
+          "why_not_gating": "DIODE (indoor) validation split not built here."
+        },
+        {
+          "id": "t11_diode_absrel",
+          "source": "Table 11, row DA3-metric, DIODE, AbsRel",
+          "published": "0.128",
+          "scale": 1,
+          "dataset": null,
+          "protocol": "da3_table11",
+          "metric": "abs_rel",
+          "gate": false,
+          "why_not_gating": "DIODE (indoor) validation split not built here."
+        }
+      ],
+      "runs": [
+        {
+          "date": "2026-10-11T19:26:02",
+          "commit": "5db3f2d+81ad99cc",
+          "job_id": "6372550",
+          "host": "clrv1201"
+        }
+      ]
     }
   }
 }

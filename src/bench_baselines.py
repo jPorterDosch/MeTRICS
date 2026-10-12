@@ -44,6 +44,7 @@ from PIL import Image
 from PIL.ImageOps import exif_transpose
 
 from eval import arkit_upsampling as ARKIT
+from eval import da_metric_paper as DAM
 from eval import ovda_paper as OVDA
 from eval import protocols as P
 from eval.baselines import arms as A
@@ -269,6 +270,38 @@ def run_ovda_paper(
     return {t["id"]: summary[t["protocol"]][t["metric"]] for t in targets}, rows
 
 
+def run_da_metric(
+    arm, dataset: str, targets: list[dict], max_sequences: int
+) -> tuple[dict[str, float], list[dict]]:
+    """Depth Anything 3's single-image metric table (eval/da_metric_paper.py):
+    one prediction per image with the image's focal length, scored by DA2's
+    eval_depth per image under each protocol the targets name, mean over
+    images."""
+    protocols = sorted({t["protocol"] for t in targets})
+    rows = []
+    for i, s in enumerate(DAM.samples(dataset)):
+        if max_sequences and i >= max_sequences:
+            break
+        pred = arm.predict(s.rgb[None], focal=s.focal)[0]
+        row = {"dataset": dataset, "sequence": s.name}
+        for p in protocols:
+            row[p] = DAM.evaluate(pred, s.gt, p)
+        rows.append(row)
+        if (i + 1) % 100 == 0:
+            print(f"[repro] {arm.info.name} {dataset}: {i + 1} images", flush=True)
+    measured = {
+        t["id"]: P.finite_mean(
+            [
+                r[t["protocol"]][t["metric"]]
+                for r in rows
+                if r[t["protocol"]] is not None
+            ]
+        )
+        for t in targets
+    }
+    return measured, rows
+
+
 def _commit() -> str:
     """HEAD, plus a hash of the uncommitted CODE changes -- tracked diffs and
     untracked files under src/, datasets_preprocess/, experiments/ and
@@ -349,8 +382,16 @@ def reproduce(args) -> None:
         m, r = run_ovda_paper(arm, dataset, ts, args.max_sequences)
         measured.update(m)
         rows.extend(r)
+    for dataset in sorted({t["dataset"] for t in targets} & set(DAM.DATASETS)):
+        ts = [t for t in targets if t["dataset"] == dataset]
+        m, r = run_da_metric(arm, dataset, ts, args.max_sequences)
+        measured.update(m)
+        rows.extend(r)
     for dataset in sorted(
-        {t["dataset"] for t in targets} - set(ARKIT.SIZES) - set(OVDA.DATASETS)
+        {t["dataset"] for t in targets}
+        - set(ARKIT.SIZES)
+        - set(OVDA.DATASETS)
+        - set(DAM.DATASETS)
     ):
         ts = [t for t in targets if t["dataset"] == dataset]
         m, r = run_video_dataset(arm, dataset, ts, args.bench_root, args.max_sequences)
