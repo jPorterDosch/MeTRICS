@@ -358,6 +358,33 @@ def _commit() -> str:
 _CODE_PATHS = ("src", "datasets_preprocess", "experiments", "third_party")
 
 
+def runner_for(dataset: str) -> str:
+    """Which evaluation scores a reproduction target's dataset: PromptDA's
+    ARKitScenes table, oVDA's own evaluation, DA3's Table 11, or the VDA
+    benchmark trees. Raises for a dataset none of them knows."""
+    if dataset in ARKIT.SIZES:
+        return "arkit"
+    if dataset in OVDA.DATASETS:
+        return "ovda"
+    if dataset in DAM.DATASETS:
+        return "da_metric"
+    if dataset in SPECS:
+        return "video"
+    raise SystemExit(f"no reproduction runner for dataset {dataset!r}")
+
+
+def _group_by_runner(targets: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {
+        "arkit": [],
+        "ovda": [],
+        "da_metric": [],
+        "video": [],
+    }
+    for t in targets:
+        groups[runner_for(t["dataset"])].append(t)
+    return groups
+
+
 def reproduce(args) -> None:
     record = R.load(args.record)
     entry = R.arm_entry(record, args.arm)
@@ -369,34 +396,29 @@ def reproduce(args) -> None:
         targets = [t for t in targets if t["dataset"] in args.datasets]
     if not targets:
         raise SystemExit(f"{args.arm}: no runnable target in the record")
+    # grouped before the model loads, so an unroutable dataset fails at once
+    by_runner = _group_by_runner(targets)
     device = torch.device(args.device)
     arm = A.build_arm(args.arm, device, sorted(R.paper_uses(entry)), record)
 
     measured: dict[str, float] = {}
     rows: list[dict] = []
-    arkit = [t for t in targets if t["dataset"] in ARKIT.SIZES]
-    if arkit:
-        measured, rows = run_arkit(arm, arkit, args.arkit_root, args.max_sequences)
-    for dataset in sorted({t["dataset"] for t in targets} & set(OVDA.DATASETS)):
-        ts = [t for t in targets if t["dataset"] == dataset]
-        m, r = run_ovda_paper(arm, dataset, ts, args.max_sequences)
+    if by_runner["arkit"]:  # one prediction per frame serves every size
+        m, r = run_arkit(arm, by_runner["arkit"], args.arkit_root, args.max_sequences)
         measured.update(m)
         rows.extend(r)
-    for dataset in sorted({t["dataset"] for t in targets} & set(DAM.DATASETS)):
-        ts = [t for t in targets if t["dataset"] == dataset]
-        m, r = run_da_metric(arm, dataset, ts, args.max_sequences)
-        measured.update(m)
-        rows.extend(r)
-    for dataset in sorted(
-        {t["dataset"] for t in targets}
-        - set(ARKIT.SIZES)
-        - set(OVDA.DATASETS)
-        - set(DAM.DATASETS)
-    ):
-        ts = [t for t in targets if t["dataset"] == dataset]
-        m, r = run_video_dataset(arm, dataset, ts, args.bench_root, args.max_sequences)
-        measured.update(m)
-        rows.extend(r)
+    per_dataset = {  # one call per dataset
+        "ovda": lambda ds, ts: run_ovda_paper(arm, ds, ts, args.max_sequences),
+        "da_metric": lambda ds, ts: run_da_metric(arm, ds, ts, args.max_sequences),
+        "video": lambda ds, ts: run_video_dataset(
+            arm, ds, ts, args.bench_root, args.max_sequences
+        ),
+    }
+    for kind, run in per_dataset.items():
+        for dataset in sorted({t["dataset"] for t in by_runner[kind]}):
+            m, r = run(dataset, [t for t in by_runner[kind] if t["dataset"] == dataset])
+            measured.update(m)
+            rows.extend(r)
 
     tol = record["tolerance"]
     print(f"\n[repro] {args.arm}: published vs measured (printed unit)")

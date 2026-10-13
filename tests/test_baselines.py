@@ -442,6 +442,43 @@ class AdapterContractTest(unittest.TestCase):
             arm.predict(np.zeros((1, 375, 1242, 3), np.uint8))
 
 
+class MetricVDAInputTest(unittest.TestCase):
+    """Metric-VDA runs unshrunk, with SDPA attention (arms.VDAArm)."""
+
+    def test_unshrunk_size_lands_on_518_through_the_shipped_shrink(self):
+        for h, w in [(374, 1242), (375, 1242), (352, 1216), (436, 1024), (100, 1000)]:
+            size = A.unshrunk_input_size(h, w)
+            ratio = max(h, w) / min(h, w)
+            # infer_video_depth's own formula, verbatim
+            shrunk = round(int(size * 1.777 / ratio) / 14) * 14
+            self.assertEqual(shrunk, 518, (h, w))
+        self.assertEqual(A.unshrunk_input_size(480, 640), 518)  # 4:3: no shrink
+
+    def test_sdpa_attention_matches_the_vendored_attention(self):
+        path = (
+            A.THIRD_PARTY
+            / "video_depth_anything"
+            / "video_depth_anything"
+            / "dinov2_layers"
+            / "attention.py"
+        )
+        spec = importlib.util.spec_from_file_location("vda_attention", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        torch.manual_seed(0)
+        ref = mod.MemEffAttention(64, num_heads=4, qkv_bias=True).eval()
+        new = mod.MemEffAttention(64, num_heads=4, qkv_bias=True).eval()
+        new.load_state_dict(ref.state_dict())
+        A._sdpa_attention(new)
+        x = torch.randn(2, 37, 64)
+        with torch.no_grad():
+            torch.testing.assert_close(new(x), ref(x), rtol=1e-5, atol=1e-5)
+        # the class is untouched: the relative VDA arm keeps upstream's forward
+        self.assertNotIn("forward", vars(ref))
+        with self.assertRaises(ValueError):
+            new(x, attn_bias=torch.zeros(1))
+
+
 class VendoredImportTest(unittest.TestCase):
     def test_vendored_context_leaves_no_trace(self):
         marker = object()
@@ -1385,6 +1422,22 @@ class DA3MetricTest(unittest.TestCase):
             self.assertTrue(
                 depth.startswith(DAM._DA2_PREFIX + "data_depth_annotated/"), depth
             )
+
+    def test_every_record_target_has_exactly_its_runner(self):
+        expected = {
+            "promptda": "arkit",
+            "ovda": "ovda",
+            "da3_metric": "da_metric",
+            "vda": "video",
+            "vda_metric": "video",
+            "dav": "video",
+        }
+        rec = R.load()
+        for arm, kind in expected.items():
+            for t in R.runnable_targets(R.arm_entry(rec, arm)):
+                self.assertEqual(BB.runner_for(t["dataset"]), kind, f"{arm}/{t['id']}")
+        with self.assertRaises(SystemExit):
+            BB.runner_for("kitti_typo")
 
     def test_record_targets_route_to_this_evaluation(self):
         from eval import da_metric_paper as DAM

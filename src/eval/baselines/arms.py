@@ -156,10 +156,51 @@ def _vda_class():
     return VideoDepthAnything
 
 
+def unshrunk_input_size(height: int, width: int, target: int = 518) -> int:
+    """The input_size that infer_video_depth's aspect shrink maps back to
+    `target`. For frames wider than 16:9 it shrinks the short side to
+    input_size * 1.777 / ratio ("due to memory limitation"); KITTI's 374x1242
+    goes to 280, and the metric model then sees objects too small and predicts
+    depth ~1.3x too large. Raises if no size lands exactly on `target`."""
+    ratio = max(height, width) / min(height, width)
+    if ratio <= 1.78:  # their threshold: no shrink
+        return target
+    for size in range(target, int(target * ratio / 1.777) + 14 * int(ratio + 1)):
+        if round(int(size * 1.777 / ratio) / 14) * 14 == target:
+            return size
+    raise ValueError(f"no input_size maps {height}x{width} back to {target}")
+
+
+def _sdpa_attention(module: torch.nn.Module) -> None:
+    """Replace one DINOv2 attention module's forward, on this instance only,
+    by torch's scaled_dot_product_attention: the same softmax(q k^T / sqrt(d)) v
+    without materialising the attention matrix. Without xFormers, upstream's
+    MemEffAttention falls back to plain attention, which needs 39.5 GiB for
+    one tensor at 518x1722 x 32 frames."""
+
+    def forward(x: torch.Tensor, attn_bias=None) -> torch.Tensor:
+        if attn_bias is not None:
+            raise ValueError("attention bias is not supported")
+        B, N, C = x.shape
+        qkv = module.qkv(x).reshape(B, N, 3, module.num_heads, C // module.num_heads)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)
+        x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        return module.proj_drop(module.proj(x.transpose(1, 2).reshape(B, N, C)))
+
+    module.forward = forward
+
+
 class VDAArm:
     """benchmark/infer/infer.py's call, verbatim: input_size 518, fp32,
     target_fps 1 (unused by the model). The relative model returns disparity
-    aligned across windows; the metric one returns metres."""
+    aligned across windows; the metric one returns metres.
+
+    The metric model is run without infer_video_depth's aspect shrink
+    (unshrunk_input_size): its absolute scale depends on the input
+    resolution, and the README's KITTI number is only reached unshrunk
+    (delta1 0.9074 unshrunk vs 0.3424 shrunk, KITTI-500, job 6373139). Its
+    DINOv2 attention goes through SDPA (_sdpa_attention) so the unshrunk KITTI
+    frames fit in memory. The relative model is left exactly as verified."""
 
     def __init__(
         self, device: torch.device, metric: bool = False, record: dict | None = None
@@ -172,12 +213,18 @@ class VDAArm:
         model.load_state_dict(
             torch.load(weights_file(name, record), map_location="cpu"), strict=True
         )
+        if metric:
+            for m in model.pretrained.modules():
+                if type(m).__name__ in ("Attention", "MemEffAttention"):
+                    _sdpa_attention(m)
         self.model = model.to(device).eval()
         self.device = device
+        self.metric = metric
 
     def predict(self, frames: np.ndarray, prompt: Prompt | None = None) -> np.ndarray:
         _check_frames(frames)
         _no_prompt(self.info, prompt)
+        size = unshrunk_input_size(*frames.shape[1:3]) if self.metric else 518
         # infer_video_depth takes the bare device TYPE (its autocast needs it)
         # and moves inputs to the current device of that type: pin it for the
         # call only
@@ -187,7 +234,7 @@ class VDAArm:
             else contextlib.nullcontext()
         ):
             out, _ = self.model.infer_video_depth(
-                frames, 1, input_size=518, device=self.device.type, fp32=True
+                frames, 1, input_size=size, device=self.device.type, fp32=True
             )
         return np.asarray(out, dtype=np.float32)
 
