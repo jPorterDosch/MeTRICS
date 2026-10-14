@@ -25,7 +25,9 @@ METRICS = (
     ("AbsRel (published)", "published_abs_rel", True),
     ("d1 (published)", "published_delta1", False),
     ("AbsRel (sparse-aligned)", "sparse_aligned_abs_rel", True),
+    ("d1 (sparse-aligned)", "sparse_aligned_delta1", False),
     ("AbsRel (metric)", "metric_abs_rel", True),
+    ("d1 (metric)", "metric_delta1", False),
     ("TAE", "tae_vda", True),
 )
 # what differs from running the released model as-is, per arm
