@@ -21,7 +21,8 @@ BASE_PY=/nfs/home/jdosch1/.pyenv/versions/3.11.13/bin/python
     torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
 "$DAV_ENV/bin/python" -m pip install \
     diffusers==0.30.3 accelerate==0.31.0 transformers==4.43.2 huggingface-hub==0.24.2 \
-    "numpy<2" opencv-python-headless tqdm matplotlib scipy pillow easydict pyyaml safetensors
+    "numpy<2" opencv-python-headless tqdm matplotlib scipy pillow easydict pyyaml safetensors \
+    "pandas==2.2.3"  # imported by the vendored Marigold metric.py (DAV reproduce)
 "$DAV_ENV/bin/python" - <<'PY'
 import diffusers, torch, transformers
 print("dav env ok:", torch.__version__, diffusers.__version__, transformers.__version__)

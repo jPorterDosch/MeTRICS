@@ -14,7 +14,8 @@ Protocol, as Marigold's script/depth/eval.py with --alignment
 least_square_disparity (third_party/marigold_eval, README there): GT and
 valid mask as their dataset classes build them (KITTI: kb crop of image and
 GT to 352x1216, 1e-5 < GT < 80, Eigen evaluation mask; ScanNet: GT png /
-1000, 1e-3 < GT < 10, no crop); their align_depth_least_square fits the
+1000, 1e-3 < GT < 10, no crop; NYUv2: the 654 test frames, RAW depth png /
+1000, 1e-3 < GT < 10, Eigen crop [45:471, 41:601]); their align_depth_least_square fits the
 prediction to GT disparity over valid & GT > 0 & prediction > 0; the aligned
 disparity is clipped at 1e-3, inverted, clipped to [min, max] and to > 1e-6;
 their abs_relative_difference and delta1_acc per image, mean over images.
@@ -45,7 +46,7 @@ class _Spec:
     max_depth: float
     depth_scale: float  # png value -> metres
     kb_crop: bool
-    eigen_mask: bool
+    eval_mask: str | None  # "kitti_eigen", "nyu_eigen" or None
 
 
 DATASETS: dict[str, _Spec] = {
@@ -56,7 +57,7 @@ DATASETS: dict[str, _Spec] = {
         80.0,
         256.0,
         kb_crop=True,
-        eigen_mask=True,
+        eval_mask="kitti_eigen",
     ),
     "marigold_scannet": _Spec(
         "scannet_val_sampled_800_1",
@@ -65,7 +66,16 @@ DATASETS: dict[str, _Spec] = {
         10.0,
         1000.0,
         kb_crop=False,
-        eigen_mask=False,
+        eval_mask=None,
+    ),
+    "marigold_nyu": _Spec(
+        "nyu_labeled_extracted",
+        "nyu_depth/labeled/filename_list_test.txt",
+        1e-3,
+        10.0,
+        1000.0,
+        kb_crop=False,
+        eval_mask="nyu_eigen",
     ),
 }
 PROTOCOLS = ("marigold_disparity",)
@@ -118,6 +128,13 @@ def _eigen_mask(shape: tuple[int, int]) -> np.ndarray:
     return m
 
 
+def _nyu_eigen_mask(shape: tuple[int, int]) -> np.ndarray:
+    """NYUDepthDataset._get_valid_mask, eigen_valid_mask=True."""
+    m = np.zeros(shape, bool)
+    m[45:471, 41:601] = True
+    return m
+
+
 def samples(dataset: str) -> Iterator[Sample]:
     if dataset not in DATASETS:
         raise KeyError(f"unknown dataset {dataset!r}; known: {sorted(DATASETS)}")
@@ -136,8 +153,10 @@ def samples(dataset: str) -> Iterator[Sample]:
         if spec.kb_crop:
             rgb, gt = _kb_crop(rgb), _kb_crop(gt)
         valid = (gt > spec.min_depth) & (gt < spec.max_depth)
-        if spec.eigen_mask:
+        if spec.eval_mask == "kitti_eigen":
             valid &= _eigen_mask(gt.shape)
+        elif spec.eval_mask == "nyu_eigen":
+            valid &= _nyu_eigen_mask(gt.shape)
         yield Sample(cols[0], np.ascontiguousarray(rgb), gt, valid)
 
 

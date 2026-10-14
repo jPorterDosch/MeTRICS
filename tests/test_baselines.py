@@ -213,6 +213,10 @@ class RecordFileTest(unittest.TestCase):
                 self.assertTrue(all(t.get("within_tolerance") for t in gating), name)
             # the stored status is what the stored measurements support
             self.assertEqual(R.computed_status(entry), entry["status"], name)
+            # the stored flags agree with a recompute from `measured`
+            self.assertEqual(
+                R.computed_status(entry, rec["tolerance"]), entry["status"], name
+            )
 
 
 def _gt(S=4, H=12, W=16, seed=0):
@@ -1324,36 +1328,6 @@ class ParityTreesTest(unittest.TestCase):
                 cv2.imread(str(d / "clean" / "f.png"))[0, 0].tolist(), [0, 0, 200]
             )
 
-    def test_nyuv2_raw_takes_raw_depth_and_the_whole_frame(self):
-        import h5py
-        from scipy.io import savemat
-
-        sys.path.insert(
-            0, os.path.join(os.path.dirname(__file__), "..", "datasets_preprocess")
-        )
-        import prepare_vda_benchmark as PV
-
-        rng = np.random.default_rng(0)
-        with tempfile.TemporaryDirectory() as tmp:
-            raw, out = Path(tmp) / "raw", Path(tmp) / "out"
-            (raw / "nyu").mkdir(parents=True)
-            images = rng.integers(0, 255, (3, 3, 640, 480), dtype=np.uint8)
-            filled = rng.uniform(1, 5, (3, 640, 480)).astype(np.float32)
-            rawd = filled.copy()
-            rawd[:, :50] = 0.0  # Kinect holes: only in the raw depth
-            with h5py.File(raw / "nyu" / "nyu_depth_v2_labeled.mat", "w") as f:
-                f["images"], f["depths"], f["rawDepths"] = images, filled, rawd
-            savemat(str(raw / "nyu" / "splits.mat"), {"testNdxs": np.array([[1], [3]])})
-            PV.prepare_nyuv2_raw(raw, out, expect=2)
-            self.assertEqual(PV.check_manifest(out, "nyuv2_raw"), 2)
-            seq = VB.load_manifest(out, VB.SPECS["nyuv2_raw"])[1]  # index 2
-            gt = VB.gt_stack(seq, VB.SPECS["nyuv2_raw"])
-            a, b, c, d = VB.SPECS["nyuv2_raw"].crop
-            np.testing.assert_allclose(gt[0], rawd[2].T[a:b, c:d], atol=1 / 6000)
-            rgb = np.asarray(Image.open(seq.frames[0].image))
-            self.assertEqual(rgb.shape, (480, 640, 3))  # whole frame in
-            np.testing.assert_array_equal(rgb, images[2].transpose(2, 1, 0))
-
     def test_rename_manifest(self):
         sys.path.insert(
             0, os.path.join(os.path.dirname(__file__), "..", "datasets_preprocess")
@@ -1653,6 +1627,59 @@ class MarigoldPaperTest(unittest.TestCase):
         self.assertLess(measured["a"], 1e-5)
         with self.assertRaises(ValueError):
             BB.run_marigold(_FakeArm(None, "depth"), "marigold_scannet", targets, 0)
+
+
+class ReviewFixesTest(unittest.TestCase):
+    """Findings of the 2026-10-13 code review of the comparison path."""
+
+    def test_status_is_recomputed_not_read_from_stale_flags(self):
+        t = {**_target("0.100"), "measured": 0.150, "within_tolerance": True}
+        t["measured_commit"] = "abc1234"
+        entry = {"status": R.VERIFIED, "targets": [t], "runs": []}
+        self.assertEqual(R.computed_status(entry, TOL), R.FAILED)  # 0.15 vs 0.10
+        rec = {"tolerance": TOL, "arms": {"fake": entry}}
+        with self.assertRaises(R.GateError):
+            R.require_allowed(rec, "fake", [("kitti", "metric")])
+
+    def test_allow_close_only_for_arms_the_record_marks_close(self):
+        import argparse
+
+        args = argparse.Namespace(arm="fake", allow_close=True)
+        with self.assertRaises(SystemExit):
+            BB._check_allow_close(args, {"targets": []}, R.FAILED)
+        with self.assertRaises(SystemExit):
+            BB._check_allow_close(args, {"close": True}, R.VERIFIED)
+        BB._check_allow_close(args, {"close": True}, R.FAILED)  # allowed
+        rec = R.load()
+        self.assertEqual(
+            {a for a, e in rec["arms"].items() if R.recorded_close(e)},
+            {"vda_metric", "promptda"},
+        )
+
+    def test_table_mean_needs_every_dataset(self):
+        import compare_table as CT
+
+        agg = {f"{d}/stream/d5/published_abs_rel": 0.1 for d in CT.DATASETS}
+        full = CT.row("a", {"aggregate": agg}, "d5")
+        self.assertAlmostEqual(full["mean AbsRel (published)"], 0.1)
+        del agg["sintel/stream/d5/published_abs_rel"]
+        part = CT.row("b", {"aggregate": agg}, "d5")
+        self.assertIsNone(part["mean AbsRel (published)"])
+
+    def test_marigold_nyu_uses_raw_depth_and_the_eigen_crop(self):
+        from eval import marigold_paper as MG
+
+        spec = MG.DATASETS["marigold_nyu"]
+        self.assertEqual(
+            (spec.min_depth, spec.max_depth, spec.depth_scale), (1e-3, 10.0, 1000.0)
+        )
+        lines = (MG._MARIGOLD / "data_split" / spec.split).read_text().split()
+        self.assertTrue(lines[1].split("/")[-1].startswith("depth_"))  # raw, not filled
+        m = MG._nyu_eigen_mask((480, 640))
+        self.assertTrue(m[45, 41] and m[470, 600])
+        self.assertFalse(m[44, 300] or m[471, 300] or m[200, 40] or m[200, 601])
+        for t in R.runnable_targets(R.arm_entry(R.load(), "dav")):
+            self.assertIn(t["dataset"], MG.DATASETS)
 
 
 if __name__ == "__main__":

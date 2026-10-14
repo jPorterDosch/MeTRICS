@@ -469,12 +469,14 @@ python src/render_clouds.py <run>/bench_clouds/*.npz --mask-to-gt   # GLB with o
 
 ### Baseline arms and the reproduction gate
 
-Four baselines are vendored under `third_party/` (each with a
+Six baseline arms are vendored under `third_party/` (each with a
 `README_VENDORED.md`): Prompt Depth Anything (per frame, prompted, metric),
 Video Depth Anything (VDA-L, and Metric-VDA-L for the `metric` table), Depth
-Any Video, and Online Video Depth Anything (oVDA, the causal one). One adapter
-per model lives in `src/eval/baselines/arms.py`; each calls the model's own
-inference entry point with the settings its paper evaluates at.
+Any Video, Online Video Depth Anything (oVDA, causal), and Depth Anything 3's
+monocular metric model (DA3METRIC-LARGE, per frame, so its rows sit under the
+`stream` mode with ours). One adapter per model lives in
+`src/eval/baselines/arms.py`; each calls the model's own inference entry point
+with the settings its paper evaluates at.
 
 **Gate.** `src/eval/baselines/reproduction.json` lists, per arm, the numbers
 its own paper prints (table and row cited), what our loaders and scoring
@@ -486,7 +488,10 @@ is computed from a complete run (`record.apply_measurements`), never typed. A
 miss is diagnosed and recorded as `failed` with its cause; the tolerance and
 the protocol are not adjusted to fit. Targets whose split or sequence list
 the paper does not publish are recorded but do not gate, each with the
-reason.
+reason. An arm that misses parity can still be compared only if the record
+marks it `"close": true` (a user decision, with the gap kept in its
+`status_note`): `benchmark --allow-close` then runs it and writes its computed
+status into the results, and `src/compare_table.py` footnotes it.
 
 ```bash
 python src/bench_baselines.py status                        # per arm: status, gating targets met

@@ -9,7 +9,7 @@ bench_results.json files, at one sparse-depth density.
 Writes <out>/comparison.md (with a footnote per baseline: its reproduction
 status and the evaluation differences recorded below) and comparison.csv.
 Every number is read from a results file; nothing is computed here except
-the mean over datasets.
+the mean over the five datasets (left empty for a row missing any of them).
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ EVAL_NOTES = {
     "vda": "VDA-L, infer.py settings (input 518, fp32).",
     "vda_metric": (
         "Metric-VDA-L without infer_video_depth's aspect shrink (input short side "
-        "518 on frames wider than 16:9) and with SDPA attention; reproduction "
-        "close, not verified (ScanNet TAE 1.06 vs README 1.09)."
+        "518 on frames wider than 16:9) and with SDPA attention. Recorded close: "
+        "KITTI delta1 within tolerance, ScanNet TAE 1.06 vs README 1.09."
     ),
     "ovda": "oVDA context 16, fp32 (paper fp16).",
     "dav": (
@@ -46,8 +46,8 @@ EVAL_NOTES = {
         "to multiples of 32 instead of upstream's centre crop."
     ),
     "promptda": (
-        "Per-frame, upstream input sizing; reproduction close, not verified "
-        "(3 of 6 ARKitScenes targets within tolerance, all within 5.3%)."
+        "Per-frame, upstream input sizing. Recorded close: 3 of 6 ARKitScenes "
+        "targets within tolerance, all within 5.3%."
     ),
     "da3_metric": (
         "Short side 504, focal from the GT camera; trained on aspect ratios up "
@@ -83,8 +83,11 @@ def row(label: str, results: dict, dens: str) -> dict:
             out[f"{ds} {name}"] = _value(agg, ds, mode, dens, key)
     for name, key, _ in METRICS:
         vals = [out[f"{ds} {name}"] for ds in DATASETS]
-        vals = [v for v in vals if v is not None]
-        out[f"mean {name}"] = sum(vals) / len(vals) if vals else None
+        # a mean only over the same five datasets for every row: a model
+        # missing one gets no mean rather than a mean over fewer
+        out[f"mean {name}"] = (
+            None if any(v is None for v in vals) else sum(vals) / len(vals)
+        )
     return out
 
 
@@ -117,11 +120,17 @@ def main() -> None:
         status = res.get("parity_status", "unknown")
         mark = f"[{i}]"
         rows.append(row(f"{arm} {mark}", res, dens))
+        code = f"code {res.get('commit', '?')}"
+        if res.get("predictions_commit"):
+            code = (
+                f"predictions by code {res['predictions_commit']}, "
+                f"scored by code {res.get('commit', '?')}"
+            )
         notes.append(
-            f"{mark} {arm}: reproduction {status}"
-            + (" (run with --allow-close)" if res.get("allow_close") else "")
+            f"{mark} {arm}: reproduction status {status}"
+            + (" (compared under --allow-close)" if res.get("allow_close") else "")
             + f". {EVAL_NOTES.get(arm, '')}"
-            + f" Results: {path}, code {res.get('commit', '?')}."
+            + f" Results: {path}, {code}."
         )
 
     args.out.mkdir(parents=True, exist_ok=True)

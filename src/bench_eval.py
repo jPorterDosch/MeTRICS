@@ -73,9 +73,8 @@ _SPOT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/spot_data")
 PROTOCOLS = ("published", "sparse_aligned", "metric")
 # trees that reproduce one baseline table and are never benchmark datasets:
 # sintel_bgr (VDA's channel-swapped colour files), nyuv2_full (the whole
-# 480x640 frame; the benchmark's loaders apply the Eigen crop to it anyway),
-# nyuv2_raw (the same frames scored against raw Kinect depth, for DAV)
-REPRODUCE_ONLY = ("sintel_bgr", "nyuv2_full", "nyuv2_raw")
+# 480x640 frame; the benchmark's loaders apply the Eigen crop to it anyway)
+REPRODUCE_ONLY = ("sintel_bgr", "nyuv2_full")
 MODE_STREAM = "stream"  # the only mode; kept in the keys so a baseline arm's offline rows can sit next to it
 
 

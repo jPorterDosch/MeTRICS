@@ -633,7 +633,9 @@ class DA3MetricArm:
     JPEG does) lowers its KITTI AbsRel from 0.083 to 0.073 (probe round 12,
     reproduction.json), so frames are fed exactly as the dataset stores them.
     Trained at aspect ratios up to 1:2 only: wider frames are the caller's to
-    crop (eval/da_metric_paper.py does for the paper's table)."""
+    crop. eval/da_metric_paper.py crops them for the paper's table; the
+    benchmark (bench_baselines benchmark) runs the full frame, as for every
+    model, and compare_table footnotes it."""
 
     PROCESS_RES = 504
     METHOD = "lower_bound_resize"

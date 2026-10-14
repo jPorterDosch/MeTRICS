@@ -50,10 +50,6 @@ Two more trees exist because of what reproducing VDA's own table showed
     files VDA's shipped extractor writes (see the colour shim above). Built
     from the sintel tree; exists ONLY to reproduce VDA's published Sintel
     number, which was computed on such input. Never a benchmark dataset.
-  * nyuv2_raw: the 654 NYUv2 test stills, whole 480x640 frame, with the RAW
-    Kinect depth (rawDepths, holes = 0) as GT instead of the filled
-    `depths` the nyuv2 tree holds. Marigold's evaluation, which Depth Any
-    Video's Table 2 follows, scores against raw depth. Reproduction only.
 
 After extraction every manifest gets GT cameras (K + cam2world pose per
 frame, see benchmark_cameras.py) -- VDA's gen_json writes none. `--cameras`
@@ -107,10 +103,9 @@ MANIFEST = {
     "nyuv2": "nyuv2/nyuv2_test.json",
     "bonn_all": "bonn_all/bonn_all_video.json",
     "sintel_bgr": "sintel_bgr/sintel_bgr_video.json",
-    "nyuv2_raw": "nyuv2_raw/nyuv2_raw_test.json",
 }
 # reproduction-only trees that carry no GT cameras
-NO_CAMERAS = ("sintel_bgr", "nyuv2_raw")
+NO_CAMERAS = ("sintel_bgr",)
 # VDA's 500-frame manifests, written by the same extractors; cameras are
 # attached to these too so the *_500 benchmark variants can score TAE
 MANIFEST_500 = {
@@ -389,52 +384,6 @@ def prepare_nyuv2(raw: Path, out: Path, expect: int = 654) -> None:
         json.dump({name: entries_full}, f, indent=4)
 
 
-def prepare_nyuv2_raw(raw: Path, out: Path, expect: int = 654) -> None:
-    """The NYUv2 test stills as Marigold evaluates them: the whole 480x640
-    frame as input and the RAW depth (rawDepths) as GT, scored inside the
-    Eigen crop (the spec's crop). Same frames, order and depth factor as the
-    nyuv2 tree."""
-    import h5py  # matlab v7.3 files are HDF5
-    from scipy.io import loadmat
-
-    labeled = _require(raw / "nyu" / "nyu_depth_v2_labeled.mat", "NYU labeled .mat")
-    splits = _require(raw / "nyu" / "splits.mat", "NYU splits.mat")
-    test_idx = loadmat(str(splits))["testNdxs"].reshape(-1).astype(int) - 1  # 1-based
-    if len(test_idx) != expect:
-        raise ValueError(f"expected {expect} NYU test indices, got {len(test_idx)}")
-    name = "nyuv2_raw"
-    entries = []
-    with h5py.File(str(labeled), "r") as f:
-        images = f["images"]  # (N, 3, 640, 480) as stored
-        depths = f["rawDepths"]  # (N, 640, 480) metres, 0 = no return
-        for i in sorted(test_idx.tolist()):
-            rgb = np.asarray(images[i]).transpose(2, 1, 0)  # -> (480, 640, 3)
-            depth = np.asarray(depths[i]).transpose(1, 0)  # -> (480, 640) metres
-            seq = f"test_{i:04d}"
-            out_img = out / name / seq / "rgb" / f"{i:04d}.png"
-            out_depth = out / name / seq / "depth" / f"{i:04d}.png"
-            out_img.parent.mkdir(parents=True, exist_ok=True)
-            out_depth.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(rgb).save(out_img)
-            scaled = np.clip(
-                np.round(depth.astype(np.float64) * NYU_FACTOR), 0, 65535
-            ).astype(np.uint16)
-            cv2.imwrite(str(out_depth), scaled)
-            entries.append(
-                {
-                    seq: [
-                        {
-                            "image": str(out_img.relative_to(out / name)),
-                            "gt_depth": str(out_depth.relative_to(out / name)),
-                            "factor": NYU_FACTOR,
-                        }
-                    ]
-                }
-            )
-    with open(out / MANIFEST[name], "w") as f:
-        json.dump({name: entries}, f, indent=4)
-
-
 PREPARE = {
     "sintel": prepare_sintel,
     "kitti": prepare_kitti,
@@ -443,7 +392,6 @@ PREPARE = {
     "nyuv2": prepare_nyuv2,
     "bonn_all": prepare_bonn_all,
     "sintel_bgr": prepare_sintel_bgr,
-    "nyuv2_raw": prepare_nyuv2_raw,
 }
 
 
@@ -541,8 +489,8 @@ def main() -> int:
             continue
         print(f"== {name}: extracting into {out / name}", flush=True)
         try:
-            if name in ("nyuv2", "nyuv2_raw"):
-                PREPARE[name](raw, out, expect=args.nyu_expect)
+            if name == "nyuv2":
+                prepare_nyuv2(raw, out, expect=args.nyu_expect)
             else:
                 PREPARE[name](raw, out)
             print(

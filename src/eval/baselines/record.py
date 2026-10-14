@@ -85,18 +85,39 @@ def _identifiable(commit) -> bool:
     )
 
 
-def computed_status(entry: dict) -> str:
+def _passes(t: dict, tol: dict | None):
+    """True / False from the stored measurement, recomputed against the
+    published number and tolerance (never the stored flag, which a hand edit
+    of `published`, `scale` or the tolerance would leave stale); None if
+    unmeasured."""
+    if t.get("measured") is None:
+        return None
+    if tol is None:
+        return t.get("within_tolerance")
+    return within(t, t["measured"], tol)
+
+
+def computed_status(entry: dict, tol: dict | None = None) -> str:
     """The status the stored measurements support: `verified` needs every
     gating target measured, within tolerance, and by ONE identifiable code
-    state; any gating miss is `failed`."""
+    state; any gating miss is `failed`. With the record's `tol`, pass/fail is
+    recomputed from `measured` rather than read from `within_tolerance`."""
     gating = [t for t in entry["targets"] if t["gate"]]
     commits = {t.get("measured_commit") for t in gating}
     same_code = len(commits) == 1 and _identifiable(next(iter(commits), None))
-    if any(t.get("within_tolerance") is False for t in gating):
+    passes = [_passes(t, tol) for t in gating]
+    if any(p is False for p in passes):
         return FAILED
-    if gating and all(t.get("within_tolerance") for t in gating) and same_code:
+    if gating and all(passes) and same_code:
         return VERIFIED
     return PENDING
+
+
+def recorded_close(entry: dict) -> bool:
+    """The user's decision, written into the record as `"close": true`, that
+    an arm which does not reach parity is close enough to compare, with the
+    gap reported (bench_baselines benchmark --allow-close)."""
+    return bool(entry.get("close"))
 
 
 def require_allowed(
@@ -105,9 +126,9 @@ def require_allowed(
     """Raise GateError unless every (dataset, protocol) in `uses` is open to
     `arm`: all of them once it is verified, only its paper's before."""
     entry = arm_entry(record, arm)
-    # recomputed, never read from the stored string: a hand-edited or stale
-    # `verified` does not open the gate
-    status = computed_status(entry)
+    # recomputed, never read from the stored string or flags: a hand-edited or
+    # stale `verified` / `within_tolerance` does not open the gate
+    status = computed_status(entry, record["tolerance"])
     if status == VERIFIED:
         return
     blocked = sorted(set(uses) - paper_uses(entry))
@@ -140,6 +161,6 @@ def apply_measurements(
             t["measured"] = float(measured[t["id"]])
             t["within_tolerance"] = within(t, t["measured"], tol)
             t["measured_commit"] = run.get("commit")
-    entry["status"] = computed_status(entry)
+    entry["status"] = computed_status(entry, tol)
     entry["runs"].append(run)
     return entry["status"]

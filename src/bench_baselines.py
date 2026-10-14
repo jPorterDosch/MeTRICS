@@ -514,6 +514,20 @@ def _arm_kwargs(arm, seq, spec, frames: np.ndarray, gt_hw) -> dict:
     return {"focal": (float(K[0, 0]), float(K[1, 1]))}
 
 
+def _check_allow_close(args, entry: dict, parity: str) -> None:
+    """--allow-close opens the gate only for an arm the record marks `close`
+    (the user's decision, with the gap reported) and that is not verified."""
+    if not args.allow_close:
+        return
+    if parity == R.VERIFIED:
+        raise SystemExit(f"{args.arm} is verified: drop --allow-close")
+    if not R.recorded_close(entry):
+        raise SystemExit(
+            f"{args.arm} is {parity!r} and not recorded as close in the "
+            'reproduction record ("close": true); --allow-close refused'
+        )
+
+
 def _cache_path(root: Path, dataset: str, kind: str, seq_name: str) -> Path:
     return root / dataset / kind / f"{seq_name}.npz"
 
@@ -545,6 +559,8 @@ def dump_predictions(args) -> None:
         for d in set(args.datasets) | set(args.tae_datasets)
         for p in ("published", "sparse_aligned", "metric", "tae")
     ]
+    entry = R.arm_entry(record, args.arm)
+    _check_allow_close(args, entry, R.computed_status(entry, record["tolerance"]))
     arm = A.build_arm(
         args.arm, torch.device(args.device), uses, record, args.allow_close
     )
@@ -585,6 +601,9 @@ class CachedArm:
         self.info = A.ArmInfo(
             meta["name"], meta["output"], meta["causal"], meta["prompted"]
         )
+        # the code that PRODUCED the predictions (the scoring run's own commit
+        # is recorded separately)
+        self.commit = meta.get("commit", "unknown")
         self.root = root
         self.key = None  # (dataset, kind, seq_name), set before each call
 
@@ -607,7 +626,9 @@ def benchmark(args) -> None:
         (d, p) for d in set(args.datasets) | set(args.tae_datasets) for p in protocols
     ]
     device = torch.device(args.device)
-    parity = R.computed_status(R.arm_entry(record, args.arm))
+    entry = R.arm_entry(record, args.arm)
+    parity = R.computed_status(entry, record["tolerance"])
+    _check_allow_close(args, entry, parity)
     if not args.allow_close:
         R.require_allowed(record, args.arm, uses)  # raises unless verified
     if args.predictions:
@@ -763,6 +784,7 @@ def benchmark(args) -> None:
                 "parity_status": parity,
                 "allow_close": bool(args.allow_close),
                 "predictions": str(args.predictions) if args.predictions else None,
+                "predictions_commit": arm.commit if args.predictions else None,
                 "config": {
                     k: (
                         list(v)
@@ -875,8 +897,8 @@ def main() -> None:
     bench.add_argument(
         "--allow-close",
         action="store_true",
-        help="benchmark an arm whose reproduction is close but not verified; the "
-        "arm's computed status is written into the results",
+        help='benchmark an arm the record marks close ("close": true) but not '
+        "verified; its computed status is written into the results",
     )
     bench.add_argument(
         "--predictions",
