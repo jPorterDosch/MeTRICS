@@ -415,6 +415,9 @@ def _group_by_runner(targets: list[dict]) -> dict[str, list[dict]]:
 
 
 def reproduce(args) -> None:
+    # the code that runs is the code imported now: fingerprint it now, not
+    # after hours of inference, when the working tree may have moved on
+    commit = _commit()
     record = R.load(args.record)
     entry = R.arm_entry(record, args.arm)
     targets = R.runnable_targets(entry)
@@ -463,7 +466,7 @@ def reproduce(args) -> None:
 
     run = {
         "date": datetime.datetime.now().isoformat(timespec="seconds"),
-        "commit": _commit(),
+        "commit": commit,
         "job_id": os.environ.get("SLURM_JOB_ID", "none"),
         "host": os.uname().nodename,
     }
@@ -514,20 +517,6 @@ def _arm_kwargs(arm, seq, spec, frames: np.ndarray, gt_hw) -> dict:
     return {"focal": (float(K[0, 0]), float(K[1, 1]))}
 
 
-def _check_allow_close(args, entry: dict, parity: str) -> None:
-    """--allow-close opens the gate only for an arm the record marks `close`
-    (the user's decision, with the gap reported) and that is not verified."""
-    if not args.allow_close:
-        return
-    if parity == R.VERIFIED:
-        raise SystemExit(f"{args.arm} is verified: drop --allow-close")
-    if not R.recorded_close(entry):
-        raise SystemExit(
-            f"{args.arm} is {parity!r} and not recorded as close in the "
-            'reproduction record ("close": true); --allow-close refused'
-        )
-
-
 def _cache_path(root: Path, dataset: str, kind: str, seq_name: str) -> Path:
     return root / dataset / kind / f"{seq_name}.npz"
 
@@ -559,8 +548,6 @@ def dump_predictions(args) -> None:
         for d in set(args.datasets) | set(args.tae_datasets)
         for p in ("published", "sparse_aligned", "metric", "tae")
     ]
-    entry = R.arm_entry(record, args.arm)
-    _check_allow_close(args, entry, R.computed_status(entry, record["tolerance"]))
     arm = A.build_arm(
         args.arm, torch.device(args.device), uses, record, args.allow_close
     )
@@ -620,18 +607,18 @@ class CachedArm:
 def benchmark(args) -> None:
     import bench_eval as BE  # the training stack: metrics venv only
 
+    commit = _commit()  # at start: the code imported is the code that runs
+
     record = R.load(args.record)
     protocols = ("published", "sparse_aligned", "metric", "tae")
     uses = [
         (d, p) for d in set(args.datasets) | set(args.tae_datasets) for p in protocols
     ]
     device = torch.device(args.device)
-    entry = R.arm_entry(record, args.arm)
-    parity = R.computed_status(entry, record["tolerance"])
-    _check_allow_close(args, entry, parity)
-    if not args.allow_close:
-        R.require_allowed(record, args.arm, uses)  # raises unless verified
+    parity = R.computed_status(R.arm_entry(record, args.arm), record["tolerance"])
     if args.predictions:
+        # the arm is not built, so the gate is asked directly
+        R.require_allowed(record, args.arm, uses, args.allow_close)
         arm = CachedArm(args.predictions)
         if arm.info.name != args.arm:
             raise ValueError(
@@ -795,7 +782,7 @@ def benchmark(args) -> None:
                     )
                     for k, v in vars(cfg).items()
                 },
-                "commit": _commit(),
+                "commit": commit,
                 "job_id": os.environ.get("SLURM_JOB_ID", "none"),
                 "aggregate": result,
                 "rows": rows,
@@ -821,11 +808,20 @@ def benchmark(args) -> None:
 
 def status(args) -> None:
     record = R.load(args.record)
+    tol = record["tolerance"]
     for name, entry in record["arms"].items():
         gating = [t for t in entry["targets"] if t["gate"]]
-        done = sum(1 for t in gating if t.get("within_tolerance"))
+        # recomputed from the measurements, as the gate does
+        done = sum(
+            1
+            for t in gating
+            if t.get("measured") is not None and R.within(t, t["measured"], tol)
+        )
+        status = R.computed_status(entry, tol)
+        close = " (close: --allow-close)" if R.close_allowed(entry, tol) else ""
         print(
-            f"{name:<11} {entry['status']:<12} {done}/{len(gating)} gating targets within tolerance"
+            f"{name:<11} {status:<12} {done}/{len(gating)} gating targets within "
+            f"tolerance{close}"
         )
         if entry["status_note"]:
             print(f"{'':<11} {entry['status_note']}")

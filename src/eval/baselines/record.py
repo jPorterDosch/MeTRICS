@@ -85,23 +85,22 @@ def _identifiable(commit) -> bool:
     )
 
 
-def _passes(t: dict, tol: dict | None):
+def _passes(t: dict, tol: dict):
     """True / False from the stored measurement, recomputed against the
     published number and tolerance (never the stored flag, which a hand edit
     of `published`, `scale` or the tolerance would leave stale); None if
     unmeasured."""
     if t.get("measured") is None:
         return None
-    if tol is None:
-        return t.get("within_tolerance")
     return within(t, t["measured"], tol)
 
 
-def computed_status(entry: dict, tol: dict | None = None) -> str:
+def computed_status(entry: dict, tol: dict) -> str:
     """The status the stored measurements support: `verified` needs every
     gating target measured, within tolerance, and by ONE identifiable code
-    state; any gating miss is `failed`. With the record's `tol`, pass/fail is
-    recomputed from `measured` rather than read from `within_tolerance`."""
+    state; any gating miss is `failed`. Pass/fail is recomputed from
+    `measured` against the record's tolerance `tol`, never read from the
+    stored `within_tolerance` flags."""
     gating = [t for t in entry["targets"] if t["gate"]]
     commits = {t.get("measured_commit") for t in gating}
     same_code = len(commits) == 1 and _identifiable(next(iter(commits), None))
@@ -120,12 +119,34 @@ def recorded_close(entry: dict) -> bool:
     return bool(entry.get("close"))
 
 
+def close_allowed(entry: dict, tol: dict) -> bool:
+    """--allow-close opens the gate only for an arm the record marks close
+    AND whose every gating target is measured with a computed `failed`: the
+    gap it is compared with is a measured one, not a reset or pending
+    record."""
+    return recorded_close(entry) and computed_status(entry, tol) == FAILED
+
+
 def require_allowed(
-    record: dict, arm: str, uses: list[tuple[str, str]] | set[tuple[str, str]]
+    record: dict,
+    arm: str,
+    uses: list[tuple[str, str]] | set[tuple[str, str]],
+    allow_close: bool = False,
 ) -> None:
     """Raise GateError unless every (dataset, protocol) in `uses` is open to
-    `arm`: all of them once it is verified, only its paper's before."""
+    `arm`: all of them once it is verified, only its paper's before. With
+    `allow_close`, all of them for an arm the record marks close whose
+    measured status is `failed` (close_allowed), and nothing else."""
     entry = arm_entry(record, arm)
+    if allow_close:
+        if close_allowed(entry, record["tolerance"]):
+            return
+        raise GateError(
+            f"baseline arm {arm!r} is "
+            f"{computed_status(entry, record['tolerance'])!r}: --allow-close needs "
+            'an arm the record marks "close": true with every gating target '
+            "measured and the status computed failed"
+        )
     # recomputed, never read from the stored string or flags: a hand-edited or
     # stale `verified` / `within_tolerance` does not open the gate
     status = computed_status(entry, record["tolerance"])

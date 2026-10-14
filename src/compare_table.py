@@ -9,7 +9,8 @@ bench_results.json files, at one sparse-depth density.
 Writes <out>/comparison.md (with a footnote per baseline: its reproduction
 status and the evaluation differences recorded below) and comparison.csv.
 Every number is read from a results file; nothing is computed here except
-the mean over the five datasets (left empty for a row missing any of them).
+the mean over the five datasets (TAE: the four video datasets), left empty
+for a row missing any of them.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import json
 from pathlib import Path
 
 DATASETS = ("sintel", "scannet", "kitti", "bonn_all", "nyuv2")
+# TAE is defined on the video datasets only (nyuv2 is stills)
+TAE_DATASETS = ("sintel", "scannet", "kitti", "bonn_all")
 # (column label, aggregate key suffix, lower is better)
 METRICS = (
     ("AbsRel (published)", "published_abs_rel", True),
@@ -82,9 +85,11 @@ def row(label: str, results: dict, dens: str) -> dict:
         for name, key, _ in METRICS:
             out[f"{ds} {name}"] = _value(agg, ds, mode, dens, key)
     for name, key, _ in METRICS:
-        vals = [out[f"{ds} {name}"] for ds in DATASETS]
-        # a mean only over the same five datasets for every row: a model
-        # missing one gets no mean rather than a mean over fewer
+        sets = TAE_DATASETS if key.startswith("tae") else DATASETS
+        vals = [out[f"{ds} {name}"] for ds in sets]
+        # a mean only over the same datasets for every row (all five; TAE's
+        # four video sets): a model missing one gets no mean, not a mean over
+        # fewer
         out[f"mean {name}"] = (
             None if any(v is None for v in vals) else sum(vals) / len(vals)
         )

@@ -689,19 +689,18 @@ def build_arm(
     device: torch.device,
     uses: list[tuple[str, str]],
     record: dict | None = None,
-    allow_unverified: bool = False,
+    allow_close: bool = False,
 ):
     """The arm, built only if the reproduction record opens every (dataset,
     protocol) in `uses` to it (record.require_allowed). The same record
-    names the weights the arm loads. `allow_unverified` is the explicit,
-    caller-recorded override for comparing an arm whose reproduction is
-    close but not verified (bench_baselines benchmark --allow-close stamps
-    the arm's computed status into its results)."""
+    names the weights the arm loads. `allow_close` asks the gate to open for
+    an arm the record marks close (record.close_allowed); bench_baselines
+    benchmark --allow-close stamps the arm's computed status into its
+    results."""
     if name not in ARMS:
         raise KeyError(f"unknown baseline arm {name!r}; known: {sorted(ARMS)}")
     if not uses:
         raise ValueError("build_arm needs the (dataset, protocol) pairs it will run")
     record = record or R.load()
-    if not allow_unverified:
-        R.require_allowed(record, name, uses)
+    R.require_allowed(record, name, uses, allow_close)
     return ARMS[name](device, record)

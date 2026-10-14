@@ -15,7 +15,8 @@
 # Raw benchmark predictions of an arm that runs outside the metrics venv
 # (dav: pinned torch/diffusers), for `benchmark --predictions` to score in the
 # metrics venv (src/bench_baselines.py dump-predictions). Resumable: rerun the
-# same command and finished sequences are skipped. Writes
+# same command and finished sequences are skipped. The gate applies as for
+# benchmark.sh: the arm must be verified (or close, with --allow-close). Writes
 #   /lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/baselines/pred_<ARM>/
 #
 #   ARM=dav sbatch -J dump_dav experiments/baselines/dump_predictions.sh

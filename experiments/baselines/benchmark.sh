@@ -16,7 +16,9 @@
 # benchmark): published / sparse_aligned / metric per density and both TAEs,
 # with the identical sparse-depth draws our model gets (same --seed and patch
 # size as bench_checkpoint.py). Refused for an arm the reproduction record
-# does not mark `verified`. Writes
+# does not compute `verified`, except, with --allow-close, an arm it marks
+# "close": true whose measured status is `failed` (bench_baselines.py status
+# lists both). Writes
 #   /lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/baselines/bench_<ARM>/bench_results.json
 # in bench_eval's layout, so it sits next to a run's bench_results.json.
 #
@@ -26,6 +28,7 @@
 #   ARM=promptda sbatch ... --allow-close        # an arm whose reproduction is close, not
 #                                                # verified: its status goes into the results
 #   ARM=dav sbatch ... --predictions <dir>       # score dump_predictions.sh output
+#                                                # (dav must be verified first)
 #
 # Budget (estimate): VDA-L fp32 at the five datasets, three densities, is one
 # inference per sequence (the arm never sees the sparse depth), so ~1.5 h on an

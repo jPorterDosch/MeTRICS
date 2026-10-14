@@ -212,11 +212,17 @@ class RecordFileTest(unittest.TestCase):
                 self.assertTrue(entry["runs"], name)
                 self.assertTrue(all(t.get("within_tolerance") for t in gating), name)
             # the stored status is what the stored measurements support
-            self.assertEqual(R.computed_status(entry), entry["status"], name)
-            # the stored flags agree with a recompute from `measured`
+            # the stored status is what a recompute from `measured` gives
             self.assertEqual(
                 R.computed_status(entry, rec["tolerance"]), entry["status"], name
             )
+            for t in entry["targets"]:
+                if t.get("measured") is not None:
+                    self.assertEqual(
+                        R.within(t, t["measured"], rec["tolerance"]),
+                        t["within_tolerance"],
+                        f"{name}/{t['id']}",
+                    )
 
 
 def _gt(S=4, H=12, W=16, seed=0):
@@ -1641,18 +1647,32 @@ class ReviewFixesTest(unittest.TestCase):
         with self.assertRaises(R.GateError):
             R.require_allowed(rec, "fake", [("kitti", "metric")])
 
-    def test_allow_close_only_for_arms_the_record_marks_close(self):
-        import argparse
+    def test_allow_close_only_for_measured_failed_arms_marked_close(self):
+        missed = {**_target("0.100"), "measured": 0.150, "measured_commit": "a1"}
+        missed["within_tolerance"] = False
+        ok = {**_target("0.100"), "measured": 0.100, "measured_commit": "a1"}
+        ok["within_tolerance"] = True
+        uses = [("kitti", "sparse_aligned")]
 
-        args = argparse.Namespace(arm="fake", allow_close=True)
-        with self.assertRaises(SystemExit):
-            BB._check_allow_close(args, {"targets": []}, R.FAILED)
-        with self.assertRaises(SystemExit):
-            BB._check_allow_close(args, {"close": True}, R.VERIFIED)
-        BB._check_allow_close(args, {"close": True}, R.FAILED)  # allowed
-        rec = R.load()
+        def rec(targets, close):
+            e = {"status": "x", "targets": targets, "runs": [], "close": close}
+            return {"tolerance": TOL, "arms": {"fake": e}}
+
+        R.require_allowed(rec([missed], True), "fake", uses, allow_close=True)
+        for r in (
+            rec([missed], False),  # not marked close
+            rec([ok], True),  # verified: no override needed
+            rec([{**_target("0.100")}], True),  # pending: no measured gap
+        ):
+            with self.assertRaises(R.GateError):
+                R.require_allowed(r, "fake", uses, allow_close=True)
+        real = R.load()
         self.assertEqual(
-            {a for a, e in rec["arms"].items() if R.recorded_close(e)},
+            {
+                a
+                for a, e in real["arms"].items()
+                if R.close_allowed(e, real["tolerance"])
+            },
             {"vda_metric", "promptda"},
         )
 
@@ -1665,6 +1685,9 @@ class ReviewFixesTest(unittest.TestCase):
         del agg["sintel/stream/d5/published_abs_rel"]
         part = CT.row("b", {"aggregate": agg}, "d5")
         self.assertIsNone(part["mean AbsRel (published)"])
+        # TAE averages over the four video datasets (nyuv2 has none)
+        tae = {f"{d}/stream/d5/tae_vda": 2.0 for d in CT.TAE_DATASETS}
+        self.assertAlmostEqual(CT.row("c", {"aggregate": tae}, "d5")["mean TAE"], 2.0)
 
     def test_marigold_nyu_uses_raw_depth_and_the_eigen_crop(self):
         from eval import marigold_paper as MG
