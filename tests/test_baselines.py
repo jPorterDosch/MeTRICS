@@ -462,7 +462,30 @@ class AdapterContractTest(unittest.TestCase):
         self.assertEqual(pipe.seeds[A.DAVArm.ENSEMBLE :], first)  # same seeds each call
         self.assertEqual(len(set(first)), A.DAVArm.ENSEMBLE)
 
-    def test_dav_refuses_unregistered_outputs(self):
+    def test_dav_pads_so_every_input_frame_and_pixel_is_predicted(self):
+        """A fake pipeline with upstream's output contract (dav_pipeline.py):
+        one window returns every frame; a longer clip returns only the frames
+        strictly between the first and last key frame. Each frame carries its
+        index, so the output must come back registered to the input."""
+        import types
+
+        def upstream_keys(m):
+            keys = []
+            for i in range(0, m, 12):
+                if i + 17 >= m or len(keys) >= 32:
+                    break
+                keys += [i, i + 17]
+            return keys
+
+        class Pipe:
+            def __call__(self, image, num_frames, **kw):
+                disp = image[:, 0].cpu().numpy()  # (M, H, W), frame index / 255
+                m = len(disp)
+                if m > num_frames:
+                    keys = upstream_keys(m)
+                    disp = disp[keys[0] + 1 : keys[-1]]
+                return types.SimpleNamespace(disparity=disp)
+
         with A._vendored(A.THIRD_PARTY / "depth_any_video"):
             spec = importlib.util.spec_from_file_location(
                 "dav_img_utils",
@@ -474,12 +497,28 @@ class AdapterContractTest(unittest.TestCase):
             A.DAVArm,
             A.ArmInfo("dav", "disparity", False, False),
             img_utils=img_utils,
+            pipe=Pipe(),
             device=torch.device("cpu"),
         )
-        with self.assertRaises(ValueError):  # longer than one window
-            arm.predict(np.zeros((33, 64, 64, 3), np.uint8))
-        with self.assertRaises(ValueError):  # 375 is not a multiple of 32
-            arm.predict(np.zeros((1, 375, 1242, 3), np.uint8))
+        arm.ENSEMBLE = 1
+        for n, (h, w) in [
+            (5, (64, 96)),
+            (33, (40, 70)),
+            (110, (40, 70)),
+            (192, (40, 70)),
+        ]:
+            frames = np.zeros((n, h, w, 3), np.uint8)
+            frames[..., 0] = np.arange(n, dtype=np.uint8)[:, None, None]
+            frames[:, 0, 0, 0] = (
+                250  # a marker pixel: must stay top-left after unpadding
+            )
+            out = arm.predict(frames)
+            self.assertEqual(out.shape, (n, h, w), n)
+            np.testing.assert_allclose(out[:, 5, 5], np.arange(n) / 255.0, atol=1e-6)
+            np.testing.assert_allclose(out[:, 0, 0], 250 / 255.0, atol=1e-6)
+        self.assertEqual(A.DAVArm.temporal_padding(32), (0, 0))
+        with self.assertRaises(ValueError):  # beyond 32 key frames
+            A.DAVArm.temporal_padding(260)
 
 
 class MetricVDAInputTest(unittest.TestCase):
@@ -767,6 +806,8 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
             A.ARMS["fake"] = lambda device, record: arm
             try:
                 args = argparse.Namespace(
+                    allow_close=False,
+                    predictions=None,
                     record=rec_path,
                     arm="fake",
                     device="cpu",
@@ -828,6 +869,8 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
             try:
                 BB.benchmark(
                     argparse.Namespace(
+                        allow_close=False,
+                        predictions=None,
                         record=rec_path,
                         arm="fakep",
                         device="cpu",
@@ -866,6 +909,8 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
             A.ARMS["fake"] = lambda device, record: arm
             try:
                 args = argparse.Namespace(
+                    allow_close=False,
+                    predictions=None,
                     record=rec_path,
                     arm="fake",
                     device="cpu",
@@ -896,6 +941,8 @@ class OurProtocolsForBaselinesTest(unittest.TestCase):
         unverified = [a for a, e in rec["arms"].items() if e["status"] != R.VERIFIED]
         self.assertTrue(unverified)
         args = argparse.Namespace(
+            allow_close=False,
+            predictions=None,
             record=R.RECORD_PATH,
             arm=unverified[0],
             device="cpu",
@@ -1509,6 +1556,10 @@ class DA3MetricTest(unittest.TestCase):
                 self.assertIn(BB.runner_for(t["dataset"]), kinds, f"{arm}/{t['id']}")
         with self.assertRaises(SystemExit):
             BB.runner_for("kitti_typo")
+        # every runner kind has a group, so every record arm groups cleanly
+        self.assertEqual(set(BB.RUNNERS), set(BB._group_by_runner([])))
+        for arm in rec["arms"]:
+            BB._group_by_runner(R.runnable_targets(R.arm_entry(rec, arm)))
 
     def test_record_targets_route_to_this_evaluation(self):
         from eval import da_metric_paper as DAM

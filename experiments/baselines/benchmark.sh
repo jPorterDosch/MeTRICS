@@ -23,6 +23,9 @@
 #   ARM=vda sbatch -J bench_vda experiments/baselines/benchmark.sh
 #   ARM=vda DATASETS="bonn_all scannet" sbatch ...            # subset
 #   ARM=vda MAX_SEQ=2 DENSITIES=0.05 sbatch -p ai-tenn-debug -q ai-tenn-debug --time=01:00:00 ...   # smoke
+#   ARM=promptda sbatch ... --allow-close        # an arm whose reproduction is close, not
+#                                                # verified: its status goes into the results
+#   ARM=dav sbatch ... --predictions <dir>       # score dump_predictions.sh output
 #
 # Budget (estimate): VDA-L fp32 at the five datasets, three densities, is one
 # inference per sequence (the arm never sees the sparse depth), so ~1.5 h on an

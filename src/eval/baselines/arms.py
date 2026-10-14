@@ -291,10 +291,19 @@ class DAVArm:
     "following Ke et al." (Marigold); no ensembling code is released. Mean
     over members is used: Marigold's ensemble_depth (per-member affine
     alignment, then median) scored within 0.03 AbsRel of it on the first 200
-    NYUv2 images (5.19 vs 5.16) at ~1 min per image of alignment. Refuses the two
-    cases where upstream's output is not registered to the input frames
-    (README_VENDORED): a centre crop to a multiple of 32, and clips longer
-    than one window, whose key frames the long-video path drops."""
+    NYUv2 images (5.19 vs 5.16) at ~1 min per image of alignment.
+
+    Two input-side paddings make the output cover exactly the input frames,
+    where upstream's run_infer would not (README_VENDORED):
+      * spatial: upstream centre-crops each side to a multiple of 32; the arm
+        reflect-pads to the next multiple instead and crops the output back.
+      * temporal: clips longer than one window go through upstream's
+        long-video path (key-frame pairs 17 apart every 12 frames, predicted
+        together, then 16 interpolated frames per pair), which returns only
+        the frames strictly between the first and last key frame. The arm
+        prepends one copy of the first frame and appends copies of the last
+        until the last key frame falls after the clip (temporal_padding),
+        then drops the padded frames."""
 
     NUM_FRAMES = 32
     MAX_RESOLUTION = 1024
@@ -327,6 +336,29 @@ class DAVArm:
         self.img_utils = img_utils
         self.device = device
 
+    @classmethod
+    def temporal_padding(cls, n: int) -> tuple[int, int]:
+        """(front, back) frame copies so that upstream's long-video path
+        returns all `n` frames: its key-frame loop (dav_pipeline.py) restated,
+        with num_interp_frames 16, num_overlap_frames 6."""
+        if n <= cls.NUM_FRAMES:
+            return 0, 0
+        interp, overlap = 16, 6
+        for back in range(0, 2 * (interp + 2)):
+            m = n + 1 + back
+            keys: list[int] = []
+            for i in range(0, m, interp + 2 - overlap):
+                if i + interp + 1 >= m or len(keys) >= cls.NUM_FRAMES:
+                    break
+                keys += [i, i + interp + 1]
+            # output = padded frames keys[0]+1 .. keys[-1]-1 = original 0 .. n-1
+            if keys and keys[0] == 0 and keys[-1] >= n + 1:
+                return 1, back
+        raise ValueError(
+            f"dav: no padding makes the long-video path cover {n} frames "
+            f"(at most {cls.NUM_FRAMES} key frames)"
+        )
+
     def predict(
         self,
         frames: np.ndarray,
@@ -334,25 +366,27 @@ class DAVArm:
         max_resolution: int | None = None,
     ) -> np.ndarray:
         """`max_resolution` is run_infer.py's --max_resolution (default 1024):
-        Marigold's KITTI images (352x1216) are run at their own size."""
+        Marigold's KITTI images (352x1216) are run at their own size.
+        Returns disparity at the model resolution (after upstream's
+        imresize_max), one map per input frame."""
         _check_frames(frames)
         _no_prompt(self.info, prompt)
-        if len(frames) > self.NUM_FRAMES:
-            raise ValueError(
-                f"dav: {len(frames)} frames > one {self.NUM_FRAMES}-frame window; the "
-                "long-video path drops key frames and is not wired up"
-            )
-        resized = self.img_utils.imresize_max(
-            list(frames), max_resolution or self.MAX_RESOLUTION
-        )
-        cropped = self.img_utils.imcrop_multi(resized)
-        if cropped[0].shape != resized[0].shape:
-            raise ValueError(
-                f"dav: {resized[0].shape[:2]} is not a multiple of 32 on both sides; "
-                "upstream would centre-crop and the output would not cover the frame"
-            )
+        # upstream's input sizing: the long side capped at run_infer's
+        # --max_resolution (1024 unless the caller asks for another cap)
+        if max_resolution is None:
+            max_resolution = self.MAX_RESOLUTION
+        resized = self.img_utils.imresize_max(list(frames), max_resolution)
+        h, w = resized[0].shape[:2]
+        ph, pw = -h % 32, -w % 32
+        top, left = ph // 2, pw // 2
+        padded = [
+            np.pad(f, ((top, ph - top), (left, pw - left), (0, 0)), mode="reflect")
+            for f in resized
+        ]
+        front, back = self.temporal_padding(len(padded))
+        padded = [padded[0]] * front + padded + [padded[-1]] * back
         image = torch.from_numpy(
-            np.ascontiguousarray([f.transpose(2, 0, 1) / 255.0 for f in cropped])
+            np.ascontiguousarray([f.transpose(2, 0, 1) / 255.0 for f in padded])
         ).to(self.device)
         # fixed seeds per call, without touching the process RNG state
         devices = [self.device] if self.device.type == "cuda" else []
@@ -375,7 +409,14 @@ class DAVArm:
                     num_inference_steps=3,
                 )
                 members.append(np.asarray(out.disparity, dtype=np.float32))
-        return np.mean(members, axis=0).astype(np.float32)
+        disp = np.mean(members, axis=0)
+        # the long path already returns from the first padded frame + 1
+        disp = disp[: len(frames)]
+        if len(disp) != len(frames):
+            raise ValueError(f"dav: {len(disp)} outputs for {len(frames)} frames")
+        return np.ascontiguousarray(disp[:, top : top + h, left : left + w]).astype(
+            np.float32
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -646,14 +687,19 @@ def build_arm(
     device: torch.device,
     uses: list[tuple[str, str]],
     record: dict | None = None,
+    allow_unverified: bool = False,
 ):
     """The arm, built only if the reproduction record opens every (dataset,
     protocol) in `uses` to it (record.require_allowed). The same record
-    names the weights the arm loads."""
+    names the weights the arm loads. `allow_unverified` is the explicit,
+    caller-recorded override for comparing an arm whose reproduction is
+    close but not verified (bench_baselines benchmark --allow-close stamps
+    the arm's computed status into its results)."""
     if name not in ARMS:
         raise KeyError(f"unknown baseline arm {name!r}; known: {sorted(ARMS)}")
     if not uses:
         raise ValueError("build_arm needs the (dataset, protocol) pairs it will run")
     record = record or R.load()
-    R.require_allowed(record, name, uses)
+    if not allow_unverified:
+        R.require_allowed(record, name, uses)
     return ARMS[name](device, record)
