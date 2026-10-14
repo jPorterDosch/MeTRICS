@@ -422,6 +422,46 @@ class AdapterContractTest(unittest.TestCase):
         arm.predict(big, (depth[:1], valid[:1]))
         self.assertEqual(fake.seen[-1][0], (1, 3, 756, 1008))
 
+    def test_dav_averages_an_ensemble_of_seeded_passes(self):
+        import types
+
+        class Pipe:
+            def __init__(self):
+                self.seeds = []
+
+            def __call__(self, image, **kw):
+                seed = int(torch.randint(0, 10**6, (1,)))  # follows manual_seed
+                self.seeds.append(seed)
+                n = image.shape[0]
+                return types.SimpleNamespace(
+                    disparity=np.full((n, 64, 96), float(len(self.seeds)), np.float32)
+                )
+
+        with A._vendored(A.THIRD_PARTY / "depth_any_video"):
+            spec = importlib.util.spec_from_file_location(
+                "dav_img_utils2",
+                A.THIRD_PARTY / "depth_any_video" / "dav" / "utils" / "img_utils.py",
+            )
+            img_utils = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(img_utils)
+        pipe = Pipe()
+        arm = _bare(
+            A.DAVArm,
+            A.ArmInfo("dav", "disparity", False, False),
+            img_utils=img_utils,
+            pipe=pipe,
+            device=torch.device("cpu"),
+        )
+        state = torch.random.get_rng_state()
+        out = arm.predict(np.zeros((2, 64, 96, 3), np.uint8))
+        self.assertTrue(torch.equal(state, torch.random.get_rng_state()))
+        self.assertEqual(len(pipe.seeds), A.DAVArm.ENSEMBLE)
+        np.testing.assert_allclose(out, (A.DAVArm.ENSEMBLE + 1) / 2)  # mean of 1..20
+        first = list(pipe.seeds)
+        arm.predict(np.zeros((2, 64, 96, 3), np.uint8))
+        self.assertEqual(pipe.seeds[A.DAVArm.ENSEMBLE :], first)  # same seeds each call
+        self.assertEqual(len(set(first)), A.DAVArm.ENSEMBLE)
+
     def test_dav_refuses_unregistered_outputs(self):
         with A._vendored(A.THIRD_PARTY / "depth_any_video"):
             spec = importlib.util.spec_from_file_location(
@@ -1237,6 +1277,36 @@ class ParityTreesTest(unittest.TestCase):
                 cv2.imread(str(d / "clean" / "f.png"))[0, 0].tolist(), [0, 0, 200]
             )
 
+    def test_nyuv2_raw_takes_raw_depth_and_the_whole_frame(self):
+        import h5py
+        from scipy.io import savemat
+
+        sys.path.insert(
+            0, os.path.join(os.path.dirname(__file__), "..", "datasets_preprocess")
+        )
+        import prepare_vda_benchmark as PV
+
+        rng = np.random.default_rng(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            raw, out = Path(tmp) / "raw", Path(tmp) / "out"
+            (raw / "nyu").mkdir(parents=True)
+            images = rng.integers(0, 255, (3, 3, 640, 480), dtype=np.uint8)
+            filled = rng.uniform(1, 5, (3, 640, 480)).astype(np.float32)
+            rawd = filled.copy()
+            rawd[:, :50] = 0.0  # Kinect holes: only in the raw depth
+            with h5py.File(raw / "nyu" / "nyu_depth_v2_labeled.mat", "w") as f:
+                f["images"], f["depths"], f["rawDepths"] = images, filled, rawd
+            savemat(str(raw / "nyu" / "splits.mat"), {"testNdxs": np.array([[1], [3]])})
+            PV.prepare_nyuv2_raw(raw, out, expect=2)
+            self.assertEqual(PV.check_manifest(out, "nyuv2_raw"), 2)
+            seq = VB.load_manifest(out, VB.SPECS["nyuv2_raw"])[1]  # index 2
+            gt = VB.gt_stack(seq, VB.SPECS["nyuv2_raw"])
+            a, b, c, d = VB.SPECS["nyuv2_raw"].crop
+            np.testing.assert_allclose(gt[0], rawd[2].T[a:b, c:d], atol=1 / 6000)
+            rgb = np.asarray(Image.open(seq.frames[0].image))
+            self.assertEqual(rgb.shape, (480, 640, 3))  # whole frame in
+            np.testing.assert_array_equal(rgb, images[2].transpose(2, 1, 0))
+
     def test_rename_manifest(self):
         sys.path.insert(
             0, os.path.join(os.path.dirname(__file__), "..", "datasets_preprocess")
@@ -1430,12 +1500,13 @@ class DA3MetricTest(unittest.TestCase):
             "da3_metric": "da_metric",
             "vda": "video",
             "vda_metric": "video",
-            "dav": "video",
+            "dav": {"video", "marigold"},
         }
         rec = R.load()
         for arm, kind in expected.items():
+            kinds = kind if isinstance(kind, set) else {kind}
             for t in R.runnable_targets(R.arm_entry(rec, arm)):
-                self.assertEqual(BB.runner_for(t["dataset"]), kind, f"{arm}/{t['id']}")
+                self.assertIn(BB.runner_for(t["dataset"]), kinds, f"{arm}/{t['id']}")
         with self.assertRaises(SystemExit):
             BB.runner_for("kitti_typo")
 
@@ -1449,6 +1520,88 @@ class DA3MetricTest(unittest.TestCase):
             self.assertIn(t["dataset"], DAM.DATASETS)
             self.assertIn(t["protocol"], DAM.PROTOCOLS)
             self.assertIn(t["metric"], ("abs_rel", "delta1"))
+
+
+class MarigoldPaperTest(unittest.TestCase):
+    """Marigold's single-image evaluation (eval/marigold_paper.py)."""
+
+    def test_disparity_affine_of_truth_scores_exactly_with_their_code(self):
+        from eval import marigold_paper as MG
+
+        rng = np.random.default_rng(0)
+        gt = rng.uniform(1.0, 9.0, (48, 64)).astype(np.float32)
+        gt[:4] = 0.0  # holes
+        valid = (gt > 1e-3) & (gt < 10)
+        s = MG.Sample("x", np.zeros((48, 64, 3), np.uint8), gt, valid)
+        disp = np.where(gt > 0, 3.0 / np.maximum(gt, 1e-6) + 0.2, 0.0).astype(
+            np.float32
+        )
+        r = MG.evaluate(disp, s, "marigold_scannet")
+        self.assertAlmostEqual(r["abs_rel"], 0.0, places=5)
+        self.assertAlmostEqual(r["delta1"], 1.0, places=6)
+        with self.assertRaises(ValueError):
+            MG.evaluate(disp[:, :10], s, "marigold_scannet")
+
+    def test_kitti_kb_crop_and_eigen_mask_are_marigolds(self):
+        from eval import marigold_paper as MG
+
+        x = np.arange(375 * 1242).reshape(375, 1242)
+        c = MG._kb_crop(x)
+        self.assertEqual(c.shape, (352, 1216))
+        self.assertEqual(c[0, 0], x[23, 13])  # bottom rows, centred columns
+        m = MG._eigen_mask((352, 1216))
+        self.assertTrue(m[int(0.3324324 * 352), int(0.0359477 * 1216)])
+        self.assertFalse(m[int(0.3324324 * 352) - 1, 600])
+        self.assertFalse(m[200, int(0.96405229 * 1216)])
+
+    def test_split_lists_and_targets(self):
+        from eval import marigold_paper as MG
+
+        kitti = (
+            MG._MARIGOLD / "data_split" / MG.DATASETS["marigold_kitti"].split
+        ).read_text()
+        rows = [line.split() for line in kitti.splitlines() if line.strip()]
+        self.assertEqual(sum(r[1] != "None" for r in rows), 652)
+        scannet = (
+            MG._MARIGOLD / "data_split" / MG.DATASETS["marigold_scannet"].split
+        ).read_text()
+        self.assertEqual(
+            len([line for line in scannet.splitlines() if line.strip()]), 800
+        )
+        for t in R.runnable_targets(R.arm_entry(R.load(), "dav")):
+            if t["dataset"] in MG.DATASETS:
+                self.assertIn(t["protocol"], MG.PROTOCOLS)
+
+    def test_runner_runs_each_image_at_its_own_size(self):
+        from eval import marigold_paper as MG
+
+        gt = np.full((32, 64), 4.0, np.float32)
+        samples = [
+            MG.Sample(f"s{i}", np.zeros((32, 64, 3), np.uint8), gt * (i + 1), gt > 0)
+            for i in range(3)
+        ]
+
+        class Arm(_FakeArm):
+            def predict(self, frames, prompt=None, max_resolution=None):
+                self.calls.append(max_resolution)
+                return np.full((1, 32, 64), 1.0, np.float32)  # flat: AbsRel 0
+
+        saved = MG.samples
+        MG.samples = lambda dataset: iter(samples)
+        try:
+            arm = Arm(None)
+            targets = [
+                {"id": "a", "metric": "abs_rel"},
+                {"id": "d", "metric": "delta1"},
+            ]
+            measured, rows = BB.run_marigold(arm, "marigold_scannet", targets, 2)
+        finally:
+            MG.samples = saved
+        self.assertEqual(arm.calls, [64, 64])
+        self.assertEqual(len(rows), 2)
+        self.assertLess(measured["a"], 1e-5)
+        with self.assertRaises(ValueError):
+            BB.run_marigold(_FakeArm(None, "depth"), "marigold_scannet", targets, 0)
 
 
 if __name__ == "__main__":

@@ -120,6 +120,18 @@ SPECS: dict[str, BenchSpec] = {
         base="nyuv2",
         rgb_uncropped=True,
     ),
+    # the same 654 stills, whole frame in, scored against the RAW Kinect depth
+    # (holes = 0, invalid) instead of the filled depth: Marigold's evaluation,
+    # which Depth Any Video's Table 2 follows. Reproduction only.
+    "nyuv2_raw": BenchSpec(
+        "nyuv2_raw",
+        "nyuv2_raw/nyuv2_raw_test.json",
+        10.0,
+        (45, 471, 41, 601),
+        1,
+        False,
+        rgb_uncropped=True,
+    ),
     # VDA's headline (Table 1) protocol: up to 500 frames per video, from the
     # *_video_500.json manifests their extractor writes alongside the short
     # ones (ScanNet at stride 1 here, not the 90-frame split's stride 3).

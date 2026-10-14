@@ -11,4 +11,5 @@ extend-exclude = [
     "third_party/depth_any_video",
     "third_party/depth_anything_3",
     "third_party/depth_anything_v2_metric",
+    "third_party/marigold_eval",
 ]

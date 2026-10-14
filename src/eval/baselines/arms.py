@@ -286,13 +286,19 @@ class OVDAArm:
 # ---------------------------------------------------------------------------
 class DAVArm:
     """run_infer.py's pipeline call at its defaults (3 denoising steps,
-    max_resolution 1024), one pass, seed fixed per sequence. Refuses the two
+    max_resolution 1024), run ENSEMBLE times with seeds 0..ENSEMBLE-1 and the
+    disparities averaged. The paper evaluates with an ensemble of 20
+    "following Ke et al." (Marigold); no ensembling code is released. Mean
+    over members is used: Marigold's ensemble_depth (per-member affine
+    alignment, then median) scored within 0.03 AbsRel of it on the first 200
+    NYUv2 images (5.19 vs 5.16) at ~1 min per image of alignment. Refuses the two
     cases where upstream's output is not registered to the input frames
     (README_VENDORED): a centre crop to a multiple of 32, and clips longer
     than one window, whose key frames the long-video path drops."""
 
     NUM_FRAMES = 32
     MAX_RESOLUTION = 1024
+    ENSEMBLE = 20
 
     def __init__(self, device: torch.device, record: dict | None = None):
         from diffusers import (
@@ -321,7 +327,14 @@ class DAVArm:
         self.img_utils = img_utils
         self.device = device
 
-    def predict(self, frames: np.ndarray, prompt: Prompt | None = None) -> np.ndarray:
+    def predict(
+        self,
+        frames: np.ndarray,
+        prompt: Prompt | None = None,
+        max_resolution: int | None = None,
+    ) -> np.ndarray:
+        """`max_resolution` is run_infer.py's --max_resolution (default 1024):
+        Marigold's KITTI images (352x1216) are run at their own size."""
         _check_frames(frames)
         _no_prompt(self.info, prompt)
         if len(frames) > self.NUM_FRAMES:
@@ -329,7 +342,9 @@ class DAVArm:
                 f"dav: {len(frames)} frames > one {self.NUM_FRAMES}-frame window; the "
                 "long-video path drops key frames and is not wired up"
             )
-        resized = self.img_utils.imresize_max(list(frames), self.MAX_RESOLUTION)
+        resized = self.img_utils.imresize_max(
+            list(frames), max_resolution or self.MAX_RESOLUTION
+        )
         cropped = self.img_utils.imcrop_multi(resized)
         if cropped[0].shape != resized[0].shape:
             raise ValueError(
@@ -339,25 +354,28 @@ class DAVArm:
         image = torch.from_numpy(
             np.ascontiguousarray([f.transpose(2, 0, 1) / 255.0 for f in cropped])
         ).to(self.device)
-        # a fixed seed per call, without touching the process RNG state
+        # fixed seeds per call, without touching the process RNG state
         devices = [self.device] if self.device.type == "cuda" else []
+        members = []
         with (
             torch.random.fork_rng(devices=devices),
             torch.no_grad(),
             torch.autocast(self.device.type, dtype=torch.float16),
         ):
-            torch.manual_seed(0)
-            if devices:
-                torch.cuda.manual_seed_all(0)
-            out = self.pipe(
-                image,
-                num_frames=self.NUM_FRAMES,
-                num_overlap_frames=6,
-                num_interp_frames=16,
-                decode_chunk_size=16,
-                num_inference_steps=3,
-            )
-        return np.asarray(out.disparity, dtype=np.float32)
+            for seed in range(self.ENSEMBLE):
+                torch.manual_seed(seed)
+                if devices:
+                    torch.cuda.manual_seed_all(seed)
+                out = self.pipe(
+                    image,
+                    num_frames=self.NUM_FRAMES,
+                    num_overlap_frames=6,
+                    num_interp_frames=16,
+                    decode_chunk_size=16,
+                    num_inference_steps=3,
+                )
+                members.append(np.asarray(out.disparity, dtype=np.float32))
+        return np.mean(members, axis=0).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------

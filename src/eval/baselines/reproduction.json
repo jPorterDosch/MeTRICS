@@ -335,7 +335,7 @@
       },
       "settings": "as vda, with metric=True (no window alignment), except that the metric model runs WITHOUT infer_video_depth's aspect shrink: frames wider than 16:9 get the input_size that the shrink maps back to 518 (arms.unshrunk_input_size; KITTI 374x1242 -> 957), and its DINOv2 attention runs through torch scaled_dot_product_attention so the unshrunk frames fit in memory (same math; upstream's MemEffAttention falls back to plain attention without xFormers). The README does not state split, frame cap or alignment; ASSUMED: delta1 without alignment on the 500-frame split, TAE as eval_tae.sh.",
       "status": "failed",
-      "status_note": "ScanNet TAE: CLOSE, not passed (user decision 2026-10-12). Three-way on the same fp32 predictions of the unshrunk arm (job 6383596): ours 1.0599 (100 scenes) / 1.0798 (first 20 of our manifest order); VDA's own eval_tae.py, unmodified, on 1/depth 1.0599 / 1.0797 (matches ours to 1e-4); on raw metric depth 1.2720 / 1.3359 (so the README did not feed depth unconverted). README 1.09, tolerance +-0.0218. eval_tae.sh scores 20 scenes in an unrecoverable glob order; resampling our per-scene values (0.63-2.20), a 20-scene mean spans 0.963-1.166 (5-95%), so the 2.6% gap is inside that draw noise but cannot be closed. Precision ruled out (fp16 1.0604, fp32 1.0599, job 6378672). KITTI-500 delta1 through the staged arm: 0.9063 fp32 / 0.9063 fp16 (README 0.910, within tolerance; job 6378672), pending a reproduce run to enter the record. 2026-10-11/12: KITTI cause found. The aspect shrink in infer_video_depth (a memory workaround, 'due to memory limitation') sets KITTI's short side to 280; unshrunk at 518 the scale is right: KITTI-500 raw metric delta1 0.9074 / AbsRel 0.1050 / median gt/pred 1.005 vs shrunk 0.3424 / 0.3466 / 0.764 (fp16, H100, probe job 6373139, eval_jd/baselines/mvda_probe/). R/B-swapped input changes nothing (0.3435 vs 0.3427, job 6372713). The arm now runs unshrunk; the record values below predate that and are re-measured by the next reproduce run. Earlier notes: Not reproduced; README protocol unrecoverable. What was established (jobs 6329352, 6329880, 6333457; upstream git history): the metric model's own inference code at the time of the README table (metric_depth/video_depth.py, 2025-08-29) is the shared code of today, aspect shrink included, and the L checkpoint on HF (2025-04-22) predates the table, so code and weights are theirs. Raw metric delta1 is 0.344-0.366 on KITTI (full frame; the aspect shrink to a 280 px short side changes the scale: median gt/pred 0.77; a 16:9 centre crop gives 0.953) and 0.5835 on our NYUv2 stills (480x640, no shrink; AbsRel 0.25, a scale error on indoor data). With a per-video scale alignment: KITTI-500 0.9218 (scale-only LSQ) / 0.9318 (median), NYUv2 0.9448 / 0.9541 -- the README's 0.910 / 0.908 sit in that range but match no single alignment, and the README's NYU is its 8-scene 500-frame video split, not built here. Undoing the shrink at full width runs out of memory on an 80 GB H100. CONSEQUENCE: this arm's absolute scale depends on input resolution and camera, so in our `metric` table it is only meaningful with the input convention stated, and not on frames wider than 16:9 uncropped.",
+      "status_note": "Re-measured 2026-10-13 at code 7d171b6+88100c79 (job 6385433): KITTI-500 delta1 0.9063 within tolerance (README 0.910); ScanNet TAE 1.0599, CLOSE, not passed (README 1.09, +-0.0218), so the computed status stays failed. ScanNet TAE: CLOSE, not passed (user decision 2026-10-12). Three-way on the same fp32 predictions of the unshrunk arm (job 6383596): ours 1.0599 (100 scenes) / 1.0798 (first 20 of our manifest order); VDA's own eval_tae.py, unmodified, on 1/depth 1.0599 / 1.0797 (matches ours to 1e-4); on raw metric depth 1.2720 / 1.3359 (so the README did not feed depth unconverted). README 1.09, tolerance +-0.0218. eval_tae.sh scores 20 scenes in an unrecoverable glob order; resampling our per-scene values (0.63-2.20), a 20-scene mean spans 0.963-1.166 (5-95%), so the 2.6% gap is inside that draw noise but cannot be closed. Precision ruled out (fp16 1.0604, fp32 1.0599, job 6378672). KITTI-500 delta1 through the staged arm: 0.9063 fp32 / 0.9063 fp16 (README 0.910, within tolerance; job 6378672). 2026-10-11/12: KITTI cause found. The aspect shrink in infer_video_depth (a memory workaround, 'due to memory limitation') sets KITTI's short side to 280; unshrunk at 518 the scale is right: KITTI-500 raw metric delta1 0.9074 / AbsRel 0.1050 / median gt/pred 1.005 vs shrunk 0.3424 / 0.3466 / 0.764 (fp16, H100, probe job 6373139, eval_jd/baselines/mvda_probe/). R/B-swapped input changes nothing (0.3435 vs 0.3427, job 6372713). The arm now runs unshrunk. Earlier notes: Not reproduced; README protocol unrecoverable. What was established (jobs 6329352, 6329880, 6333457; upstream git history): the metric model's own inference code at the time of the README table (metric_depth/video_depth.py, 2025-08-29) is the shared code of today, aspect shrink included, and the L checkpoint on HF (2025-04-22) predates the table, so code and weights are theirs. Raw metric delta1 is 0.344-0.366 on KITTI (full frame; the aspect shrink to a 280 px short side changes the scale: median gt/pred 0.77; a 16:9 centre crop gives 0.953) and 0.5835 on our NYUv2 stills (480x640, no shrink; AbsRel 0.25, a scale error on indoor data). With a per-video scale alignment: KITTI-500 0.9218 (scale-only LSQ) / 0.9318 (median), NYUv2 0.9448 / 0.9541 -- the README's 0.910 / 0.908 sit in that range but match no single alignment, and the README's NYU is its 8-scene 500-frame video split, not built here. Undoing the shrink at full width runs out of memory on an 80 GB H100. CONSEQUENCE: this arm's absolute scale depends on input resolution and camera, so in our `metric` table it is only meaningful with the input convention stated, and not on frames wider than 16:9 uncropped.",
       "targets": [
         {
           "id": "readme_kitti_delta1",
@@ -346,8 +346,9 @@
           "protocol": "metric",
           "metric": "delta1",
           "gate": true,
-          "measured": 0.34358291886746883,
-          "within_tolerance": false
+          "measured": 0.9063041026775653,
+          "within_tolerance": true,
+          "measured_commit": "7d171b6+88100c79"
         },
         {
           "id": "readme_nyuv2_delta1",
@@ -369,8 +370,9 @@
           "protocol": "tae",
           "metric": "tae_vda",
           "gate": true,
-          "measured": 1.061593611939162,
-          "within_tolerance": false
+          "measured": 1.0598801199582644,
+          "within_tolerance": false,
+          "measured_commit": "7d171b6+88100c79"
         }
       ],
       "runs": [
@@ -396,6 +398,12 @@
           "commit": "e4a9013+dirty",
           "job_id": "6329346",
           "host": "erph1709"
+        },
+        {
+          "date": "2026-10-13T07:05:58",
+          "commit": "7d171b6+88100c79",
+          "job_id": "6385433",
+          "host": "clrv1107"
         }
       ]
     },
@@ -411,55 +419,55 @@
         "file": "(diffusers layout: unet, unet_interp, vae, scheduler)",
         "license": "Apache-2.0 (model card); code is CC-BY-NC-4.0"
       },
-      "settings": "Sec. 4.2: 3 denoising steps, ensemble size 20, per-image scale+shift. The released pipeline has NO ensembling; the arm runs one pass (seed 0). The alignment space is not stated; the arm's native disparity is assumed (our `published` protocol on one-frame sequences). NYUv2 as `nyuv2_full`: the whole 480x640 frame in (a multiple of 32, so upstream's centre crop is a no-op), scored inside the Eigen crop.",
-      "status": "failed",
-      "status_note": "Not reproducible from the release: NYUv2 6.64 / 94.65 vs 5.1 / 97.0 (full 480x640 frame, Eigen crop, per-image scale+shift in disparity). One variable at a time (jobs 6329351, 6329855; offline analysis of 10 saved seeds per image): ensembling 10 seeds 6.18 / 95.12 (mean) and saturating, so the paper's ensemble of 20 does not close it; fitting in depth space as Marigold does 13.2 / 84.0; R/B-swapped input 6.81; input upscaled to 768x1024 7.41; 1 step 6.75; 10 steps 6.93. No evaluation or data code is released; the remaining candidates (the released checkpoint differing from the paper's, an unreleased ensembling/alignment procedure) cannot be tested.",
+      "settings": "Sec. 4.2: 3 denoising steps, ensemble size 20 'following Ke et al. (2024)', and evaluation 'following prior methods (Ke et al., 2024; Fu et al., 2024)', i.e. Marigold's. The arm runs the released pipeline 20 times (seeds 0-19) and averages the disparities (no ensembling code is released). NYUv2 as Marigold evaluates it (`nyuv2_raw`): the whole 480x640 frame in (a multiple of 32, so upstream's centre crop is a no-op), the RAW Kinect depth as GT (Marigold eval.py scores depth_raw_linear), valid 1e-3 < GT < 10 inside the Eigen crop, per-image scale+shift in disparity (DAV's own eval_utils.batch_eval_func and Marigold's least_square_disparity). KITTI and ScanNet (gating since 2026-10-13): Marigold's own evaluation data, split lists and least_square_disparity protocol (src/eval/marigold_paper.py, third_party/marigold_eval): KITTI Eigen 652 kb-cropped to 352x1216 and run at that size (run_infer's --max_resolution = its long side), 1e-5 < GT < 80, Eigen mask; ScanNet = the 800-frame sample Marigold ships, 1e-3 < GT < 10.",
+      "status": "pending-gpu",
+      "status_note": "2026-10-13: KITTI and ScanNet made gating (user decision), on Marigold's own data and protocol; the status is pending until one reproduce run at one code state measures all six targets. Before that, NYUv2 alone was verified (job 6385432). Verified 2026-10-13 at code 7d171b6+88100c79 (job 6385432): NYUv2 AbsRel 5.03 / delta1 96.95 (paper 5.1 / 97.0) with the 20-seed ensemble on raw GT. Corroborated 2026-10-13 on two non-gating Table 2 rows, outside this pipeline (probe scripts in eval_jd/baselines/parity2/scripts/, Marigold's own evaluation data and protocol, 20-seed mean): KITTI Eigen 652 (kb crop, Eigen mask, 1e-5..80 m) 7.27 / 95.05 vs 7.3 / 95.1 (job 6389357); ScanNet, Marigold's 800-frame sample, 5.21 / 96.62 vs 5.3 / 96.6 (job 6389439). Our nyuv2_raw tree matches Marigold's NYU test data (identical RGB, depth within its 1 mm storage step). 2026-10-13, lineage check: the gap was the GT. Our earlier `nyuv2_full` tree holds the FILLED depth (`depths`); Marigold, whose evaluation DAV follows, scores against the raw depth. On the same saved predictions (jobs 6329351, 6384434; scored through score_main): raw GT seed 0 5.38 / 96.66, mean of 10 seeds 5.03 / 96.98, mean of 20 seeds 5.03 / 96.95; filled GT seed 0 6.64 / 94.65 (the old record), mean of 20 6.20 / 95.09. Marigold's own ensemble_depth on 20 seeds vs the mean, first 200 images (job 6384957, did not finish the set): 5.19 / 96.69 vs 5.16 / 96.74. Targets moved to nyuv2_raw and the arm to the 20-seed mean. Earlier notes: Not reproducible from the release: NYUv2 6.64 / 94.65 vs 5.1 / 97.0 (full 480x640 frame, Eigen crop, per-image scale+shift in disparity). One variable at a time (jobs 6329351, 6329855; offline analysis of 10 saved seeds per image): ensembling 10 seeds 6.18 / 95.12 (mean) and saturating, so the paper's ensemble of 20 does not close it; fitting in depth space as Marigold does 13.2 / 84.0; R/B-swapped input 6.81; input upscaled to 768x1024 7.41; 1 step 6.75; 10 steps 6.93. No evaluation or data code is released; the remaining candidates (the released checkpoint differing from the paper's, an unreleased ensembling/alignment procedure) cannot be tested.",
       "targets": [
         {
           "id": "t2_nyuv2_absrel",
           "source": "Table 2, row Depth Any Video (Ours), NYUv2, AbsRel",
           "published": "5.1",
           "scale": 100,
-          "dataset": "nyuv2_full",
+          "dataset": "nyuv2_raw",
           "protocol": "published",
           "metric": "abs_rel",
           "gate": true,
-          "measured": 0.0663863398235486,
-          "within_tolerance": false
+          "measured": 0.0502573013543461,
+          "within_tolerance": true,
+          "measured_commit": "7d171b6+88100c79"
         },
         {
           "id": "t2_nyuv2_delta1",
           "source": "Table 2, row Depth Any Video (Ours), NYUv2, delta1",
           "published": "97.0",
           "scale": 100,
-          "dataset": "nyuv2_full",
+          "dataset": "nyuv2_raw",
           "protocol": "published",
           "metric": "delta1",
           "gate": true,
-          "measured": 0.9465326486833234,
-          "within_tolerance": false
+          "measured": 0.9695114475598029,
+          "within_tolerance": true,
+          "measured_commit": "7d171b6+88100c79"
         },
         {
           "id": "t2_kitti_absrel",
           "source": "Table 2, row Depth Any Video (Ours), KITTI, AbsRel",
           "published": "7.3",
           "scale": 100,
-          "dataset": null,
-          "protocol": "published",
+          "dataset": "marigold_kitti",
+          "protocol": "marigold_disparity",
           "metric": "abs_rel",
-          "gate": false,
-          "why_not_gating": "Single-frame KITTI Eigen test split (652 images, Marigold protocol) is not built here."
+          "gate": true
         },
         {
           "id": "t2_kitti_delta1",
           "source": "Table 2, row Depth Any Video (Ours), KITTI, delta1",
           "published": "95.1",
           "scale": 100,
-          "dataset": null,
-          "protocol": "published",
+          "dataset": "marigold_kitti",
+          "protocol": "marigold_disparity",
           "metric": "delta1",
-          "gate": false,
-          "why_not_gating": "as t2_kitti_absrel"
+          "gate": true
         },
         {
           "id": "t2_eth3d_absrel",
@@ -488,22 +496,20 @@
           "source": "Table 2, row Depth Any Video (Ours), ScanNet, AbsRel",
           "published": "5.3",
           "scale": 100,
-          "dataset": null,
-          "protocol": "published",
+          "dataset": "marigold_scannet",
+          "protocol": "marigold_disparity",
           "metric": "abs_rel",
-          "gate": false,
-          "why_not_gating": "Marigold's 800-image ScanNet validation split is not built here (Lustre holds scans_test)."
+          "gate": true
         },
         {
           "id": "t2_scannet_delta1",
           "source": "Table 2, row Depth Any Video (Ours), ScanNet, delta1",
           "published": "96.6",
           "scale": 100,
-          "dataset": null,
-          "protocol": "published",
+          "dataset": "marigold_scannet",
+          "protocol": "marigold_disparity",
           "metric": "delta1",
-          "gate": false,
-          "why_not_gating": "as t2_scannet_absrel"
+          "gate": true
         },
         {
           "id": "video_scannetpp_absrel",
@@ -562,6 +568,12 @@
           "commit": "e4a9013+dirty",
           "job_id": "6321845",
           "host": "clrv1205"
+        },
+        {
+          "date": "2026-10-13T06:06:24",
+          "commit": "7d171b6+88100c79",
+          "job_id": "6385432",
+          "host": "clrv1107"
         }
       ]
     },
@@ -862,7 +874,7 @@
       },
       "settings": "Sec. 4.1: ARKitScenes depth-upsampling protocol (ARKitScenes paper), Validation fold (5,599 images): 192x256 ARKit depth as the prompt, laser-scan highres depth as GT, evaluated at 384x512 / 768x1024 / 1440x1920. No evaluation code is released; ASSUMED from apple/ARKitScenes depth_upsampling/dataset.py: GT nearest-resized to the evaluated size, frames rotated upright by sky_direction, L1 and RMSE in metres over GT > 0, mean over images. Inference is upstream's default (io_wrapper.load_image: long side capped at 1008, i.e. 756x1008), ONE prediction per frame, bilinearly resized to each evaluated size.",
       "status": "failed",
-      "status_note": "Within 5.1% on all six targets, three within tolerance (job 6322208): 384x512 0.0132 / 0.0317 vs 0.0135 / 0.0326; 768x1024 0.0131 / 0.0312 vs 0.0132 / 0.0315; 1440x1920 0.0131 / 0.0311 vs 0.0138 / 0.0316. One variable at a time on the first 20 videos (jobs 6329348, 6329881; change in L1 / RMSE vs the one-inference base): inference at each column's size +21% / +12% at 384 and +19% / +11% at 1440 (ruled out; +1.2% / +2.6% at 768); no upright rotation +21% / +10% (ruled out); R/B-swapped input +2.1% / +2.0% in every column; ARKit prompt resized to 180x240 at 1440, as Apple's x8 loader does, +2.1% / +0.5%; prediction resized nearest +1.4% / +4.2% at 384, cubic +0.1% / +1.0%; validity gt > 0.01 m: no change. The paper differs from our base by +2.3% / +2.8% (384), +0.8% / +1.0% (768), +5.3% / +1.6% (1440): no single variable gives that pattern, and none was adopted. No evaluation code is released.",
+      "status_note": "2026-10-13, lineage check: Sec. 4.1 follows the ARKitScenes paper's suggested protocol, and the MSPF row is taken from it (App. C.4). Apple's depth_upsampling code (logs/eval.py, train.py validation transforms) matches ours: per-image L1 / RMSE over GT > 0.01 m, ModCrop(32), GT nearest-resized, mean over images. The one upstream code change since the paper is 29ba2fa (2025-01-17, 'Fix the image normalization bug'): the first public code (e76db21) fed DINOv2 unnormalised images; the weights (2024-12-16) predate both. Full fold (job 6384439): normalised (the arm) 384 0.0132 / 0.0317, 768 0.0131 / 0.0312, 1440 0.0131 / 0.0311; unnormalised 0.0139 / 0.0332, 0.0138 / 0.0327, 0.0137 / 0.0325. The paper (0.0135 / 0.0326, 0.0132 / 0.0315, 0.0138 / 0.0316) sits between the two and matches neither (normalised 3 of 6 within tolerance, unnormalised 2 of 6); the arm keeps the current, normalised code. CLOSE, not passed: all six within 5.3% of the paper, three within tolerance. Within 5.1% on all six targets, three within tolerance (job 6322208): 384x512 0.0132 / 0.0317 vs 0.0135 / 0.0326; 768x1024 0.0131 / 0.0312 vs 0.0132 / 0.0315; 1440x1920 0.0131 / 0.0311 vs 0.0138 / 0.0316. One variable at a time on the first 20 videos (jobs 6329348, 6329881; change in L1 / RMSE vs the one-inference base): inference at each column's size +21% / +12% at 384 and +19% / +11% at 1440 (ruled out; +1.2% / +2.6% at 768); no upright rotation +21% / +10% (ruled out); R/B-swapped input +2.1% / +2.0% in every column; ARKit prompt resized to 180x240 at 1440, as Apple's x8 loader does, +2.1% / +0.5%; prediction resized nearest +1.4% / +4.2% at 384, cubic +0.1% / +1.0%; validity gt > 0.01 m: no change. The paper differs from our base by +2.3% / +2.8% (384), +0.8% / +1.0% (768), +5.3% / +1.6% (1440): no single variable gives that pattern, and none was adopted. No evaluation code is released.",
       "targets": [
         {
           "id": "t1_384_l1",

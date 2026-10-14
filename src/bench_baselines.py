@@ -45,6 +45,7 @@ from PIL.ImageOps import exif_transpose
 
 from eval import arkit_upsampling as ARKIT
 from eval import da_metric_paper as DAM
+from eval import marigold_paper as MG
 from eval import ovda_paper as OVDA
 from eval import protocols as P
 from eval.baselines import arms as A
@@ -302,6 +303,31 @@ def run_da_metric(
     return measured, rows
 
 
+def run_marigold(
+    arm, dataset: str, targets: list[dict], max_sequences: int
+) -> tuple[dict[str, float], list[dict]]:
+    """Marigold's single-image evaluation (eval/marigold_paper.py) on its own
+    data: one prediction per image at the image's own size (upstream's
+    --max_resolution set to the long side, so nothing is resized or cropped),
+    least-squares fit in disparity, per-image metrics, mean over images."""
+    if arm.info.output != "disparity":
+        raise ValueError(
+            f"{arm.info.name}: Marigold's disparity protocol fits disparity"
+        )
+    rows = []
+    for i, s in enumerate(MG.samples(dataset)):
+        if max_sequences and i >= max_sequences:
+            break
+        pred = arm.predict(s.rgb[None], max_resolution=max(s.rgb.shape[:2]))[0]
+        rows.append(
+            {"dataset": dataset, "sequence": s.name, **MG.evaluate(pred, s, dataset)}
+        )
+        if (i + 1) % 100 == 0:
+            print(f"[repro] {arm.info.name} {dataset}: {i + 1} images", flush=True)
+    measured = {t["id"]: P.finite_mean([r[t["metric"]] for r in rows]) for t in targets}
+    return measured, rows
+
+
 def _commit() -> str:
     """HEAD, plus a hash of the uncommitted CODE changes -- tracked diffs and
     untracked files under src/, datasets_preprocess/, experiments/ and
@@ -360,14 +386,17 @@ _CODE_PATHS = ("src", "datasets_preprocess", "experiments", "third_party")
 
 def runner_for(dataset: str) -> str:
     """Which evaluation scores a reproduction target's dataset: PromptDA's
-    ARKitScenes table, oVDA's own evaluation, DA3's Table 11, or the VDA
-    benchmark trees. Raises for a dataset none of them knows."""
+    ARKitScenes table, oVDA's own evaluation, DA3's Table 11, Marigold's
+    single-image evaluation, or the VDA benchmark trees. Raises for a dataset
+    none of them knows."""
     if dataset in ARKIT.SIZES:
         return "arkit"
     if dataset in OVDA.DATASETS:
         return "ovda"
     if dataset in DAM.DATASETS:
         return "da_metric"
+    if dataset in MG.DATASETS:
+        return "marigold"
     if dataset in SPECS:
         return "video"
     raise SystemExit(f"no reproduction runner for dataset {dataset!r}")
@@ -410,6 +439,7 @@ def reproduce(args) -> None:
     per_dataset = {  # one call per dataset
         "ovda": lambda ds, ts: run_ovda_paper(arm, ds, ts, args.max_sequences),
         "da_metric": lambda ds, ts: run_da_metric(arm, ds, ts, args.max_sequences),
+        "marigold": lambda ds, ts: run_marigold(arm, ds, ts, args.max_sequences),
         "video": lambda ds, ts: run_video_dataset(
             arm, ds, ts, args.bench_root, args.max_sequences
         ),
