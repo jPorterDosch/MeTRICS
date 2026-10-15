@@ -421,8 +421,8 @@
         "license": "Apache-2.0 (model card); code is CC-BY-NC-4.0"
       },
       "settings": "Sec. 4.2: 3 denoising steps, ensemble size 20 'following Ke et al. (2024)', and evaluation 'following prior methods (Ke et al., 2024; Fu et al., 2024)', i.e. Marigold's. The arm runs the released pipeline 20 times (seeds 0-19) and averages the disparities (no ensembling code is released). All three gating datasets use Marigold's own evaluation data, split lists and least_square_disparity protocol (src/eval/marigold_paper.py, third_party/marigold_eval): NYUv2 = the 654 test frames of nyu_labeled_extracted, raw depth, Eigen crop [45:471, 41:601], 1e-3 < GT < 10, run at 480x640; KITTI Eigen 652 kb-cropped to 352x1216 and run at that size (run_infer's --max_resolution = its long side), 1e-5 < GT < 80, Eigen mask; ScanNet = the 800-frame sample Marigold ships, 1e-3 < GT < 10.",
-      "status": "pending-gpu",
-      "status_note": "2026-10-13 (code review): the NYUv2 targets moved from our nyuv2_raw tree scored with VDA's alignment to Marigold's own NYU data and protocol, so all of DAV's gating targets share the one protocol the settings name (VDA's fit keeps pixels with zero predicted disparity, Marigold's excludes them). Pending a reproduce run of all six targets at one code state. 2026-10-13: KITTI and ScanNet made gating (user decision), on Marigold's own data and protocol; the status is pending until one reproduce run at one code state measures all six targets. Before that, NYUv2 alone was verified (job 6385432). SUPERSEDED HISTORY (before the move to Marigold's NYU data and protocol; the nyuv2_raw tree named below was removed, and its NYU numbers used VDA's alignment, so they are not comparable with the next run): Verified 2026-10-13 at code 7d171b6+88100c79 (job 6385432): NYUv2 AbsRel 5.03 / delta1 96.95 (paper 5.1 / 97.0) with the 20-seed ensemble on raw GT. Corroborated 2026-10-13 on two non-gating Table 2 rows, outside this pipeline (probe scripts in eval_jd/baselines/parity2/scripts/, Marigold's own evaluation data and protocol, 20-seed mean): KITTI Eigen 652 (kb crop, Eigen mask, 1e-5..80 m) 7.27 / 95.05 vs 7.3 / 95.1 (job 6389357); ScanNet, Marigold's 800-frame sample, 5.21 / 96.62 vs 5.3 / 96.6 (job 6389439). Our nyuv2_raw tree matches Marigold's NYU test data (identical RGB, depth within its 1 mm storage step). 2026-10-13, lineage check: the gap was the GT. Our earlier `nyuv2_full` tree holds the FILLED depth (`depths`); Marigold, whose evaluation DAV follows, scores against the raw depth. On the same saved predictions (jobs 6329351, 6384434; scored through score_main): raw GT seed 0 5.38 / 96.66, mean of 10 seeds 5.03 / 96.98, mean of 20 seeds 5.03 / 96.95; filled GT seed 0 6.64 / 94.65 (the old record), mean of 20 6.20 / 95.09. Marigold's own ensemble_depth on 20 seeds vs the mean, first 200 images (job 6384957, did not finish the set): 5.19 / 96.69 vs 5.16 / 96.74. Targets moved to nyuv2_raw and the arm to the 20-seed mean. Earlier notes: Not reproducible from the release: NYUv2 6.64 / 94.65 vs 5.1 / 97.0 (full 480x640 frame, Eigen crop, per-image scale+shift in disparity). One variable at a time (jobs 6329351, 6329855; offline analysis of 10 saved seeds per image): ensembling 10 seeds 6.18 / 95.12 (mean) and saturating, so the paper's ensemble of 20 does not close it; fitting in depth space as Marigold does 13.2 / 84.0; R/B-swapped input 6.81; input upscaled to 768x1024 7.41; 1 step 6.75; 10 steps 6.93. No evaluation or data code is released; the remaining candidates (the released checkpoint differing from the paper's, an unreleased ensembling/alignment procedure) cannot be tested.",
+      "status": "verified",
+      "status_note": "Verified 2026-10-14 (job 6393331, started 2026-10-13 21:06): all six Table 2 targets on Marigold's data and protocol, 20-seed ensemble: NYUv2 5.03 / 96.94 (paper 5.1 / 97.0), KITTI 7.27 / 95.05 (7.3 / 95.1), ScanNet 5.21 / 96.62 (5.3 / 96.6). The recorded code string abeb6d4+e3e51181 was taken when the job ENDED (the start-of-run fingerprint fix came later), so it also covers edits made while it ran: the gate consolidation, the status CLI, compare_table, tae_ours' float32 origin and da3_metric's per-frame focal. None is on DAV's scoring path (DAVArm.predict, run_marigold, marigold_paper.py were unchanged from 21:06). 2026-10-13 (code review): the NYUv2 targets moved from our nyuv2_raw tree scored with VDA's alignment to Marigold's own NYU data and protocol, so all of DAV's gating targets share the one protocol the settings name (VDA's fit keeps pixels with zero predicted disparity, Marigold's excludes them). Pending a reproduce run of all six targets at one code state. 2026-10-13: KITTI and ScanNet made gating (user decision), on Marigold's own data and protocol; the status is pending until one reproduce run at one code state measures all six targets. Before that, NYUv2 alone was verified (job 6385432). SUPERSEDED HISTORY (before the move to Marigold's NYU data and protocol; the nyuv2_raw tree named below was removed, and its NYU numbers used VDA's alignment, so they are not comparable with the next run): Verified 2026-10-13 at code 7d171b6+88100c79 (job 6385432): NYUv2 AbsRel 5.03 / delta1 96.95 (paper 5.1 / 97.0) with the 20-seed ensemble on raw GT. Corroborated 2026-10-13 on two non-gating Table 2 rows, outside this pipeline (probe scripts in eval_jd/baselines/parity2/scripts/, Marigold's own evaluation data and protocol, 20-seed mean): KITTI Eigen 652 (kb crop, Eigen mask, 1e-5..80 m) 7.27 / 95.05 vs 7.3 / 95.1 (job 6389357); ScanNet, Marigold's 800-frame sample, 5.21 / 96.62 vs 5.3 / 96.6 (job 6389439). Our nyuv2_raw tree matches Marigold's NYU test data (identical RGB, depth within its 1 mm storage step). 2026-10-13, lineage check: the gap was the GT. Our earlier `nyuv2_full` tree holds the FILLED depth (`depths`); Marigold, whose evaluation DAV follows, scores against the raw depth. On the same saved predictions (jobs 6329351, 6384434; scored through score_main): raw GT seed 0 5.38 / 96.66, mean of 10 seeds 5.03 / 96.98, mean of 20 seeds 5.03 / 96.95; filled GT seed 0 6.64 / 94.65 (the old record), mean of 20 6.20 / 95.09. Marigold's own ensemble_depth on 20 seeds vs the mean, first 200 images (job 6384957, did not finish the set): 5.19 / 96.69 vs 5.16 / 96.74. Targets moved to nyuv2_raw and the arm to the 20-seed mean. Earlier notes: Not reproducible from the release: NYUv2 6.64 / 94.65 vs 5.1 / 97.0 (full 480x640 frame, Eigen crop, per-image scale+shift in disparity). One variable at a time (jobs 6329351, 6329855; offline analysis of 10 saved seeds per image): ensembling 10 seeds 6.18 / 95.12 (mean) and saturating, so the paper's ensemble of 20 does not close it; fitting in depth space as Marigold does 13.2 / 84.0; R/B-swapped input 6.81; input upscaled to 768x1024 7.41; 1 step 6.75; 10 steps 6.93. No evaluation or data code is released; the remaining candidates (the released checkpoint differing from the paper's, an unreleased ensembling/alignment procedure) cannot be tested.",
       "targets": [
         {
           "id": "t2_nyuv2_absrel",
@@ -432,7 +432,10 @@
           "dataset": "marigold_nyu",
           "protocol": "marigold_disparity",
           "metric": "abs_rel",
-          "gate": true
+          "gate": true,
+          "measured": 0.05028092022700412,
+          "within_tolerance": true,
+          "measured_commit": "abeb6d4+e3e51181"
         },
         {
           "id": "t2_nyuv2_delta1",
@@ -442,7 +445,10 @@
           "dataset": "marigold_nyu",
           "protocol": "marigold_disparity",
           "metric": "delta1",
-          "gate": true
+          "gate": true,
+          "measured": 0.9694335605801063,
+          "within_tolerance": true,
+          "measured_commit": "abeb6d4+e3e51181"
         },
         {
           "id": "t2_kitti_absrel",
@@ -452,7 +458,10 @@
           "dataset": "marigold_kitti",
           "protocol": "marigold_disparity",
           "metric": "abs_rel",
-          "gate": true
+          "gate": true,
+          "measured": 0.0726956589735953,
+          "within_tolerance": true,
+          "measured_commit": "abeb6d4+e3e51181"
         },
         {
           "id": "t2_kitti_delta1",
@@ -462,7 +471,10 @@
           "dataset": "marigold_kitti",
           "protocol": "marigold_disparity",
           "metric": "delta1",
-          "gate": true
+          "gate": true,
+          "measured": 0.9504591019972701,
+          "within_tolerance": true,
+          "measured_commit": "abeb6d4+e3e51181"
         },
         {
           "id": "t2_eth3d_absrel",
@@ -494,7 +506,10 @@
           "dataset": "marigold_scannet",
           "protocol": "marigold_disparity",
           "metric": "abs_rel",
-          "gate": true
+          "gate": true,
+          "measured": 0.05208294752170332,
+          "within_tolerance": true,
+          "measured_commit": "abeb6d4+e3e51181"
         },
         {
           "id": "t2_scannet_delta1",
@@ -504,7 +519,10 @@
           "dataset": "marigold_scannet",
           "protocol": "marigold_disparity",
           "metric": "delta1",
-          "gate": true
+          "gate": true,
+          "measured": 0.9662237049173563,
+          "within_tolerance": true,
+          "measured_commit": "abeb6d4+e3e51181"
         },
         {
           "id": "video_scannetpp_absrel",
@@ -568,6 +586,12 @@
           "date": "2026-10-13T06:06:24",
           "commit": "7d171b6+88100c79",
           "job_id": "6385432",
+          "host": "clrv1107"
+        },
+        {
+          "date": "2026-10-14T03:07:34",
+          "commit": "abeb6d4+e3e51181",
+          "job_id": "6393331",
           "host": "clrv1107"
         }
       ]

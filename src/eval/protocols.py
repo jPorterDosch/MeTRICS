@@ -421,11 +421,19 @@ def tae_ours(
         return float("nan"), float("nan")
     if len(Ks) != S or len(poses) != S:
         raise ValueError(f"tae_ours: {S} frames but {len(Ks)} Ks / {len(poses)} poses")
+    # TAE depends on relative poses only, so the world origin is moved to the
+    # first finite camera in float64 BEFORE the float32 cast below: KITTI's
+    # poses are absolute Mercator coordinates (~4e6 m), where float32 resolves
+    # only 0.25-0.5 m and would swamp the reprojection error
+    finite = [np.asarray(p, dtype=np.float64) for p in poses]
+    origin = next((p[:3, 3] for p in finite if np.isfinite(p).all()), np.zeros(3))
     i2l = []
-    for K, pose in zip(Ks, poses):
+    for K, pose in zip(Ks, finite):
         k4 = np.eye(4, dtype=np.float32)
         k4[:3, :3] = np.asarray(K, dtype=np.float32)[:3, :3]
-        pose = np.asarray(pose, dtype=np.float32)
+        pose = pose.copy()
+        pose[:3, 3] -= origin
+        pose = pose.astype(np.float32)
         i2l.append(pose @ np.linalg.inv(k4) if np.isfinite(pose).all() else None)
     abs_errs, sq_errs = [], []
     for i in range(S - 1):

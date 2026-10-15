@@ -121,10 +121,18 @@ def recorded_close(entry: dict) -> bool:
 
 def close_allowed(entry: dict, tol: dict) -> bool:
     """--allow-close opens the gate only for an arm the record marks close
-    AND whose every gating target is measured with a computed `failed`: the
-    gap it is compared with is a measured one, not a reset or pending
-    record."""
-    return recorded_close(entry) and computed_status(entry, tol) == FAILED
+    AND whose every gating target is measured, by ONE identifiable code
+    state, with a computed `failed`: the gap it is compared with is a
+    measured one that a code state can be tied to, as `verified` requires."""
+    gating = [t for t in entry["targets"] if t["gate"]]
+    commits = {t.get("measured_commit") for t in gating}
+    one_code = len(commits) == 1 and _identifiable(next(iter(commits), None))
+    return (
+        recorded_close(entry)
+        and one_code
+        and all(t.get("measured") is not None for t in gating)
+        and computed_status(entry, tol) == FAILED
+    )
 
 
 def require_allowed(

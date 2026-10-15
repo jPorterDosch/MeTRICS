@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dump_baseline
 #SBATCH --account=isaac-utk0256
-#SBATCH --partition=campus-gpu-large
-#SBATCH --qos=campus-gpu
+#SBATCH --partition=ai-tenn
+#SBATCH --qos=ai-tenn
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:v100s:1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 #SBATCH --output=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/dump_baseline_%j.out
 #SBATCH --error=/nfs/home/jdosch1/brown-visual-computing/MeTRICS/logs/dump_baseline_%j.out
 
@@ -26,7 +26,7 @@
 #       --predictions /lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/baselines/pred_dav
 #
 # Budget (estimate): dav runs 20 seeded passes per clip; the five benchmark
-# datasets plus ScanNet's 100 TAE clips are ~1-2 GPU-days on a V100S.
+# datasets plus ScanNet's 100 TAE clips are ~1 GPU-day on an H100.
 
 set -euo pipefail
 

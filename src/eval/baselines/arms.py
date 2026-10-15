@@ -650,8 +650,10 @@ class DA3MetricArm:
         self,
         frames: np.ndarray,
         prompt: Prompt | None = None,
-        focal: tuple[float, float] | None = None,
+        focal: tuple[float, float] | list[tuple[float, float]] | None = None,
     ) -> np.ndarray:
+        """`focal`: (fx, fy) in pixels for every frame, or one (fx, fy) per
+        frame when the intrinsics change within the clip (Sintel)."""
         _check_frames(frames)
         _no_prompt(self.info, prompt)
         if focal is None:
@@ -659,10 +661,14 @@ class DA3MetricArm:
                 "da3_metric needs the frames' focal length (fx, fy) in pixels: "
                 "its output is metric only once scaled by it"
             )
-        fx, fy = focal
+        focals = [focal] * len(frames) if np.ndim(focal) == 1 else list(focal)
+        if len(focals) != len(frames):
+            raise ValueError(
+                f"da3_metric: {len(focals)} focals for {len(frames)} frames"
+            )
         H, W = frames.shape[1:3]
         out = []
-        for frame in frames:
+        for frame, (fx, fy) in zip(frames, focals):
             raw = self.model.inference(
                 [frame], process_res=self.PROCESS_RES, process_res_method=self.METHOD
             ).depth[0]

@@ -31,11 +31,9 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import inspect
 import json
 import os
-import subprocess
 from pathlib import Path
 
 import cv2
@@ -48,6 +46,7 @@ from eval import arkit_upsampling as ARKIT
 from eval import da_metric_paper as DAM
 from eval import marigold_paper as MG
 from eval import ovda_paper as OVDA
+from eval import provenance as PROV
 from eval import protocols as P
 from eval.baselines import arms as A
 from eval.baselines import record as R
@@ -56,6 +55,7 @@ from eval.vda_benchmark import (
     BenchSpec,
     Sequence,
     crop_slices,
+    full_frame_box,
     gt_stack,
     scaled_intrinsics,
     load_manifest,
@@ -331,59 +331,10 @@ def run_marigold(
 
 
 def _commit() -> str:
-    """HEAD, plus a hash of the uncommitted CODE changes -- tracked diffs and
-    untracked files under src/, datasets_preprocess/, experiments/ and
-    third_party/, the record itself excluded since every run rewrites it: two
-    runs with the same string ran the same code, which is what `verified`
-    requires of its measurements."""
-    repo = Path(__file__).resolve().parents[1]
-    try:
-        head = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], text=True
-        ).strip()
-        diff = subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "diff",
-                "HEAD",
-                "--",
-                *_CODE_PATHS,
-                f":!{R.RECORD_PATH.relative_to(repo)}",
-            ],
-            text=True,
-        )
-        untracked = [
-            p
-            for p in subprocess.check_output(
-                [
-                    "git",
-                    "-C",
-                    str(repo),
-                    "ls-files",
-                    "-z",
-                    "--others",
-                    "--exclude-standard",
-                    "--",
-                    *_CODE_PATHS,
-                ],
-                text=True,
-            ).split("\0")
-            if p
-        ]
-        h = hashlib.sha1(diff.encode())
-        for rel in sorted(untracked):
-            h.update(rel.encode())
-            h.update((repo / rel).read_bytes())
-    except (OSError, subprocess.CalledProcessError, ValueError):
-        return "unknown"
-    if not diff.strip() and not untracked:
-        return head
-    return f"{head}+{h.hexdigest()[:8]}"
-
-
-_CODE_PATHS = ("src", "datasets_preprocess", "experiments", "third_party")
+    """eval.provenance.code_fingerprint: HEAD plus a hash of uncommitted
+    code, the record excluded (two runs with the same string ran the same
+    code, which is what `verified` requires of its measurements)."""
+    return PROV.code_fingerprint()
 
 
 def runner_for(dataset: str) -> str:
@@ -492,29 +443,37 @@ def reproduce(args) -> None:
 
 
 def _bench_frames(seq, spec) -> np.ndarray:
-    """The arm sees the pixels our model sees: for an uncropped-frame
-    manifest the protocol crop is applied to the frames here, as build_views
-    does for ours (and where a prompted arm's sparse depth is drawn), instead
-    of to the prediction afterwards as `reproduce` does for parity with VDA's
-    infer.py."""
-    frames = read_frames(seq)
-    if seq.rgb_uncropped:
-        ys, xs = crop_slices(spec.crop)
-        frames = np.ascontiguousarray(frames[:, ys, xs])
-    return frames
+    """The frames as the manifest lists them. An uncropped-frame manifest
+    (ScanNet's TAE clips) is fed WHOLE, to every model: our model too
+    (build_views), and the arm's prediction is cropped onto the GT grid
+    afterwards, as VDA's protocol does and as `reproduce` verified it."""
+    return read_frames(seq)
 
 
 def _arm_kwargs(arm, seq, spec, frames: np.ndarray, gt_hw) -> dict:
     """Per-call inputs an arm needs beyond the frames: a metric single-image
-    arm (da3_metric) takes the frames' focal length, from the manifest's GT
-    camera (K of the uncropped GT grid) moved onto the frames given to it."""
+    arm (da3_metric) takes each frame's focal length, from the manifest's GT
+    camera (K of the uncropped GT grid) moved onto the frames given to it.
+    Per frame, not per sequence: Sintel's focal length changes within a
+    sequence (cave_2: 689-1529 px)."""
     if "focal" not in inspect.signature(arm.predict).parameters:
         return {}
-    K = seq.frames[0].K
-    if K is None:
-        raise ValueError(f"{arm.info.name} needs K: {spec.name}/{seq.name} has none")
-    K = scaled_intrinsics(K, spec.crop, tuple(gt_hw), frames.shape[1:3])
-    return {"focal": (float(K[0, 0]), float(K[1, 1]))}
+    if seq.rgb_uncropped:
+        # whole frames, the uncropped GT's size (full_frame_box checks it):
+        # the manifest's K applies as written
+        full_frame_box(seq, spec, tuple(gt_hw))
+    focals = []
+    for fr in seq.frames:
+        if fr.K is None:
+            raise ValueError(
+                f"{arm.info.name} needs K: {spec.name}/{seq.name} has a frame without"
+            )
+        if seq.rgb_uncropped:
+            K = np.asarray(fr.K, dtype=np.float64)
+        else:
+            K = scaled_intrinsics(fr.K, spec.crop, tuple(gt_hw), frames.shape[1:3])
+        focals.append((float(K[0, 0]), float(K[1, 1])))
+    return {"focal": focals}
 
 
 def _cache_path(root: Path, dataset: str, kind: str, seq_name: str) -> Path:
@@ -555,8 +514,20 @@ def dump_predictions(args) -> None:
         raise ValueError(f"{args.arm}: a prompted arm needs each draw; run it live")
     root = args.out / f"pred_{args.arm}"
     root.mkdir(parents=True, exist_ok=True)
-    with open(root / "arm.json", "w") as f:
-        json.dump({**vars(arm.info), "commit": _commit()}, f, indent=2)
+    commit = _commit()
+    meta = root / "arm.json"
+    if meta.exists():
+        with open(meta) as f:
+            prior = json.load(f).get("commit")
+        if prior != commit or not PROV.identifiable(commit):
+            # resuming would mix predictions of two code states under one stamp
+            raise SystemExit(
+                f"{root} holds predictions by code {prior}, this is {commit}: "
+                "resume only at the same, identifiable code, or dump into a fresh --out"
+            )
+    else:
+        with open(meta, "w") as f:
+            json.dump({**vars(arm.info), "commit": commit}, f, indent=2)
     for name, kind, spec, seq in _bench_sequences(
         args.bench_root, args.datasets, args.tae_datasets, args.max_sequences
     ):
@@ -604,8 +575,25 @@ class CachedArm:
         return pred
 
 
+# benchmark refuses a non-CUDA device (see benchmark); the CPU unit tests of
+# the plumbing switch it off
+REQUIRE_CUDA = True
+
+
 def benchmark(args) -> None:
     import bench_eval as BE  # the training stack: metrics venv only
+
+    # importing bench_eval imports croco, which switches TF32 matmuls on for
+    # the whole process (croco/models/croco.py). The arms were verified in
+    # `reproduce`, which never imports it, so they run without TF32 here too:
+    # otherwise an arm's numbers would depend on the GPU (Ampere+ only) and
+    # differ from the verified path
+    torch.backends.cuda.matmul.allow_tf32 = False
+    if REQUIRE_CUDA and torch.device(args.device).type != "cuda":
+        # the sparse draws (torch.rand under a fixed seed) differ between CPU
+        # and CUDA: off the GPU an arm would be fed / held out other pixels
+        # than our model
+        raise SystemExit("benchmark draws the sparse depth on CUDA; --device cuda")
 
     commit = _commit()  # at start: the code imported is the code that runs
 
@@ -650,11 +638,12 @@ def benchmark(args) -> None:
         """The arm's output as bench_eval scores it: on the GT grid for
         published / metric / TAE, and at OUR model resolution (where the
         sparse pixels live) for the sparse fit."""
-        cropped = Sequence(seq.dataset, seq.name, seq.frames, rgb_uncropped=False)
-        at_gt = register_to_gt(raw, cropped, spec, frame_hw, gt_hw)
-        # from the GT grid, not from the raw frames: for an uncropped-frame
-        # manifest the raw output still carries the border the protocol crops
-        native = resize_to_gt(at_gt, native_hw)
+        # an uncropped-frame manifest: resized to the frame, then cropped to
+        # the GT region (register_to_gt), exactly as `reproduce` did
+        at_gt = register_to_gt(raw, seq, spec, frame_hw, gt_hw)
+        # the sparse-fit copy at OUR model resolution covers what our model
+        # saw: the whole frame for an uncropped manifest, else the GT region
+        native = resize_to_gt(raw if seq.rgb_uncropped else at_gt, native_hw)
         S = len(raw)
         return BE.Prediction(
             native,
@@ -783,6 +772,10 @@ def benchmark(args) -> None:
                     for k, v in vars(cfg).items()
                 },
                 "commit": commit,
+                "gpu": PROV.device_info()["gpu"],
+                "manifests": PROV.manifest_hashes(
+                    cfg.root, [SPECS[d] for d in cfg.datasets]
+                ),
                 "job_id": os.environ.get("SLURM_JOB_ID", "none"),
                 "aggregate": result,
                 "rows": rows,

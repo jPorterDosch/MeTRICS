@@ -34,7 +34,10 @@ Two datasets are done here instead:
   * nyuv2: their script covers only the 8-scene 500-frame video split (and
     calls a function it does not define). The 654-still test split is
     extracted from nyu_depth_v2_labeled.mat + splits.mat with VDA's NYU
-    crop [45:471, 41:601] on RGB and factor 6000 on depth.
+    crop [45:471, 41:601] on RGB and factor 6000 on depth. The depth is the
+    RAW Kinect depth (rawDepths, 0 in sensor holes), not the colorization-
+    filled `depths`: a completion model must not be fed or scored on
+    inpainted values (decided 2026-10-14; Marigold's protocol uses raw too).
 Bonn is restricted to the five sequences of DepthCrafter's meta_bonn.csv (the
 published 5 x 110 protocol; MonST3R's list differs by one sequence); VDA's
 extractor takes every directory it sees.
@@ -343,7 +346,7 @@ def prepare_nyuv2(raw: Path, out: Path, expect: int = 654) -> None:
     entries_full = []
     with h5py.File(str(labeled), "r") as f:
         images = f["images"]  # (N, 3, 640, 480) as stored
-        depths = f["depths"]  # (N, 640, 480)
+        depths = f["rawDepths"]  # (N, 640, 480) metres, 0 = no return
         for i in sorted(test_idx.tolist()):
             rgb = np.asarray(images[i]).transpose(2, 1, 0)  # -> (480, 640, 3)
             depth = np.asarray(depths[i]).transpose(1, 0)  # -> (480, 640) metres

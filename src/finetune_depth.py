@@ -745,6 +745,11 @@ def run(
             args.output_dir,
             step=args.epochs * len(data_loader_train),
             amp=bool(args.amp),
+            weights=(
+                f"{args.output_dir}: weights at the end of training"
+                if args.epochs > 0
+                else f"{args.output_dir}: loaded weights, no training (--epochs 0)"
+            ),
         )
 
     # No separate checkpoint-final.pth: the `epoch == args.epochs` branch above

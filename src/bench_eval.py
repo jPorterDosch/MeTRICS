@@ -46,6 +46,7 @@ from accelerate.utils import gather_object
 
 from dust3r.inference import loss_of_one_batch
 from eval import protocols as P
+from eval import provenance as PROV
 from eval.spot_benchmark import SpotSequence
 from eval.spot_benchmark import load_views as spot_views
 from eval.spot_benchmark import split_sensor_depth as spot_split
@@ -58,14 +59,18 @@ from eval.vda_benchmark import (
     build_views,
     gt_stack,
     load_manifest,
-    resize_to_gt,
+    model_to_gt,
     scaled_intrinsics,
-    sparse_mask_to_gt,
 )
 from streamvggt.depth_cond.config import SparseSimMode
 from streamvggt.depth_cond.sparse import simulate_sparse_depth
 from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
 from train_utils import to_primitive
+
+# the code this process imported: fingerprinted at import, because the
+# benchmark may only run at the end of a multi-day training run, when the
+# working tree can have moved on
+CODE_AT_IMPORT = PROV.code_fingerprint()
 
 _BENCH_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench")
 _SPOT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/spot_data")
@@ -272,6 +277,20 @@ class Prediction:
     resizing `depth` up again. `depth` stays the sparse-fit copy."""
 
 
+def predict_on_gt(
+    net, accelerator: Accelerator, views: list[dict], gt_hw, amp: bool = True
+) -> Prediction:
+    """predict(), with the prediction also put on the GT grid when the views
+    are whole frames of an uncropped manifest (resized to the frame, then
+    cropped to the GT region: VDA's --hard_crop), so every protocol and TAE
+    reads the GT-registered map."""
+    pred = predict(net, accelerator, views, amp)
+    box = views[0].get("gt_box")
+    if box is not None:
+        pred.at_gt = model_to_gt(pred.depth, tuple(gt_hw), box)
+    return pred
+
+
 def predict(
     net, accelerator: Accelerator, views: list[dict], amp: bool = True
 ) -> Prediction:
@@ -325,11 +344,14 @@ def score_sequence(
     the published-aligned depth, which score_tae_sequence takes so the
     resize + per-video least squares run once per (sequence, density)."""
     H, W = gt.shape[1:]
-    pred_gt = pred.at_gt if pred.at_gt is not None else resize_to_gt(pred.depth, (H, W))
+    box = views[0].get("gt_box")  # whole-frame input (build_views)
+    pred_gt = (
+        pred.at_gt if pred.at_gt is not None else model_to_gt(pred.depth, (H, W), box)
+    )
     if pred_gt.shape != gt.shape:
         raise ValueError(f"prediction {pred_gt.shape} does not match gt {gt.shape}")
     sparse_depth, sparse_mask = _sparse_arrays(views)
-    sparse_mask_gt = sparse_mask_to_gt(sparse_mask, (H, W))
+    sparse_mask_gt = model_to_gt(sparse_mask, (H, W), box, mask=True)
     disparity = pred.output == "disparity"
     published, aligned = P.published_metrics(
         P.as_disparity(pred_gt, pred.output), gt, spec.max_depth
@@ -400,7 +422,7 @@ def score_tae_sequence(
     H, W = gt.shape[1:]
     if aligned is None:
         pred_gt = (
-            pred.at_gt if pred.at_gt is not None else resize_to_gt(pred.depth, (H, W))
+            pred.at_gt if pred.at_gt is not None else model_to_gt(pred.depth, (H, W))
         )
         _, aligned = P.published_metrics(
             P.as_disparity(pred_gt, pred.output), gt, spec.max_depth
@@ -712,12 +734,32 @@ def run_benchmark(
     output_dir: str,
     step: int,
     amp: bool = True,
+    weights: str | None = None,
 ) -> dict[str, float]:
     """Score every configured dataset and log/write the results. Sequences
     are sharded round-robin over ranks and the per-sequence rows gathered on
     the main process, so a multi-GPU run finishes proportionally faster.
     Sparse draws use cfg.seed / cfg.patch_size, never the run's training
-    values; `amp` is the run's own --amp."""
+    values; `amp` is the run's own --amp. `weights` names what is scored
+    (checkpoint file, or a description), written into the results."""
+    # code and precision of THIS scoring
+    provenance = {
+        "commit": CODE_AT_IMPORT,
+        "weights": weights,
+        **PROV.device_info(),
+        "manifests": PROV.manifest_hashes(
+            cfg.root,
+            [SPECS[d] for d in cfg.datasets],
+        ),
+    }
+    if provenance["autocast_dtype"] not in (None, "bfloat16"):
+        # dust3r.inference autocasts to fp16 below compute capability 8: the
+        # same checkpoint then scores differently from its bf16 training and
+        # validation, and from every other benchmark run
+        raise RuntimeError(
+            f"benchmark needs a bf16 GPU (A40/H100); this is {provenance['gpu']} "
+            f"({provenance['autocast_dtype']} autocast)"
+        )
     cfg.validate()
     missing = bench_root_ok(cfg.root, cfg.datasets, cfg.tae_datasets)
     missing += spot_missing(cfg)
@@ -784,7 +826,7 @@ def run_benchmark(
                     realized = attach_sparse_depth(
                         views, density, tag, patch, seed, device
                     )
-                    pred = predict(net, accelerator, views, amp)
+                    pred = predict_on_gt(net, accelerator, views, gt.shape[1:], amp)
                     row, aligned = score_sequence(
                         spec, seq, gt, views, pred, MODE_STREAM, density, realized
                     )
@@ -867,7 +909,7 @@ def run_benchmark(
                         realized = attach_sparse_depth(
                             views, density, tag, patch, seed, device
                         )
-                        pred = predict(net, accelerator, views, amp)
+                        pred = predict_on_gt(net, accelerator, views, gt.shape[1:], amp)
                         win, win_gt, win_pred = tae_window(spec, seq, gt, pred)
                         new_tae.append(
                             score_tae_sequence(
@@ -989,6 +1031,7 @@ def run_benchmark(
             json.dump(
                 {
                     "config": to_primitive(cfg),
+                    **provenance,
                     "step": step,
                     "aggregate": result,
                     "rows": rows,

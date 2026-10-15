@@ -354,6 +354,44 @@ class RunnerPlumbingTest(unittest.TestCase):
                 np.zeros((2, 968, 1296), np.float32), seq, spec, (968, 1296), (464, 618)
             )
 
+    def test_uncropped_manifest_is_fed_whole_and_cropped_after(self):
+        """ScanNet's TAE clips: every model sees the whole 480x640 frame, the
+        sparse source holds GT only inside the scored region, and a
+        prediction comes back cropped exactly onto the GT grid."""
+        spec = VB.SPECS["scannet"]  # crop [8:-8, 11:-11]
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = []
+            for i in range(2):
+                rgb = np.zeros((480, 640, 3), np.uint8)
+                rgb[..., 0] = np.arange(640) % 256  # column index in red
+                depth = np.full((480, 640), 2000, np.uint16)  # 2 m at factor 1000
+                ip, dp = Path(tmp) / f"{i}.png", Path(tmp) / f"{i}_d.png"
+                Image.fromarray(rgb).save(ip)
+                cv2.imwrite(str(dp), depth)
+                K = np.array([[500.0, 0, 320], [0, 500.0, 240], [0, 0, 1]])
+                frames.append(VB.Frame(ip, dp, 1000.0, K, np.eye(4)))
+            seq = VB.Sequence("scannet", "s", frames, rgb_uncropped=True)
+            gt = VB.gt_stack(seq, spec)
+            self.assertEqual(gt.shape, (2, 464, 618))
+            views = VB.build_views(seq, spec, gt, 518, torch.device("cpu"))
+            v = views[0]
+            self.assertEqual(v["gt_box"], (8, 11, 480, 640))
+            h, w = v["img"].shape[-2:]
+            # 640x480 -> long side 518 -> each side to the nearest multiple of 14
+            self.assertEqual((h, w), (392, 518))
+            d = v["depthmap"][0].numpy()
+            self.assertEqual(d[0].max(), 0.0)  # the frame's top rows: outside the GT
+            self.assertGreater(d[h // 2, w // 2], 0.0)
+            # a map holding each frame column's index comes back cropped by 11
+            cols = np.tile(np.arange(640, dtype=np.float32), (2, 480, 1))
+            at_gt = VB.model_to_gt(cols, (464, 618), v["gt_box"])
+            np.testing.assert_allclose(at_gt[0, 0, [0, -1]], [11.0, 628.0])
+            # the arm side: whole frames in, cropped by register_to_gt
+            self.assertEqual(BB._bench_frames(seq, spec).shape, (2, 480, 640, 3))
+            np.testing.assert_allclose(
+                BB.register_to_gt(cols, seq, spec, (480, 640), (464, 618)), at_gt
+            )
+
     def test_frame_count_mismatch_is_fatal(self):
         class Short(_FakeArm):
             def predict(self, frames, prompt=None):
@@ -694,6 +732,14 @@ class ArkitUpsamplingTest(unittest.TestCase):
 
 
 class OurProtocolsForBaselinesTest(unittest.TestCase):
+    def setUp(self):
+        # CPU plumbing tests; a real benchmark refuses a non-CUDA device
+        self._cuda = BB.REQUIRE_CUDA
+        BB.REQUIRE_CUDA = False
+
+    def tearDown(self):
+        BB.REQUIRE_CUDA = self._cuda
+
     """Step 5: a verified arm under the benchmark's own protocols."""
 
     def test_sparse_fit_in_native_disparity_recovers_the_affine(self):
@@ -1334,6 +1380,32 @@ class ParityTreesTest(unittest.TestCase):
                 cv2.imread(str(d / "clean" / "f.png"))[0, 0].tolist(), [0, 0, 200]
             )
 
+    def test_nyuv2_tree_takes_the_raw_depth(self):
+        import h5py
+        from scipy.io import savemat
+
+        sys.path.insert(
+            0, os.path.join(os.path.dirname(__file__), "..", "datasets_preprocess")
+        )
+        import prepare_vda_benchmark as PV
+
+        rng = np.random.default_rng(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            raw, out = Path(tmp) / "raw", Path(tmp) / "out"
+            (raw / "nyu").mkdir(parents=True)
+            images = rng.integers(0, 255, (3, 3, 640, 480), dtype=np.uint8)
+            filled = rng.uniform(1, 5, (3, 640, 480)).astype(np.float32)
+            rawd = filled.copy()
+            rawd[:, :50] = 0.0  # Kinect holes: only in the raw depth
+            with h5py.File(raw / "nyu" / "nyu_depth_v2_labeled.mat", "w") as f:
+                f["images"], f["depths"], f["rawDepths"] = images, filled, rawd
+            savemat(str(raw / "nyu" / "splits.mat"), {"testNdxs": np.array([[1], [3]])})
+            PV.prepare_nyuv2(raw, out, expect=2)
+            seq = VB.load_manifest(out, VB.SPECS["nyuv2"])[1]  # index 2
+            gt = VB.gt_stack(seq, VB.SPECS["nyuv2"])
+            a, b, c, d = VB.SPECS["nyuv2"].crop
+            np.testing.assert_allclose(gt[0], rawd[2].T[a:b, c:d], atol=1 / 6000)
+
     def test_rename_manifest(self):
         sys.path.insert(
             0, os.path.join(os.path.dirname(__file__), "..", "datasets_preprocess")
@@ -1391,6 +1463,17 @@ class DA3MetricTest(unittest.TestCase):
         # focal at the processed resolution: fx * 28/50, fy * 14/30, averaged
         f = 0.5 * (100.0 * 28 / 50 + 120.0 * 14 / 30)
         np.testing.assert_allclose(out, 3.0 * f / 300.0, rtol=1e-6)
+
+    def test_arm_takes_a_focal_per_frame(self):
+        fake = _FakeDA3(hw=(14, 28), value=3.0)
+        arm = self._arm(fake)
+        frames = np.zeros((2, 30, 50, 3), np.uint8)
+        out = arm.predict(frames, focal=[(100.0, 100.0), (200.0, 200.0)])
+        f0 = 0.5 * (100.0 * 28 / 50 + 100.0 * 14 / 30)
+        np.testing.assert_allclose(out[0], 3.0 * f0 / 300.0, rtol=1e-6)
+        np.testing.assert_allclose(out[1], 2 * out[0], rtol=1e-6)
+        with self.assertRaises(ValueError):
+            arm.predict(frames, focal=[(1.0, 1.0)])
 
     def test_arm_needs_a_focal_and_refuses_sparse_depth(self):
         arm = self._arm(_FakeDA3())
@@ -1666,28 +1749,118 @@ class ReviewFixesTest(unittest.TestCase):
         ):
             with self.assertRaises(R.GateError):
                 R.require_allowed(r, "fake", uses, allow_close=True)
-        real = R.load()
-        self.assertEqual(
-            {
-                a
-                for a, e in real["arms"].items()
-                if R.close_allowed(e, real["tolerance"])
-            },
-            {"vda_metric", "promptda"},
-        )
+        # measured, failed, marked close -- but by no identifiable code state
+        unknown = {**missed, "measured_commit": None}
+        with self.assertRaises(R.GateError):
+            R.require_allowed(rec([unknown], True), "fake", uses, allow_close=True)
 
-    def test_table_mean_needs_every_dataset(self):
+    def test_table_reports_per_dataset_only(self):
         import compare_table as CT
 
         agg = {f"{d}/stream/d5/published_abs_rel": 0.1 for d in CT.DATASETS}
-        full = CT.row("a", {"aggregate": agg}, "d5")
-        self.assertAlmostEqual(full["mean AbsRel (published)"], 0.1)
-        del agg["sintel/stream/d5/published_abs_rel"]
-        part = CT.row("b", {"aggregate": agg}, "d5")
-        self.assertIsNone(part["mean AbsRel (published)"])
-        # TAE averages over the four video datasets (nyuv2 has none)
-        tae = {f"{d}/stream/d5/tae_vda": 2.0 for d in CT.TAE_DATASETS}
-        self.assertAlmostEqual(CT.row("c", {"aggregate": tae}, "d5")["mean TAE"], 2.0)
+        r = CT.row("a", {"aggregate": agg}, "d5")
+        self.assertFalse(any(k.startswith("mean") for k in r))
+        self.assertAlmostEqual(r["kitti AbsRel (published)"], 0.1)
+
+    def test_table_refuses_results_from_different_benchmarks(self):
+        import compare_table as CT
+
+        def res(size, n, failed=(), commit="c1", dtype="bfloat16", man="aa"):
+            agg = {f"{d}/stream/d5/n_sequences": n for d in CT.DATASETS}
+            cfg = {"image_size": size, "seed": 42}
+            out = {"aggregate": agg, "config": cfg, "failed": list(failed)}
+            out["commit"] = commit
+            out["manifests"] = None if man is None else {"scannet/x.json": man}
+            if dtype:
+                out["autocast_dtype"] = dtype
+            return out
+
+        CT.check_comparable([("a", res(518, 13)), ("b", res(518, 13))], "d5")
+        for b in (
+            res(1036, 13),
+            res(518, 12),
+            res(518, 13, ["kitti/x"]),
+            res(518, 13, commit="c2"),  # scored by other code
+            res(518, 13, commit=None),  # unrecorded
+            res(518, 13, commit="unknown"),  # git failed: nothing identified
+            res(518, 13, dtype="float16"),  # our model on a V100
+            res(518, 13, man="bb"),  # a re-exported tree at the same path
+            res(518, 13, man=None),  # unrecorded
+            {**res(518, 13), "predictions_commit": "c0"},  # dumped by other code
+        ):
+            with self.assertRaises(SystemExit):
+                CT.check_comparable([("a", res(518, 13)), ("b", b)], "d5")
+        both_unknown = [
+            ("a", res(518, 13, commit="unknown")),
+            ("b", res(518, 13, commit="unknown")),
+        ]
+        with self.assertRaises(SystemExit):
+            CT.check_comparable(both_unknown, "d5")
+
+    def test_table_refuses_two_files_under_one_label(self):
+        import json as _json
+
+        import compare_table as CT
+
+        with tempfile.TemporaryDirectory() as tmp:
+            res = {"arm": "vda", "aggregate": {}, "config": {}, "failed": []}
+            a, b = Path(tmp) / "a.json", Path(tmp) / "b.json"
+            a.write_text(_json.dumps(res))
+            b.write_text(_json.dumps(res))
+            argv = sys.argv
+            sys.argv = ["compare_table.py", "--baseline", str(a), str(b), "--out", tmp]
+            try:
+                with self.assertRaises(SystemExit) as cm:
+                    CT.main()
+            finally:
+                sys.argv = argv
+            self.assertIn("one label", str(cm.exception))
+
+    def test_benchmark_input_rounds_to_multiples_of_14(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for (w, h), want in {
+                (640, 480): (392, 518),  # 4:3 -> the training resolution
+                (618, 464): (392, 518),  # ScanNet main set
+                (1024, 436): (224, 518),  # Sintel
+                (1242, 374): (154, 518),  # KITTI
+                (560, 426): (392, 518),  # NYUv2 crop
+            }.items():
+                p = Path(tmp) / f"{w}x{h}.png"
+                Image.fromarray(np.zeros((h, w, 3), np.uint8)).save(p)
+                img = VB.load_rgb(p, 518, None, (h, w))
+                self.assertEqual(tuple(img.shape[-2:]), want, (w, h))
+
+    def test_tae_ours_does_not_depend_on_the_world_origin(self):
+        K = np.array([[700.0, 0, 60], [0, 700.0, 40], [0, 0, 1]])
+        # a fronto-parallel plane at 20 m, the camera moving 0.8 m forward:
+        # frame 1 sees it at 19.2 m everywhere, so the pair is consistent
+        depth = np.stack([np.full((80, 120), 20.0), np.full((80, 120), 19.2)])
+        depth = depth.astype(np.float32)
+        valid = np.ones_like(depth, bool)
+
+        def poses(origin):
+            p0 = np.eye(4)
+            p0[:3, 3] = origin
+            p1 = p0.copy()
+            p1[2, 3] += 0.8
+            return [p0, p1]
+
+        at_zero, _ = P.tae_ours(depth, valid, [K, K], poses([0.0, 0.0, 0.0]))
+        # KITTI-sized absolute translation, along the direction of motion
+        mercator, _ = P.tae_ours(
+            depth, valid, [K, K], poses([616105.57, 116.41, 4117475.59])
+        )
+        self.assertAlmostEqual(mercator, at_zero, places=5)
+
+    def test_benchmark_refuses_cpu_and_turns_tf32_off(self):
+        import argparse
+
+        self.assertTrue(BB.REQUIRE_CUDA)
+        torch.backends.cuda.matmul.allow_tf32 = True  # what importing croco does
+        args = argparse.Namespace(device="cpu", record=R.RECORD_PATH)
+        with self.assertRaises(SystemExit):
+            BB.benchmark(args)
+        self.assertFalse(torch.backends.cuda.matmul.allow_tf32)
 
     def test_marigold_nyu_uses_raw_depth_and_the_eigen_crop(self):
         from eval import marigold_paper as MG

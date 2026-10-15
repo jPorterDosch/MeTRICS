@@ -8,9 +8,8 @@ bench_results.json files, at one sparse-depth density.
 
 Writes <out>/comparison.md (with a footnote per baseline: its reproduction
 status and the evaluation differences recorded below) and comparison.csv.
-Every number is read from a results file; nothing is computed here except
-the mean over the five datasets (TAE: the four video datasets), left empty
-for a row missing any of them.
+Every number is read from a results file and reported per dataset; nothing
+is averaged across datasets.
 """
 
 from __future__ import annotations
@@ -20,9 +19,9 @@ import csv
 import json
 from pathlib import Path
 
+from eval import provenance as PROV
+
 DATASETS = ("sintel", "scannet", "kitti", "bonn_all", "nyuv2")
-# TAE is defined on the video datasets only (nyuv2 is stills)
-TAE_DATASETS = ("sintel", "scannet", "kitti", "bonn_all")
 # (column label, aggregate key suffix, lower is better)
 METRICS = (
     ("AbsRel (published)", "published_abs_rel", True),
@@ -43,10 +42,13 @@ EVAL_NOTES = {
     ),
     "ovda": "oVDA context 16, fp32 (paper fp16).",
     "dav": (
-        "20 seeded passes averaged (paper: ensemble of 20); clips over 32 frames "
-        "padded in time (one copy of the first frame, copies of the last) so "
-        "upstream's long-video path returns every frame; frames reflect-padded "
-        "to multiples of 32 instead of upstream's centre crop."
+        "20 seeded passes averaged (paper: ensemble of 20). Verified on single "
+        "images (Table 2); here every clip over 32 frames runs upstream's "
+        "long-video path (key frames + interpolation), padded in time so it "
+        "returns every frame, and frames go through run_infer's default "
+        "1024 px cap (KITTI 374x1242 -> 308x1024; the verified KITTI target "
+        "ran at native 352x1216). Frames reflect-padded to multiples of 32 "
+        "instead of upstream's centre crop."
     ),
     "promptda": (
         "Per-frame, upstream input sizing. Recorded close: 3 of 6 ARKitScenes "
@@ -84,16 +86,72 @@ def row(label: str, results: dict, dens: str) -> dict:
     for ds in DATASETS:
         for name, key, _ in METRICS:
             out[f"{ds} {name}"] = _value(agg, ds, mode, dens, key)
-    for name, key, _ in METRICS:
-        sets = TAE_DATASETS if key.startswith("tae") else DATASETS
-        vals = [out[f"{ds} {name}"] for ds in sets]
-        # a mean only over the same datasets for every row (all five; TAE's
-        # four video sets): a model missing one gets no mean, not a mean over
-        # fewer
-        out[f"mean {name}"] = (
-            None if any(v is None for v in vals) else sum(vals) / len(vals)
-        )
     return out
+
+
+# settings every results file in one table must share: they decide which
+# pixels are fed and scored
+SHARED = ("image_size", "seed", "patch_size", "max_sequences", "root")
+
+
+def check_comparable(named: list[tuple[str, dict]], dens: str) -> None:
+    """Refuse to table results that were not scored on the same benchmark:
+    shared settings, the same sequence count per dataset (and per TAE set),
+    and no failed sequences (run_benchmark skips a failed one, which would
+    leave that model's mean over fewer sequences)."""
+    problems = []
+    for key in SHARED:
+        vals = {label: r.get("config", {}).get(key) for label, r in named}
+        present = {v for v in vals.values() if v is not None}
+        if len(present) > 1:
+            problems.append(f"config {key} differs: {vals}")
+    for ds in DATASETS:
+        for field in ("n_sequences", "tae_n_sequences"):
+            counts = {}
+            for label, r in named:
+                agg = r["aggregate"]
+                modes = _modes(agg)
+                mode = next(iter(modes)) if len(modes) == 1 else None
+                counts[label] = agg.get(f"{ds}/{mode}/{dens}/{field}")
+            present = {v for v in counts.values() if v is not None}
+            if len(present) > 1:
+                problems.append(f"{ds} {field} differs: {counts}")
+    for label, r in named:
+        if r.get("failed"):
+            problems.append(f"{label} has failed sequences: {len(r['failed'])}")
+    # one scoring code for every row (a protocol change between runs would mix
+    # definitions), and one precision for our runs (bf16 vs fp16 autocast)
+    commits = {label: r.get("commit") for label, r in named}
+    if (
+        not all(PROV.identifiable(c) for c in commits.values())
+        or len(set(commits.values())) > 1
+    ):
+        problems.append(f"scoring code differs or is unrecorded: {commits}")
+    dtypes = {
+        label: r.get("autocast_dtype") for label, r in named if "autocast_dtype" in r
+    }
+    if len(set(dtypes.values())) > 1:
+        problems.append(f"our runs used different autocast dtypes: {dtypes}")
+    # a replayed arm's predictions must come from the scoring code too
+    for label, r in named:
+        pc = r.get("predictions_commit")
+        if pc is not None and pc != r.get("commit"):
+            problems.append(
+                f"{label}: predictions made by code {pc}, scored by {r.get('commit')}"
+            )
+    # the same benchmark data: identical manifest bytes for every dataset any
+    # row read (a re-exported tree at the same path changes them)
+    manifests = {label: r.get("manifests") for label, r in named}
+    unrecorded = sorted(k for k, v in manifests.items() if v is None)
+    if unrecorded:
+        problems.append(f"benchmark manifests unrecorded: {unrecorded}")
+    else:
+        for rel in sorted({k for m in manifests.values() for k in m}):
+            seen = {label: m.get(rel) for label, m in manifests.items()}
+            if len(set(seen.values())) > 1:
+                problems.append(f"manifest {rel} differs: {seen}")
+    if problems:
+        raise SystemExit("results are not comparable:\n  " + "\n  ".join(problems))
 
 
 def _fmt(v) -> str:
@@ -113,14 +171,25 @@ def main() -> None:
     args = ap.parse_args()
     dens = f"d{round(args.density * 100):g}"
 
-    rows, notes = [], []
+    rows, notes, named = [], [], []
     for spec in args.ours:
         label, _, path = spec.partition("=")
         if not path:
             raise SystemExit(f"--ours wants LABEL=path, got {spec!r}")
-        rows.append(row(f"Ours ({label})", _load(Path(path)), dens))
-    for i, path in enumerate(args.baseline, 1):
+        named.append((f"Ours ({label})", _load(Path(path))))
+    for path in args.baseline:
         res = _load(Path(path))
+        named.append((res["arm"], res))
+    labels = [label for label, _ in named]
+    dup = sorted({x for x in labels if labels.count(x) > 1})
+    if dup:
+        # every check is keyed by label: a duplicate would hide one file
+        raise SystemExit(f"two results files under one label {dup}: one per model")
+    check_comparable(named, dens)
+    for label, res in named[: len(args.ours)]:
+        rows.append(row(label, res, dens))
+    for i, path in enumerate(args.baseline, 1):
+        res = named[len(args.ours) + i - 1][1]
         arm = res["arm"]
         status = res.get("parity_status", "unknown")
         mark = f"[{i}]"
@@ -139,9 +208,7 @@ def main() -> None:
         )
 
     args.out.mkdir(parents=True, exist_ok=True)
-    cols = ["model"] + [
-        f"{ds} {n}" for ds in (*DATASETS, "mean") for n, _, _ in METRICS
-    ]
+    cols = ["model"] + [f"{ds} {n}" for ds in DATASETS for n, _, _ in METRICS]
     with open(args.out / "comparison.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
@@ -150,7 +217,7 @@ def main() -> None:
         f"Sparse-depth density {args.density:g} (RGB-only baselines ignore it).",
         "",
     ]
-    for ds in (*DATASETS, "mean"):
+    for ds in DATASETS:
         lines += [
             f"### {ds}",
             "",
@@ -164,7 +231,34 @@ def main() -> None:
                 + " |"
             )
         lines.append("")
-    lines += ["Notes:", ""] + [f"- {n}" for n in notes]
+    lines += ["Notes:", ""]
+    lines += [
+        "- Every model gets the same input pixels: ScanNet's TAE clips (an "
+        "uncropped manifest) are fed as whole 640x480 frames to every model and "
+        "the prediction is cropped onto the 464x618 GT grid afterwards, as in "
+        "VDA's protocol and the verified reproductions.",
+        "- Our model's input: long side 518, each side resized to the nearest "
+        "multiple of 14, no crop (518x392 for 4:3 frames, its training "
+        "resolution; aspect error at most 0.9% there; Sintel 518x224, 1.6%, a "
+        "grid training did not use; KITTI 1.3%). "
+        "StreamVGGT's own loader floors instead (518x378). The baselines use "
+        "their own sizing (VDA: short side 518, aspect kept).",
+        "- Sintel is in true colour for every model; VDA's Sintel parity was "
+        "verified on its channel-swapped extraction (sintel_bgr), a fairness "
+        "choice made on 2026-10-05.",
+        "- TAE is VDA's definition verbatim on every dataset (all pixels, frame "
+        "i's K), the only dataset VDA publishes TAE on being ScanNet (verified "
+        "0.563 vs 0.570). Off ScanNet it also scores pixels with no GT (Sintel "
+        "sky, KITTI without LiDAR), which the per-video fit does not constrain; "
+        "a GT-valid-only variant was rejected because it does not reproduce "
+        "ScanNet's numbers (2026-10-14).",
+        "- Sintel TAE is dominated by scene motion (TAE assumes a static scene): "
+        "ground truth itself scores ~55 on average, ambush_2 alone ~830 unmasked.",
+        "- ScanNet is the fallback export from the processed tree (frames shift "
+        "in 16 of 100 scenes vs VDA's .sens export; scene0718_00 has 326 "
+        "frames); identical for every row.",
+    ]
+    lines += [f"- {n}" for n in notes]
     (args.out / "comparison.md").write_text("\n".join(lines) + "\n")
     print(args.out / "comparison.md")
 

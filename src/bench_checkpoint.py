@@ -34,8 +34,10 @@ from visualize_depth import load_saved_args, rebuild_metric_cfg, resolve_checkpo
 class BenchCheckpointCfg:
     weights: str
     """Run directory holding checkpoint-<name>.pth, or a .pth file."""
-    checkpoint: str = "best"
-    """auto | final | best | last (visualize_depth.py's resolution)."""
+    checkpoint: str = "last"
+    """auto | final | best | last (visualize_depth.py's resolution). Default
+    last: "best" is selected on validation AbsRel, and the validation set
+    includes ScanNet scans_test, the benchmark's own ScanNet scenes."""
     base: bool = False
     """Score the pretrained backbone with zero-init conditioning instead of
     the checkpoint's weights (the checkpoint still supplies the
@@ -106,6 +108,7 @@ def main(cfg: BenchCheckpointCfg) -> None:
         out_dir,
         step=0,
         amp=bool(raw.get("amp", 1)),
+        weights="pretrained backbone (--base)" if cfg.base else str(ckpt_path),
     )
     print(f"done -> {out_dir}/bench_results.json")
 

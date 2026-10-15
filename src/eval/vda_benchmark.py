@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 import torch
 
-from dust3r.utils.image import ImgNorm, _resize_pil_image, exif_transpose
+from dust3r.utils.image import ImgNorm, exif_transpose
 from PIL import Image
 
 
@@ -303,6 +303,39 @@ def scaled_intrinsics(
     return K
 
 
+def full_frame_box(
+    seq: Sequence, spec: BenchSpec, gt_hw: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """(top, left, H_frame, W_frame) of the cropped GT inside an uncropped
+    frame. The frame must be the uncropped GT's size, so the protocol crop
+    means the same pixels on both."""
+    img = exif_transpose(Image.open(seq.frames[0].image))
+    Wf, Hf = img.size
+    ys, xs = crop_slices(spec.crop)
+    rows, cols = range(Hf)[ys], range(Wf)[xs]
+    if (len(rows), len(cols)) != tuple(gt_hw):
+        raise ValueError(
+            f"{seq.frames[0].image}: frame {Wf}x{Hf} cropped by {spec.crop} gives "
+            f"{len(cols)}x{len(rows)}, but the cropped GT is {gt_hw[1]}x{gt_hw[0]}"
+        )
+    return rows[0], cols[0], Hf, Wf
+
+
+def model_to_gt(
+    arr: np.ndarray, gt_hw: tuple[int, int], box=None, mask: bool = False
+) -> np.ndarray:
+    """A model-resolution [S,h,w] map onto the [S,H,W] GT grid: resized
+    straight to it, or, for a whole-frame input (`box` from full_frame_box),
+    resized to the frame and cropped to the GT region. `mask` maps a sparse
+    fed-pixel mask with sparse_mask_to_gt's exact index map."""
+    if box is None:
+        return sparse_mask_to_gt(arr, gt_hw) if mask else resize_to_gt(arr, gt_hw)
+    top, left, Hf, Wf = box
+    full = sparse_mask_to_gt(arr, (Hf, Wf)) if mask else resize_to_gt(arr, (Hf, Wf))
+    H, W = gt_hw
+    return np.ascontiguousarray(full[:, top : top + H, left : left + W])
+
+
 def build_views(
     seq: Sequence,
     spec: BenchSpec,
@@ -322,6 +355,14 @@ def build_views(
     only the SOURCE of the simulated sparse depth (simulate_sparse_depth
     reads view['depthmap'] and view['valid_mask']). Scoring uses the GT at
     its own resolution (gt_stack), never this copy.
+
+    A manifest that lists UNCROPPED frames (ScanNet's TAE clips) is fed the
+    whole frame, as VDA's protocol does (infer.py on color_origin, then
+    eval_tae.py --hard_crop on the prediction): the cropped GT is placed back
+    at its offset in a zero canvas of the frame's size, so sparse depth is
+    still drawn only inside the scored region, and every view carries
+    `gt_box` = (top, left, H_frame, W_frame) for model_to_gt to crop the
+    prediction (and the fed-pixel mask) back onto the GT grid.
     """
     if len(seq.frames) != gt.shape[0]:
         raise ValueError(
@@ -329,11 +370,16 @@ def build_views(
         )
     views = []
     H, W = gt.shape[1:]
-    crop = spec.crop if seq.rgb_uncropped else None
+    box = full_frame_box(seq, spec, (H, W)) if seq.rgb_uncropped else None
     for i, fr in enumerate(seq.frames):
-        img = load_rgb(fr.image, size, crop, (H, W))  # [1,3,h,w] in [-1,1]
+        img = load_rgb(fr.image, size, None, (H, W))  # [1,3,h,w] in [-1,1]
         h, w = img.shape[-2:]
-        depth = cv2.resize(gt[i], (w, h), interpolation=cv2.INTER_NEAREST)
+        src = gt[i]
+        if box is not None:
+            top, left, Hf, Wf = box
+            src = np.zeros((Hf, Wf), dtype=gt.dtype)
+            src[top : top + H, left : left + W] = gt[i]
+        depth = cv2.resize(src, (w, h), interpolation=cv2.INTER_NEAREST)
         # the protocol's valid range (VDA: 1e-3 < gt < max_depth), not just
         # > 0: Sintel's sky is stored at up to 650 m, and a sparse-depth
         # sample from it conditions the model on a depth the protocol never
@@ -348,10 +394,17 @@ def build_views(
             "instance": str(fr.image),
             "dataset": spec.name,
         }
+        if box is not None:
+            view["gt_box"] = box
         if fr.K is not None:
-            view["camera_intrinsics"] = torch.from_numpy(
-                scaled_intrinsics(fr.K, spec.crop, (H, W), (h, w)).astype(np.float32)
-            )[None].to(device)
+            K = (
+                scaled_intrinsics(fr.K, (0, 0, 0, 0), box[2:], (h, w))
+                if box is not None
+                else scaled_intrinsics(fr.K, spec.crop, (H, W), (h, w))
+            )
+            view["camera_intrinsics"] = torch.from_numpy(K.astype(np.float32))[None].to(
+                device
+            )
         if fr.pose is not None:
             view["camera_pose"] = torch.from_numpy(fr.pose.astype(np.float32))[None].to(
                 device
@@ -366,9 +419,14 @@ def load_rgb(
     crop: tuple[int, int, int, int] | None,
     gt_hw: tuple[int, int],
 ) -> torch.Tensor:
-    """One RGB as the model input [1,3,h,w] in [-1,1]: dust3r's
-    load_images_for_eval(size, crop=False) math (long side -> size, both
-    sides to a multiple of 14 by resizing). With `crop`, the protocol crop is
+    """One RGB as the model input [1,3,h,w] in [-1,1]: long side -> size,
+    then each side resized to the NEAREST multiple of 14 (no crop). dust3r's
+    load_images_for_eval(size, crop=False), which StreamVGGT's own launcher
+    uses, FLOORS instead: 640x480 -> 518x378, a 2.7% squash (Sintel 4.8%).
+    Rounding gives 518x392 for 4:3 frames, the training / validation
+    resolution, with at most a 0.9% aspect error there (Sintel 1.6% at
+    518x224, a grid training did not use; KITTI 1.3%; decided 2026-10-14).
+    With `crop`, the protocol crop is
     applied to the RGB first -- for a manifest that lists uncropped frames --
     and the RGB must then be the size of the uncropped GT, so the pixel crop
     means the same thing on both."""
@@ -387,12 +445,18 @@ def load_rgb(
                 "the depth resolution (extract_scannet_sens.py --color-at-depth-res)"
             )
         img = img.crop((cols[0], rows[0], cols[-1] + 1, rows[-1] + 1))
-    img = _resize_pil_image(img, size)
-    Wi, Hi = img.size
-    cx, cy = Wi // 2, Hi // 2
-    halfw, halfh = ((2 * cx) // 14) * 7, ((2 * cy) // 14) * 7
-    img = img.resize((2 * halfw, 2 * halfh), Image.LANCZOS)
+    # ONE resample, straight to the rounded size (dust3r's _resize_pil_image
+    # sizes and filter: LANCZOS when shrinking, BICUBIC when enlarging)
+    W0, H0 = img.size
+    S = max(W0, H0)
+    target = tuple(_round14(int(round(x * size / S))) for x in (W0, H0))
+    img = img.resize(target, Image.LANCZOS if S > size else Image.BICUBIC)
     return ImgNorm(img)[None]
+
+
+def _round14(x: int) -> int:
+    """Nearest multiple of 14 (halves up), at least 14."""
+    return max(14, int(x / 14 + 0.5) * 14)
 
 
 def resize_to_gt(
