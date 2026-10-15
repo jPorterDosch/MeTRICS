@@ -112,6 +112,15 @@ class DepthCondCfg:
 
     # depth preprocessing (always disparity space, see conditioner.prepare)
     norm: NormType = NormType.FIXED
+    # Unit-range scaling: channel 0 of the conditioning input is
+    # log1p(norm_constant_m / depth). With 10 m, indoor depth 0.5-10 m maps
+    # raw disparity 0.1-2 to 0.7-3.0, i.e. an O(1) signal next to the
+    # DINOv2 patch tokens it is added to, instead of a raw 1/depth that
+    # spans two orders of magnitude. 10 m is also the indoor eval depth cap
+    # (ScanNet/Bonn/NYU), so "far indoor" lands at the fixed point
+    # log1p(1) = 0.69. The value is not tuned; it is part of the experiment
+    # hash, so a sweep is clean. Note that outdoor range suffers: KITTI
+    # 20-80 m is squeezed into 0.12-0.4.
     norm_constant_m: float = 10.0
     log_depth: bool = True
 

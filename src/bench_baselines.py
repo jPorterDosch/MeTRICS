@@ -1,0 +1,931 @@
+"""Baseline arms: fetch released weights, and reproduce each arm's own paper
+through our loaders and our scoring before it may be used for anything else.
+
+    python src/bench_baselines.py fetch --arm vda          # login node, weights -> Lustre
+    python src/bench_baselines.py reproduce --arm vda      # GPU job (experiments/baselines/reproduce.sh)
+    python src/bench_baselines.py reproduce --arm vda --max-sequences 2   # smoke test, record untouched
+    python src/bench_baselines.py reproduce --arm vda --datasets scannet_500   # one dataset's targets
+    python src/bench_baselines.py benchmark --arm vda     # GPU: OUR protocols, verified arms only
+    python src/bench_baselines.py status
+
+`reproduce` runs every runnable target of the arm in eval/baselines/
+reproduction.json -- the datasets, protocol and settings its paper reports,
+nothing else -- writes <out>/reproduce_<arm>.json with the per-sequence rows,
+and on a complete run stores the measured values, the commit and the job id
+in the record, which recomputes the arm's status (record.apply_measurements).
+The gate itself is in arms.build_arm.
+
+`benchmark` scores a VERIFIED arm under the benchmark's own protocols
+(bench_eval: published / sparse_aligned / metric per density, both TAEs) with
+the identical sparse-depth draws our model gets -- the pixels a RGB-only arm
+never sees and is fitted on post hoc. One row per (dataset, sequence,
+density), mode "stream" for a causal arm and "offline" otherwise, written
+like bench_eval's bench_results.json so the two sit side by side.
+
+`fetch` / `reproduce` / `status` are deliberately independent of bench_eval
+(accelerate, streamvggt, the training stack): Depth Any Video runs from its
+own venv, which has none of it. `benchmark` imports it lazily.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import inspect
+import json
+import os
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
+from PIL import Image
+from PIL.ImageOps import exif_transpose
+
+from eval import arkit_upsampling as ARKIT
+from eval import da_metric_paper as DAM
+from eval import marigold_paper as MG
+from eval import ovda_paper as OVDA
+from eval import provenance as PROV
+from eval import protocols as P
+from eval.baselines import arms as A
+from eval.baselines import record as R
+from eval.vda_benchmark import (
+    SPECS,
+    BenchSpec,
+    Sequence,
+    crop_slices,
+    full_frame_box,
+    gt_stack,
+    scaled_intrinsics,
+    load_manifest,
+    resize_to_gt,
+)
+
+BENCH_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench")
+OUT_ROOT = Path("/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/baselines")
+
+
+def read_frames(seq: Sequence) -> np.ndarray:
+    """[S,H,W,3] uint8 RGB, exactly the manifest's images: the arm does its
+    own resizing, as its released inference script does."""
+    frames = []
+    for fr in seq.frames:
+        if not fr.image.is_file():
+            raise FileNotFoundError(f"missing benchmark image {fr.image}")
+        frames.append(np.asarray(exif_transpose(Image.open(fr.image)).convert("RGB")))
+    shapes = {f.shape for f in frames}
+    if len(shapes) != 1:
+        raise ValueError(f"{seq.dataset}/{seq.name}: frame shapes differ: {shapes}")
+    return np.stack(frames)
+
+
+def register_to_gt(
+    pred: np.ndarray,
+    seq: Sequence,
+    spec: BenchSpec,
+    frame_hw: tuple[int, int],
+    gt_hw: tuple[int, int],
+) -> np.ndarray:
+    """Prediction -> GT grid, as VDA's eval does it: bilinear resize to the
+    cropped GT; for the TAE manifest, whose frames are uncropped, first to the
+    frame and through the protocol crop (their --hard_crop). The pixel crop
+    means the same field of view only if the frame is the uncropped GT's
+    size, so that is checked (as load_rgb does for our model)."""
+    if seq.rgb_uncropped:
+        ys, xs = crop_slices(spec.crop)
+        rows, cols = range(frame_hw[0])[ys], range(frame_hw[1])[xs]
+        if (len(rows), len(cols)) != tuple(gt_hw):
+            raise ValueError(
+                f"{seq.dataset}/{seq.name}: frames of {frame_hw} cropped by {spec.crop} give "
+                f"{(len(rows), len(cols))}, but the cropped GT is {tuple(gt_hw)}; the frames "
+                "must be at the uncropped GT size for the crop to mean the same pixels"
+            )
+        pred = resize_to_gt(pred, frame_hw)[:, ys, xs]
+    if pred.shape[1:] != gt_hw:
+        pred = resize_to_gt(pred, gt_hw)
+    return pred
+
+
+def score_main(arm, pred_gt: np.ndarray, gt: np.ndarray, keys: set) -> dict:
+    """{(protocol, max_depth): FrameMetrics dict} for one sequence."""
+    out = {}
+    for protocol, max_depth in sorted(keys):
+        if protocol == "published":
+            m, _ = P.published_metrics(
+                P.as_disparity(pred_gt, arm.info.output), gt, max_depth
+            )
+        elif protocol == "metric":
+            if arm.info.output != "depth":
+                raise ValueError(f"{arm.info.name} is not metric: no `metric` protocol")
+            m = P.metric_metrics(pred_gt, gt, max_depth)
+        else:
+            raise ValueError(f"unknown protocol {protocol!r}")
+        out[(protocol, max_depth)] = m.as_dict()
+    return out
+
+
+def score_tae(arm, pred_gt: np.ndarray, gt: np.ndarray, seq, spec) -> float:
+    """VDA's TAE on the published-aligned depth, K as their manifest has it."""
+    aligned = P.vda_align_disparity(
+        P.as_disparity(pred_gt, arm.info.output), gt, spec.max_depth
+    )
+    Ks = [fr.K for fr in seq.frames]
+    if any(k is None for k in Ks):
+        raise ValueError(f"{spec.name}/{seq.name}: TAE manifest frames lack K")
+    poses = [
+        np.full((4, 4), np.nan) if fr.pose is None else fr.pose for fr in seq.frames
+    ]
+    return P.tae_vda(aligned, Ks, poses)
+
+
+def run_video_dataset(
+    arm, dataset: str, targets: list[dict], root: Path, max_sequences: int
+) -> tuple[dict[str, float], list[dict]]:
+    """Measured value per target id on one benchmark dataset, plus the
+    per-sequence rows behind them."""
+    spec = SPECS[dataset]
+    main_keys = {
+        (t["protocol"], float(t.get("max_depth", spec.max_depth)))
+        for t in targets
+        if t["protocol"] != "tae"
+    }
+    rows: list[dict] = []
+    passes = []
+    if main_keys:
+        passes.append((False, load_manifest(root, spec)))
+    if any(t["protocol"] == "tae" for t in targets):
+        # every listed frame: VDA's infer.py runs the model on the whole TAE
+        # clip (192 frames) and its eval scores frames [10:180] of the result
+        passes.append((True, load_manifest(root, spec, tae=True, tae_slice=False)))
+    for tae, seqs in passes:
+        if max_sequences:
+            seqs = seqs[:max_sequences]
+        for seq in seqs:
+            gt = gt_stack(seq, spec)
+            frames = read_frames(seq)
+            pred = arm.predict(frames)
+            if len(pred) != len(frames):
+                raise ValueError(
+                    f"{arm.info.name} returned {len(pred)} frames for {len(frames)}"
+                )
+            pred_gt = register_to_gt(pred, seq, spec, frames.shape[1:3], gt.shape[1:])
+            row = {"dataset": dataset, "sequence": seq.name, "frames": len(frames)}
+            if tae:
+                lo, hi = spec.tae_range
+                seq.frames = seq.frames[lo:hi]
+                row["tae"] = {
+                    "tae_vda": score_tae(arm, pred_gt[lo:hi], gt[lo:hi], seq, spec)
+                }
+            else:
+                for (protocol, max_depth), m in score_main(
+                    arm, pred_gt, gt, main_keys
+                ).items():
+                    row[f"{protocol}@{max_depth:g}"] = m
+            rows.append(row)
+            print(
+                f"[repro] {arm.info.name} {dataset}/{seq.name}: {len(frames)} frames",
+                flush=True,
+            )
+    measured = {}
+    for t in targets:
+        key = (
+            "tae"
+            if t["protocol"] == "tae"
+            else f"{t['protocol']}@{float(t.get('max_depth', spec.max_depth)):g}"
+        )
+        measured[t["id"]] = P.finite_mean(
+            [r[key][t["metric"]] for r in rows if key in r]
+        )
+    return measured, rows
+
+
+def run_arkit(
+    arm, targets: list[dict], root: Path, max_sequences: int
+) -> tuple[dict[str, float], list[dict]]:
+    """PromptDA's ARKitScenes table: one prediction per frame, resized to each
+    evaluated size the targets name; L1 / RMSE, mean over images
+    (eval/arkit_upsampling.py)."""
+    datasets = sorted({t["dataset"] for t in targets})
+    sky = ARKIT.sky_directions(root)
+    zips = ARKIT.videos(root)
+    if max_sequences:
+        zips = zips[:max_sequences]
+    rows = []
+    for zp in zips:
+        for s in ARKIT.samples(zp, sky[zp.stem]):
+            pred = arm.predict(s.rgb[None], (s.prompt[None], s.prompt[None] > 0))[0]
+            for dataset in datasets:
+                gt = s.gt_at(ARKIT.SIZES[dataset])
+                at_gt = cv2.resize(
+                    pred, (gt.shape[1], gt.shape[0]), interpolation=cv2.INTER_LINEAR
+                )
+                l1, rmse = ARKIT.l1_rmse(at_gt, gt)
+                rows.append(
+                    {"dataset": dataset, "sequence": s.name, "l1": l1, "rmse": rmse}
+                )
+        print(f"[repro] {arm.info.name} arkit_upsampling/{zp.stem} done", flush=True)
+    measured = {
+        t["id"]: P.finite_mean(
+            [r[t["metric"]] for r in rows if r["dataset"] == t["dataset"]]
+        )
+        for t in targets
+    }
+    return measured, rows
+
+
+def run_ovda_paper(
+    arm, dataset: str, targets: list[dict], max_sequences: int
+) -> tuple[dict[str, float], list[dict]]:
+    """oVDA's tables with the authors' own pairing and scoring
+    (eval/ovda_paper.py): full sequences, only paired frames fed, one
+    inference per sequence scored under every alignment the targets name,
+    totals pixel-weighted over the dataset."""
+    if arm.info.output != "disparity":
+        raise ValueError(f"{arm.info.name}: the oVDA protocol fits inverse depth")
+    protocols = sorted({t["protocol"] for t in targets})
+    seqs = OVDA.pairs(dataset)
+    names = sorted(seqs)
+    if max_sequences:
+        names = names[:max_sequences]
+    totals: dict[str, list[dict]] = {p: [] for p in protocols}
+    rows = []
+    for name in names:
+        frames, gt = OVDA.read_sequence(dataset, seqs[name])
+        pred = arm.predict(frames)
+        if len(pred) != len(frames):
+            raise ValueError(
+                f"{arm.info.name} returned {len(pred)} frames for {len(frames)}"
+            )
+        pred = OVDA.to_gt_grid(pred, gt.shape[1:])
+        row = {"dataset": dataset, "sequence": name, "frames": len(frames)}
+        for p in protocols:
+            t = OVDA.evaluate(pred, gt, dataset, p)
+            totals[p].append(t)
+            row[p] = t
+        rows.append(row)
+        del frames, gt, pred
+        print(
+            f"[repro] {arm.info.name} {dataset}/{name}: {row['frames']} frames",
+            flush=True,
+        )
+    summary = {p: OVDA.summarize(v) for p, v in totals.items()}
+    return {t["id"]: summary[t["protocol"]][t["metric"]] for t in targets}, rows
+
+
+def run_da_metric(
+    arm, dataset: str, targets: list[dict], max_sequences: int
+) -> tuple[dict[str, float], list[dict]]:
+    """Depth Anything 3's single-image metric table (eval/da_metric_paper.py):
+    one prediction per image with the image's focal length, scored by DA2's
+    eval_depth per image under each protocol the targets name, mean over
+    images."""
+    protocols = sorted({t["protocol"] for t in targets})
+    rows = []
+    for i, s in enumerate(DAM.samples(dataset)):
+        if max_sequences and i >= max_sequences:
+            break
+        pred = arm.predict(s.rgb[None], focal=s.focal)[0]
+        row = {"dataset": dataset, "sequence": s.name}
+        for p in protocols:
+            row[p] = DAM.evaluate(pred, s.gt, p)
+        rows.append(row)
+        if (i + 1) % 100 == 0:
+            print(f"[repro] {arm.info.name} {dataset}: {i + 1} images", flush=True)
+    measured = {
+        t["id"]: P.finite_mean(
+            [
+                r[t["protocol"]][t["metric"]]
+                for r in rows
+                if r[t["protocol"]] is not None
+            ]
+        )
+        for t in targets
+    }
+    return measured, rows
+
+
+def run_marigold(
+    arm, dataset: str, targets: list[dict], max_sequences: int
+) -> tuple[dict[str, float], list[dict]]:
+    """Marigold's single-image evaluation (eval/marigold_paper.py) on its own
+    data: one prediction per image at the image's own size (upstream's
+    --max_resolution set to the long side, so nothing is resized or cropped),
+    least-squares fit in disparity, per-image metrics, mean over images."""
+    if arm.info.output != "disparity":
+        raise ValueError(
+            f"{arm.info.name}: Marigold's disparity protocol fits disparity"
+        )
+    rows = []
+    for i, s in enumerate(MG.samples(dataset)):
+        if max_sequences and i >= max_sequences:
+            break
+        pred = arm.predict(s.rgb[None], max_resolution=max(s.rgb.shape[:2]))[0]
+        rows.append(
+            {"dataset": dataset, "sequence": s.name, **MG.evaluate(pred, s, dataset)}
+        )
+        if (i + 1) % 100 == 0:
+            print(f"[repro] {arm.info.name} {dataset}: {i + 1} images", flush=True)
+    measured = {t["id"]: P.finite_mean([r[t["metric"]] for r in rows]) for t in targets}
+    return measured, rows
+
+
+def _commit() -> str:
+    """eval.provenance.code_fingerprint: HEAD plus a hash of uncommitted
+    code, the record excluded (two runs with the same string ran the same
+    code, which is what `verified` requires of its measurements)."""
+    return PROV.code_fingerprint()
+
+
+def runner_for(dataset: str) -> str:
+    """Which evaluation scores a reproduction target's dataset: PromptDA's
+    ARKitScenes table, oVDA's own evaluation, DA3's Table 11, Marigold's
+    single-image evaluation, or the VDA benchmark trees. Raises for a dataset
+    none of them knows."""
+    if dataset in ARKIT.SIZES:
+        return "arkit"
+    if dataset in OVDA.DATASETS:
+        return "ovda"
+    if dataset in DAM.DATASETS:
+        return "da_metric"
+    if dataset in MG.DATASETS:
+        return "marigold"
+    if dataset in SPECS:
+        return "video"
+    raise SystemExit(f"no reproduction runner for dataset {dataset!r}")
+
+
+RUNNERS = ("arkit", "ovda", "da_metric", "marigold", "video")
+
+
+def _group_by_runner(targets: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {kind: [] for kind in RUNNERS}
+    for t in targets:
+        groups[runner_for(t["dataset"])].append(t)
+    return groups
+
+
+def reproduce(args) -> None:
+    # the code that runs is the code imported now: fingerprint it now, not
+    # after hours of inference, when the working tree may have moved on
+    commit = _commit()
+    record = R.load(args.record)
+    entry = R.arm_entry(record, args.arm)
+    targets = R.runnable_targets(entry)
+    if args.datasets:
+        unknown = sorted(set(args.datasets) - {t["dataset"] for t in targets})
+        if unknown:
+            raise SystemExit(f"{args.arm}: no target on {unknown} in the record")
+        targets = [t for t in targets if t["dataset"] in args.datasets]
+    if not targets:
+        raise SystemExit(f"{args.arm}: no runnable target in the record")
+    # grouped before the model loads, so an unroutable dataset fails at once
+    by_runner = _group_by_runner(targets)
+    device = torch.device(args.device)
+    arm = A.build_arm(args.arm, device, sorted(R.paper_uses(entry)), record)
+
+    measured: dict[str, float] = {}
+    rows: list[dict] = []
+    if by_runner["arkit"]:  # one prediction per frame serves every size
+        m, r = run_arkit(arm, by_runner["arkit"], args.arkit_root, args.max_sequences)
+        measured.update(m)
+        rows.extend(r)
+    per_dataset = {  # one call per dataset
+        "ovda": lambda ds, ts: run_ovda_paper(arm, ds, ts, args.max_sequences),
+        "da_metric": lambda ds, ts: run_da_metric(arm, ds, ts, args.max_sequences),
+        "marigold": lambda ds, ts: run_marigold(arm, ds, ts, args.max_sequences),
+        "video": lambda ds, ts: run_video_dataset(
+            arm, ds, ts, args.bench_root, args.max_sequences
+        ),
+    }
+    for kind, run in per_dataset.items():
+        for dataset in sorted({t["dataset"] for t in by_runner[kind]}):
+            m, r = run(dataset, [t for t in by_runner[kind] if t["dataset"] == dataset])
+            measured.update(m)
+            rows.extend(r)
+
+    tol = record["tolerance"]
+    print(f"\n[repro] {args.arm}: published vs measured (printed unit)")
+    for t in targets:
+        value = measured[t["id"]] * t["scale"]
+        verdict = "ok" if R.within(t, measured[t["id"]], tol) else "MISS"
+        gate = "gate" if t["gate"] else "info"
+        print(
+            f"[repro]   {t['id']:<24} {t['published']:>8} {value:>10.4f}  "
+            f"+-{R.tolerance(t['published'], tol):.4f}  {verdict}  ({gate})"
+        )
+
+    run = {
+        "date": datetime.datetime.now().isoformat(timespec="seconds"),
+        "commit": commit,
+        "job_id": os.environ.get("SLURM_JOB_ID", "none"),
+        "host": os.uname().nodename,
+    }
+    args.out.mkdir(parents=True, exist_ok=True)
+    tag = "_" + "_".join(sorted(args.datasets)) if args.datasets else ""
+    out = args.out / f"reproduce_{args.arm}{tag}.json"
+    with open(out, "w") as f:
+        json.dump({"run": run, "measured": measured, "rows": rows}, f, indent=2)
+    print(f"[repro] wrote {out}")
+
+    if args.max_sequences:
+        print("[repro] --max-sequences set: partial run, record NOT updated")
+        return
+    bad = sorted(k for k, v in measured.items() if not np.isfinite(v))
+    if bad:
+        raise SystemExit(f"[repro] non-finite measurements {bad}: record NOT updated")
+    # re-read: another arm's job may have written the record since this one
+    # loaded it, and saving the stale copy would erase that arm's result
+    record = R.load(args.record)
+    status = R.apply_measurements(record, args.arm, measured, run)
+    R.save(record, args.record)
+    print(f"[repro] {args.arm}: status -> {status} ({args.record})")
+
+
+def _bench_frames(seq, spec) -> np.ndarray:
+    """The frames as the manifest lists them. An uncropped-frame manifest
+    (ScanNet's TAE clips) is fed WHOLE, to every model: our model too
+    (build_views), and the arm's prediction is cropped onto the GT grid
+    afterwards, as VDA's protocol does and as `reproduce` verified it."""
+    return read_frames(seq)
+
+
+def _arm_kwargs(arm, seq, spec, frames: np.ndarray, gt_hw) -> dict:
+    """Per-call inputs an arm needs beyond the frames: a metric single-image
+    arm (da3_metric) takes each frame's focal length, from the manifest's GT
+    camera (K of the uncropped GT grid) moved onto the frames given to it.
+    Per frame, not per sequence: Sintel's focal length changes within a
+    sequence (cave_2: 689-1529 px)."""
+    if "focal" not in inspect.signature(arm.predict).parameters:
+        return {}
+    if seq.rgb_uncropped:
+        # whole frames, the uncropped GT's size (full_frame_box checks it):
+        # the manifest's K applies as written
+        full_frame_box(seq, spec, tuple(gt_hw))
+    focals = []
+    for fr in seq.frames:
+        if fr.K is None:
+            raise ValueError(
+                f"{arm.info.name} needs K: {spec.name}/{seq.name} has a frame without"
+            )
+        if seq.rgb_uncropped:
+            K = np.asarray(fr.K, dtype=np.float64)
+        else:
+            K = scaled_intrinsics(fr.K, spec.crop, tuple(gt_hw), frames.shape[1:3])
+        focals.append((float(K[0, 0]), float(K[1, 1])))
+    return {"focal": focals}
+
+
+def _cache_path(root: Path, dataset: str, kind: str, seq_name: str) -> Path:
+    return root / dataset / kind / f"{seq_name}.npz"
+
+
+def _bench_sequences(cfg_root, datasets, tae_datasets, max_sequences):
+    """(dataset, kind, spec, seq) in the order `benchmark` scores them:
+    kind "main" for every dataset, "tae" for a dataset with its own TAE
+    manifest (ScanNet's 192-frame clips)."""
+    for name in datasets:
+        spec = SPECS[name]
+        seqs = load_manifest(cfg_root, spec)
+        for seq in seqs[:max_sequences] if max_sequences else seqs:
+            yield name, "main", spec, seq
+        if name in tae_datasets and spec.tae_json:
+            tseqs = load_manifest(cfg_root, spec, tae=True, tae_slice=False)
+            for seq in tseqs[:max_sequences] if max_sequences else tseqs:
+                yield name, "tae", spec, seq
+
+
+def dump_predictions(args) -> None:
+    """An arm's raw predictions on every benchmark sequence, for arms whose
+    own environment cannot import the training stack bench_eval needs (dav:
+    pinned diffusers/torch). `benchmark --predictions DIR` then scores them
+    in the metrics venv exactly as a live arm. Resumable: an existing file is
+    kept."""
+    record = R.load(args.record)
+    uses = [
+        (d, p)
+        for d in set(args.datasets) | set(args.tae_datasets)
+        for p in ("published", "sparse_aligned", "metric", "tae")
+    ]
+    arm = A.build_arm(
+        args.arm, torch.device(args.device), uses, record, args.allow_close
+    )
+    if arm.info.prompted:
+        raise ValueError(f"{args.arm}: a prompted arm needs each draw; run it live")
+    root = args.out / f"pred_{args.arm}"
+    root.mkdir(parents=True, exist_ok=True)
+    commit = _commit()
+    meta = root / "arm.json"
+    if meta.exists():
+        with open(meta) as f:
+            prior = json.load(f).get("commit")
+        if prior != commit or not PROV.identifiable(commit):
+            # resuming would mix predictions of two code states under one stamp
+            raise SystemExit(
+                f"{root} holds predictions by code {prior}, this is {commit}: "
+                "resume only at the same, identifiable code, or dump into a fresh --out"
+            )
+    else:
+        with open(meta, "w") as f:
+            json.dump({**vars(arm.info), "commit": commit}, f, indent=2)
+    for name, kind, spec, seq in _bench_sequences(
+        args.bench_root, args.datasets, args.tae_datasets, args.max_sequences
+    ):
+        dst = _cache_path(root, name, kind, seq.name)
+        if dst.exists():
+            continue
+        frames = _bench_frames(seq, spec)
+        gt_hw = gt_stack(seq, spec).shape[1:]
+        raw = arm.predict(frames, **_arm_kwargs(arm, seq, spec, frames, gt_hw))
+        if len(raw) != len(frames):
+            raise ValueError(f"{args.arm} returned {len(raw)} for {len(frames)} frames")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_suffix(".tmp.npz")
+        np.savez_compressed(tmp, pred=raw.astype(np.float32))
+        tmp.replace(dst)  # atomic: a killed job never leaves a partial file
+        print(
+            f"[dump] {args.arm} {name}/{kind}/{seq.name}: {len(frames)} frames",
+            flush=True,
+        )
+
+
+class CachedArm:
+    """A dumped arm (dump_predictions) replayed: same ArmInfo, predictions
+    read back per sequence."""
+
+    def __init__(self, root: Path):
+        with open(root / "arm.json") as f:
+            meta = json.load(f)
+        self.info = A.ArmInfo(
+            meta["name"], meta["output"], meta["causal"], meta["prompted"]
+        )
+        # the code that PRODUCED the predictions (the scoring run's own commit
+        # is recorded separately)
+        self.commit = meta.get("commit", "unknown")
+        self.root = root
+        self.key = None  # (dataset, kind, seq_name), set before each call
+
+    def predict(self, frames: np.ndarray, prompt=None) -> np.ndarray:
+        path = _cache_path(self.root, *self.key)
+        if not path.is_file():
+            raise FileNotFoundError(f"no dumped prediction {path}")
+        pred = np.load(path)["pred"]
+        if len(pred) != len(frames):
+            raise ValueError(f"{path}: {len(pred)} frames for {len(frames)}")
+        return pred
+
+
+# benchmark refuses a non-CUDA device (see benchmark); the CPU unit tests of
+# the plumbing switch it off
+REQUIRE_CUDA = True
+
+
+def benchmark(args) -> None:
+    import bench_eval as BE  # the training stack: metrics venv only
+
+    # importing bench_eval imports croco, which switches TF32 matmuls on for
+    # the whole process (croco/models/croco.py). The arms were verified in
+    # `reproduce`, which never imports it, so they run without TF32 here too:
+    # otherwise an arm's numbers would depend on the GPU (Ampere+ only) and
+    # differ from the verified path
+    torch.backends.cuda.matmul.allow_tf32 = False
+    if REQUIRE_CUDA and torch.device(args.device).type != "cuda":
+        # the sparse draws (torch.rand under a fixed seed) differ between CPU
+        # and CUDA: off the GPU an arm would be fed / held out other pixels
+        # than our model
+        raise SystemExit("benchmark draws the sparse depth on CUDA; --device cuda")
+
+    commit = _commit()  # at start: the code imported is the code that runs
+
+    record = R.load(args.record)
+    protocols = ("published", "sparse_aligned", "metric", "tae")
+    uses = [
+        (d, p) for d in set(args.datasets) | set(args.tae_datasets) for p in protocols
+    ]
+    device = torch.device(args.device)
+    parity = R.computed_status(R.arm_entry(record, args.arm), record["tolerance"])
+    if args.predictions:
+        # the arm is not built, so the gate is asked directly
+        R.require_allowed(record, args.arm, uses, args.allow_close)
+        arm = CachedArm(args.predictions)
+        if arm.info.name != args.arm:
+            raise ValueError(
+                f"{args.predictions} holds {arm.info.name}, not {args.arm}"
+            )
+    else:
+        arm = A.build_arm(args.arm, device, uses, record, args.allow_close)
+    mode = BE.MODE_STREAM if arm.info.causal else "offline"
+    cfg = BE.BenchmarkCfg(
+        root=args.bench_root,
+        datasets=tuple(args.datasets),
+        densities=tuple(args.densities),
+        tae_datasets=tuple(args.tae_datasets),
+        image_size=args.image_size,
+        seed=args.seed,
+        patch_size=args.patch_size,
+        max_sequences=args.max_sequences,
+        clouds_per_dataset=0,
+        spot=False,
+    ).validate()
+    missing = BE.bench_root_ok(cfg.root, cfg.datasets, cfg.tae_datasets)
+    if missing:
+        raise FileNotFoundError(f"benchmark manifests missing: {missing}")
+    out = args.out / f"bench_{args.arm}" / "bench_results.json"
+    if out.exists() and not args.overwrite:  # before hours of inference, not after
+        raise FileExistsError(f"{out} exists; pass --overwrite or another --out")
+
+    def _pred(raw, seq, spec, frame_hw, gt_hw, native_hw) -> BE.Prediction:
+        """The arm's output as bench_eval scores it: on the GT grid for
+        published / metric / TAE, and at OUR model resolution (where the
+        sparse pixels live) for the sparse fit."""
+        # an uncropped-frame manifest: resized to the frame, then cropped to
+        # the GT region (register_to_gt), exactly as `reproduce` did
+        at_gt = register_to_gt(raw, seq, spec, frame_hw, gt_hw)
+        # the sparse-fit copy at OUR model resolution covers what our model
+        # saw: the whole frame for an uncropped manifest, else the GT region
+        native = resize_to_gt(raw if seq.rgb_uncropped else at_gt, native_hw)
+        S = len(raw)
+        return BE.Prediction(
+            native,
+            np.zeros_like(native),
+            np.full((S, 3, 4), np.nan),
+            np.full((S, 3, 3), np.nan),
+            output=arm.info.output,
+            at_gt=at_gt,
+        )
+
+    def _predict(frames, views, seq, spec, gt_hw, kind):
+        """A prompted arm gets this draw's sparse depth (at our model
+        resolution, as our model does); a RGB-only arm gets nothing, except
+        a focal length if it is a metric single-image arm."""
+        if isinstance(arm, CachedArm):
+            arm.key = (spec.name, kind, seq.name)
+        if arm.info.prompted:
+            return arm.predict(frames, BE._sparse_arrays(views))
+        return arm.predict(frames, **_arm_kwargs(arm, seq, spec, frames, gt_hw))
+
+    rows: list[dict] = []
+    tae_rows: list[dict] = []
+    for name in cfg.datasets:
+        spec = SPECS[name]
+        seqs = load_manifest(cfg.root, spec)
+        if cfg.max_sequences:
+            seqs = seqs[: cfg.max_sequences]
+        for seq in seqs:
+            tag = f"{spec.name}/{seq.name}"
+            gt, views = BE._prepare_sequence(spec, seq, cfg.image_size, device)
+            frames = _bench_frames(seq, spec)
+            native_hw = tuple(views[0]["img"].shape[-2:])
+            pred = None
+            main_tae = (
+                spec.name in cfg.tae_datasets
+                and spec.tae_json is None
+                and BE.has_cameras(seq)
+            )
+            for density in cfg.densities:
+                realized = BE.attach_sparse_depth(
+                    views, density, tag, cfg.patch_size, cfg.seed, device
+                )
+                # a RGB-only arm's output does not depend on the draw: one inference
+                if pred is None or arm.info.prompted:
+                    raw = _predict(frames, views, seq, spec, gt.shape[1:], "main")
+                    pred = _pred(
+                        raw, seq, spec, frames.shape[1:3], gt.shape[1:], native_hw
+                    )
+                row, aligned = BE.score_sequence(
+                    spec, seq, gt, views, pred, mode, density, realized
+                )
+                rows.append(row)
+                if main_tae:
+                    tae_rows.append(
+                        BE.score_tae_sequence(
+                            spec, seq, gt, pred, mode, density, realized, aligned
+                        )
+                    )
+            del views
+            print(f"[bench] {arm.info.name} {tag}: {len(frames)} frames", flush=True)
+        if spec.name in cfg.tae_datasets and spec.tae_json:
+            # every listed frame (192), predicted in full and scored on the
+            # [lo:hi] window -- VDA's protocol, and what run_benchmark does
+            # for our model (bench_eval.tae_window)
+            tseqs = load_manifest(cfg.root, spec, tae=True, tae_slice=False)
+            if cfg.max_sequences:
+                tseqs = tseqs[: cfg.max_sequences]
+            for seq in tseqs:
+                if not BE.has_cameras(seq):
+                    continue
+                gt, views = BE._prepare_sequence(spec, seq, cfg.image_size, device)
+                frames = _bench_frames(seq, spec)
+                native_hw = tuple(views[0]["img"].shape[-2:])
+                pred = None
+                for density in cfg.densities:
+                    realized = BE.attach_sparse_depth(
+                        views,
+                        density,
+                        f"{spec.name}/tae/{seq.name}",
+                        cfg.patch_size,
+                        cfg.seed,
+                        device,
+                    )
+                    if pred is None or arm.info.prompted:
+                        raw = _predict(frames, views, seq, spec, gt.shape[1:], "tae")
+                        pred = _pred(
+                            raw, seq, spec, frames.shape[1:3], gt.shape[1:], native_hw
+                        )
+                    win, win_gt, win_pred = BE.tae_window(spec, seq, gt, pred)
+                    tae_rows.append(
+                        BE.score_tae_sequence(
+                            spec, win, win_gt, win_pred, mode, density, realized
+                        )
+                    )
+                del views
+                print(
+                    f"[bench] {arm.info.name} {spec.name}/tae/{seq.name}: {len(frames)} frames",
+                    flush=True,
+                )
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    result = BE.aggregate(rows, tae_rows)
+    out_dir = args.out / f"bench_{args.arm}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "bench_results.json"
+    with open(out, "w") as f:
+        json.dump(
+            {
+                "arm": args.arm,
+                "mode": mode,
+                # the arm's reproduction status when it was benchmarked; anything
+                # but "verified" ran under --allow-close and is reported as such
+                "parity_status": parity,
+                "allow_close": bool(args.allow_close),
+                "predictions": str(args.predictions) if args.predictions else None,
+                "predictions_commit": arm.commit if args.predictions else None,
+                "config": {
+                    k: (
+                        list(v)
+                        if isinstance(v, tuple)
+                        else str(v)
+                        if isinstance(v, Path)
+                        else v
+                    )
+                    for k, v in vars(cfg).items()
+                },
+                "commit": commit,
+                "gpu": PROV.device_info()["gpu"],
+                "manifests": PROV.manifest_hashes(
+                    cfg.root, [SPECS[d] for d in cfg.datasets]
+                ),
+                "job_id": os.environ.get("SLURM_JOB_ID", "none"),
+                "aggregate": result,
+                "rows": rows,
+                "tae_rows": tae_rows,
+            },
+            f,
+            indent=2,
+            sort_keys=True,
+        )
+    print(f"[bench] wrote {out}")
+    for k in sorted(result):
+        if k.endswith(
+            (
+                "published_abs_rel",
+                "sparse_aligned_abs_rel",
+                "metric_abs_rel",
+                "tae_vda",
+                "tae_ours",
+            )
+        ):
+            print(f"[bench] {k}: {result[k]:.4f}")
+
+
+def status(args) -> None:
+    record = R.load(args.record)
+    tol = record["tolerance"]
+    for name, entry in record["arms"].items():
+        gating = [t for t in entry["targets"] if t["gate"]]
+        # recomputed from the measurements, as the gate does
+        done = sum(
+            1
+            for t in gating
+            if t.get("measured") is not None and R.within(t, t["measured"], tol)
+        )
+        status = R.computed_status(entry, tol)
+        close = " (close: --allow-close)" if R.close_allowed(entry, tol) else ""
+        print(
+            f"{name:<11} {status:<12} {done}/{len(gating)} gating targets within "
+            f"tolerance{close}"
+        )
+        if entry["status_note"]:
+            print(f"{'':<11} {entry['status_note']}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--record", type=Path, default=R.RECORD_PATH)
+    sub = parser.add_subparsers(dest="command", required=True)
+    fetch = sub.add_parser("fetch", help="download an arm's released weights to Lustre")
+    fetch.add_argument("--arm", required=True, choices=sorted(A.ARMS))
+    rep = sub.add_parser("reproduce", help="run the arm's paper targets")
+    rep.add_argument("--arm", required=True, choices=sorted(A.ARMS))
+    rep.add_argument("--device", default="cuda")
+    rep.add_argument("--bench-root", type=Path, default=BENCH_ROOT)
+    rep.add_argument("--arkit-root", type=Path, default=ARKIT.ROOT)
+    rep.add_argument("--out", type=Path, default=OUT_ROOT)
+    rep.add_argument(
+        "--datasets",
+        nargs="*",
+        default=[],
+        help="only these datasets of the arm's targets (default: all); the other "
+        "targets keep their recorded values, so an arm can be split over jobs",
+    )
+    rep.add_argument(
+        "--max-sequences",
+        type=int,
+        default=0,
+        help="cap on sequences per dataset (smoke test; the record is not updated)",
+    )
+    bench = sub.add_parser("benchmark", help="score a VERIFIED arm under our protocols")
+    bench.add_argument("--arm", required=True, choices=sorted(A.ARMS))
+    bench.add_argument("--device", default="cuda")
+    bench.add_argument("--bench-root", type=Path, default=BENCH_ROOT)
+    bench.add_argument("--out", type=Path, default=OUT_ROOT)
+    bench.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["sintel", "scannet", "kitti", "bonn_all", "nyuv2"],
+    )
+    bench.add_argument(
+        "--tae-datasets", nargs="*", default=["sintel", "scannet", "kitti", "bonn_all"]
+    )
+    bench.add_argument("--densities", nargs="+", type=float, default=[0.01, 0.05, 0.4])
+    bench.add_argument(
+        "--image-size",
+        type=int,
+        default=518,
+        help="OUR model's input size: where the sparse pixels are drawn",
+    )
+    bench.add_argument(
+        "--patch-size",
+        type=int,
+        default=14,
+        help="sparse-depth patch: must equal --bench.patch-size of the run compared",
+    )
+    bench.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="sparse-depth seed: must equal --bench.seed of the run compared",
+    )
+    bench.add_argument("--max-sequences", type=int, default=0)
+    bench.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing bench_results.json",
+    )
+    bench.add_argument(
+        "--allow-close",
+        action="store_true",
+        help='benchmark an arm the record marks close ("close": true) but not '
+        "verified; its computed status is written into the results",
+    )
+    bench.add_argument(
+        "--predictions",
+        type=Path,
+        default=None,
+        help="score predictions dumped by `dump-predictions` instead of running the arm",
+    )
+    dump = sub.add_parser(
+        "dump-predictions",
+        help="save an arm's raw benchmark predictions (for arms outside the metrics venv)",
+    )
+    dump.add_argument("--arm", required=True, choices=sorted(A.ARMS))
+    dump.add_argument("--device", default="cuda")
+    dump.add_argument("--bench-root", type=Path, default=BENCH_ROOT)
+    dump.add_argument("--out", type=Path, default=OUT_ROOT)
+    dump.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["sintel", "scannet", "kitti", "bonn_all", "nyuv2"],
+    )
+    dump.add_argument(
+        "--tae-datasets", nargs="*", default=["sintel", "scannet", "kitti", "bonn_all"]
+    )
+    dump.add_argument("--max-sequences", type=int, default=0)
+    dump.add_argument("--allow-close", action="store_true")
+    sub.add_parser("status", help="print the record's status per arm")
+    args = parser.parse_args()
+    if args.command == "fetch":
+        print(A.fetch_weights(args.arm, R.load(args.record)))
+    elif args.command == "reproduce":
+        reproduce(args)
+    elif args.command == "benchmark":
+        benchmark(args)
+    elif args.command == "dump-predictions":
+        dump_predictions(args)
+    else:
+        status(args)
+
+
+if __name__ == "__main__":
+    main()

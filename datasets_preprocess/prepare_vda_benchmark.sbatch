@@ -30,7 +30,7 @@ set -eu
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 export EVAL_RAW="${EVAL_RAW:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/raw}"
 export EVAL_OUT="${EVAL_OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench}"
-DATASETS="${DATASETS:-sintel kitti bonn scannet nyuv2}"
+DATASETS="${DATASETS:-sintel kitti bonn bonn_all scannet nyuv2}"
 
 export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/envs/metrics/bin:$PATH
 export LD_LIBRARY_PATH=/nfs/home/jdosch1/.local/lib:${LD_LIBRARY_PATH:-}  # libbz2 shim

@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 import torch
 
-from dust3r.utils.image import ImgNorm, _resize_pil_image, exif_transpose
+from dust3r.utils.image import ImgNorm, exif_transpose
 from PIL import Image
 
 
@@ -42,6 +42,8 @@ class BenchSpec:
     base: str | None = (
         None  # tree dir + json key when they differ from name (the *_500 variants)
     )
+    # the manifest lists UNCROPPED frames (see Sequence.rgb_uncropped)
+    rgb_uncropped: bool = False
 
     @property
     def dirname(self) -> str:
@@ -60,7 +62,11 @@ SPECS: dict[str, BenchSpec] = {
         90,
         True,
         tae_json="scannet/scannet_video_tae.json",
-        tae_scenes=20,
+        # VDA's eval_scenes_num is 20, taken from a manifest whose order is an
+        # unsorted glob -- an arbitrary, unrepeatable 20 of the 100 scenes, and
+        # per-scene TAE ranges 0.22-1.20, so a 20-scene mean moves by +-0.04
+        # with the draw. All 100 are scored instead.
+        tae_scenes=100,
         tae_range=(10, 180),
     ),
     "kitti": BenchSpec(
@@ -74,6 +80,45 @@ SPECS: dict[str, BenchSpec] = {
     # still its own one-frame "sequence", with VDA's NYU crop and factor.
     "nyuv2": BenchSpec(
         "nyuv2", "nyuv2/nyuv2_test.json", 10.0, (45, 471, 41, 601), 1, False
+    ),
+    # All 26 Bonn sequences: what VDA's Bonn numbers are over (its extractor
+    # takes every directory of the dataset; the 5 of `bonn` are
+    # DepthCrafter's list). 110- and 500-frame protocols as for `bonn`.
+    "bonn_all": BenchSpec(
+        "bonn_all", "bonn_all/bonn_all_video.json", 10.0, (0, 480, 0, 640), 110, True
+    ),
+    "bonn_all_500": BenchSpec(
+        "bonn_all_500",
+        "bonn_all/bonn_all_video_500.json",
+        10.0,
+        (0, 480, 0, 640),
+        500,
+        True,
+        base="bonn_all",
+    ),
+    # Sintel with R and B swapped on disk, as VDA's shipped extractor writes
+    # its colour files. Only to reproduce VDA's published Sintel number; the
+    # benchmark's `sintel` has true colours.
+    "sintel_bgr": BenchSpec(
+        "sintel_bgr",
+        "sintel_bgr/sintel_bgr_video.json",
+        70.0,
+        (0, 436, 0, 1024),
+        100,
+        True,
+    ),
+    # the same 654 stills with the whole 480x640 frame as input and the same
+    # crop for scoring: the single-image protocol (Marigold's) that Depth Any
+    # Video reports. Only used to reproduce that table.
+    "nyuv2_full": BenchSpec(
+        "nyuv2_full",
+        "nyuv2/nyuv2_test_full.json",
+        10.0,
+        (45, 471, 41, 601),
+        1,
+        False,
+        base="nyuv2",
+        rgb_uncropped=True,
     ),
     # VDA's headline (Table 1) protocol: up to 500 frames per video, from the
     # *_video_500.json manifests their extractor writes alongside the short
@@ -143,10 +188,14 @@ def _as_K3(K) -> np.ndarray:
     return K
 
 
-def load_manifest(root: Path, spec: BenchSpec, tae: bool = False) -> list[Sequence]:
+def load_manifest(
+    root: Path, spec: BenchSpec, tae: bool = False, tae_slice: bool = True
+) -> list[Sequence]:
     """Every sequence of the manifest, frames truncated to the protocol's
     count (spec.max_len, or the TAE frame range for the TAE manifest --
-    VDA's eval slices [start_idx:end_idx] after loading)."""
+    VDA's eval slices [start_idx:end_idx] after loading). tae_slice=False
+    keeps every listed TAE frame, for a caller that -- like VDA's own
+    infer.py -- runs the model on all of them and slices the prediction."""
     rel = spec.tae_json if tae else spec.json
     if rel is None:
         raise ValueError(f"{spec.name} has no TAE manifest")
@@ -169,14 +218,15 @@ def load_manifest(root: Path, spec: BenchSpec, tae: bool = False) -> list[Sequen
             )
         ((name, frames),) = entry.items()
         if tae:
-            lo, hi = spec.tae_range
-            frames = frames[lo:hi]
+            if tae_slice:
+                lo, hi = spec.tae_range
+                frames = frames[lo:hi]
         else:
             frames = frames[: spec.max_len]
         seq = Sequence(
             spec.name,
             name,
-            rgb_uncropped=tae,
+            rgb_uncropped=tae or spec.rgb_uncropped,
             frames=[
                 Frame(
                     ds_root / fr["image"],
@@ -253,6 +303,39 @@ def scaled_intrinsics(
     return K
 
 
+def full_frame_box(
+    seq: Sequence, spec: BenchSpec, gt_hw: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """(top, left, H_frame, W_frame) of the cropped GT inside an uncropped
+    frame. The frame must be the uncropped GT's size, so the protocol crop
+    means the same pixels on both."""
+    img = exif_transpose(Image.open(seq.frames[0].image))
+    Wf, Hf = img.size
+    ys, xs = crop_slices(spec.crop)
+    rows, cols = range(Hf)[ys], range(Wf)[xs]
+    if (len(rows), len(cols)) != tuple(gt_hw):
+        raise ValueError(
+            f"{seq.frames[0].image}: frame {Wf}x{Hf} cropped by {spec.crop} gives "
+            f"{len(cols)}x{len(rows)}, but the cropped GT is {gt_hw[1]}x{gt_hw[0]}"
+        )
+    return rows[0], cols[0], Hf, Wf
+
+
+def model_to_gt(
+    arr: np.ndarray, gt_hw: tuple[int, int], box=None, mask: bool = False
+) -> np.ndarray:
+    """A model-resolution [S,h,w] map onto the [S,H,W] GT grid: resized
+    straight to it, or, for a whole-frame input (`box` from full_frame_box),
+    resized to the frame and cropped to the GT region. `mask` maps a sparse
+    fed-pixel mask with sparse_mask_to_gt's exact index map."""
+    if box is None:
+        return sparse_mask_to_gt(arr, gt_hw) if mask else resize_to_gt(arr, gt_hw)
+    top, left, Hf, Wf = box
+    full = sparse_mask_to_gt(arr, (Hf, Wf)) if mask else resize_to_gt(arr, (Hf, Wf))
+    H, W = gt_hw
+    return np.ascontiguousarray(full[:, top : top + H, left : left + W])
+
+
 def build_views(
     seq: Sequence,
     spec: BenchSpec,
@@ -272,6 +355,14 @@ def build_views(
     only the SOURCE of the simulated sparse depth (simulate_sparse_depth
     reads view['depthmap'] and view['valid_mask']). Scoring uses the GT at
     its own resolution (gt_stack), never this copy.
+
+    A manifest that lists UNCROPPED frames (ScanNet's TAE clips) is fed the
+    whole frame, as VDA's protocol does (infer.py on color_origin, then
+    eval_tae.py --hard_crop on the prediction): the cropped GT is placed back
+    at its offset in a zero canvas of the frame's size, so sparse depth is
+    still drawn only inside the scored region, and every view carries
+    `gt_box` = (top, left, H_frame, W_frame) for model_to_gt to crop the
+    prediction (and the fed-pixel mask) back onto the GT grid.
     """
     if len(seq.frames) != gt.shape[0]:
         raise ValueError(
@@ -279,11 +370,16 @@ def build_views(
         )
     views = []
     H, W = gt.shape[1:]
-    crop = spec.crop if seq.rgb_uncropped else None
+    box = full_frame_box(seq, spec, (H, W)) if seq.rgb_uncropped else None
     for i, fr in enumerate(seq.frames):
-        img = load_rgb(fr.image, size, crop, (H, W))  # [1,3,h,w] in [-1,1]
+        img = load_rgb(fr.image, size, None, (H, W))  # [1,3,h,w] in [-1,1]
         h, w = img.shape[-2:]
-        depth = cv2.resize(gt[i], (w, h), interpolation=cv2.INTER_NEAREST)
+        src = gt[i]
+        if box is not None:
+            top, left, Hf, Wf = box
+            src = np.zeros((Hf, Wf), dtype=gt.dtype)
+            src[top : top + H, left : left + W] = gt[i]
+        depth = cv2.resize(src, (w, h), interpolation=cv2.INTER_NEAREST)
         # the protocol's valid range (VDA: 1e-3 < gt < max_depth), not just
         # > 0: Sintel's sky is stored at up to 650 m, and a sparse-depth
         # sample from it conditions the model on a depth the protocol never
@@ -298,10 +394,17 @@ def build_views(
             "instance": str(fr.image),
             "dataset": spec.name,
         }
+        if box is not None:
+            view["gt_box"] = box
         if fr.K is not None:
-            view["camera_intrinsics"] = torch.from_numpy(
-                scaled_intrinsics(fr.K, spec.crop, (H, W), (h, w)).astype(np.float32)
-            )[None].to(device)
+            K = (
+                scaled_intrinsics(fr.K, (0, 0, 0, 0), box[2:], (h, w))
+                if box is not None
+                else scaled_intrinsics(fr.K, spec.crop, (H, W), (h, w))
+            )
+            view["camera_intrinsics"] = torch.from_numpy(K.astype(np.float32))[None].to(
+                device
+            )
         if fr.pose is not None:
             view["camera_pose"] = torch.from_numpy(fr.pose.astype(np.float32))[None].to(
                 device
@@ -316,9 +419,14 @@ def load_rgb(
     crop: tuple[int, int, int, int] | None,
     gt_hw: tuple[int, int],
 ) -> torch.Tensor:
-    """One RGB as the model input [1,3,h,w] in [-1,1]: dust3r's
-    load_images_for_eval(size, crop=False) math (long side -> size, both
-    sides to a multiple of 14 by resizing). With `crop`, the protocol crop is
+    """One RGB as the model input [1,3,h,w] in [-1,1]: long side -> size,
+    then each side resized to the NEAREST multiple of 14 (no crop). dust3r's
+    load_images_for_eval(size, crop=False), which StreamVGGT's own launcher
+    uses, FLOORS instead: 640x480 -> 518x378, a 2.7% squash (Sintel 4.8%).
+    Rounding gives 518x392 for 4:3 frames, the training / validation
+    resolution, with at most a 0.9% aspect error there (Sintel 1.6% at
+    518x224, a grid training did not use; KITTI 1.3%; decided 2026-10-14).
+    With `crop`, the protocol crop is
     applied to the RGB first -- for a manifest that lists uncropped frames --
     and the RGB must then be the size of the uncropped GT, so the pixel crop
     means the same thing on both."""
@@ -337,12 +445,18 @@ def load_rgb(
                 "the depth resolution (extract_scannet_sens.py --color-at-depth-res)"
             )
         img = img.crop((cols[0], rows[0], cols[-1] + 1, rows[-1] + 1))
-    img = _resize_pil_image(img, size)
-    Wi, Hi = img.size
-    cx, cy = Wi // 2, Hi // 2
-    halfw, halfh = ((2 * cx) // 14) * 7, ((2 * cy) // 14) * 7
-    img = img.resize((2 * halfw, 2 * halfh), Image.LANCZOS)
+    # ONE resample, straight to the rounded size (dust3r's _resize_pil_image
+    # sizes and filter: LANCZOS when shrinking, BICUBIC when enlarging)
+    W0, H0 = img.size
+    S = max(W0, H0)
+    target = tuple(_round14(int(round(x * size / S))) for x in (W0, H0))
+    img = img.resize(target, Image.LANCZOS if S > size else Image.BICUBIC)
     return ImgNorm(img)[None]
+
+
+def _round14(x: int) -> int:
+    """Nearest multiple of 14 (halves up), at least 14."""
+    return max(14, int(x / 14 + 0.5) * 14)
 
 
 def resize_to_gt(
@@ -397,6 +511,8 @@ def bench_root_ok(
             missing.append(name)
     for name in tae_datasets:
         spec = SPECS[name]
+        if name not in datasets:  # its TAE pass only runs alongside its main pass
+            continue
         if spec.tae_json and not (Path(root) / spec.tae_json).is_file():
             missing.append(f"{name}/tae")
     return missing

@@ -110,7 +110,7 @@ for d in "$REBUILT/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/proce
 done
 
 if [ "$BENCH" = 1 ]; then
-    for d in sintel scannet kitti bonn nyuv2; do
+    for d in sintel scannet kitti bonn_all nyuv2; do
         ls "$BENCH_ROOT/$d"/*.json >/dev/null 2>&1 \
             || { echo "[fatal] no benchmark manifest under $BENCH_ROOT/$d (BENCH=0 to skip)"; exit 1; }
     done

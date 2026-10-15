@@ -15,7 +15,7 @@
 # consecutive frames by construction, so tae/tae_sq are genuinely temporal).
 #
 # Each eval is finetune_depth.py with --epochs 0: no training, one val pass
-# (val/hammer/*) + streaming eval (final_stream/hammer/*), no checkpoints
+# (val/hammer/*), no checkpoints
 # written. Base runs without --resume (conditioning is zero-init no-op ==
 # pretrained); the arms resume their checkpoint-best.pth.
 #

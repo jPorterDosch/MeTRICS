@@ -34,8 +34,10 @@ from visualize_depth import load_saved_args, rebuild_metric_cfg, resolve_checkpo
 class BenchCheckpointCfg:
     weights: str
     """Run directory holding checkpoint-<name>.pth, or a .pth file."""
-    checkpoint: str = "best"
-    """auto | final | best | last (visualize_depth.py's resolution)."""
+    checkpoint: str = "last"
+    """auto | final | best | last (visualize_depth.py's resolution). Default
+    last: "best" is selected on validation AbsRel, and the validation set
+    includes ScanNet scans_test, the benchmark's own ScanNet scenes."""
     base: bool = False
     """Score the pretrained backbone with zero-init conditioning instead of
     the checkpoint's weights (the checkpoint still supplies the
@@ -44,7 +46,6 @@ class BenchCheckpointCfg:
     """Pretrained StreamVGGT weights for --base; default: the path the
     checkpoint recorded."""
     out_dir: str | None = None
-    seed: int = 42
     bench: BenchmarkCfg = field(default_factory=lambda: BenchmarkCfg(enabled=True))
 
 
@@ -98,7 +99,17 @@ def main(cfg: BenchCheckpointCfg) -> None:
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     cfg.bench.enabled = True
-    run_benchmark(model, accelerator, cfg.bench, mcfg, out_dir, step=0, seed=cfg.seed)
+    # the run's own precision; sparse draws come from cfg.bench.seed
+    run_benchmark(
+        model,
+        accelerator,
+        cfg.bench,
+        mcfg,
+        out_dir,
+        step=0,
+        amp=bool(raw.get("amp", 1)),
+        weights="pretrained backbone (--base)" if cfg.base else str(ckpt_path),
+    )
     print(f"done -> {out_dir}/bench_results.json")
 
 
