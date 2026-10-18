@@ -153,6 +153,7 @@ for i in "${ARMS[@]}"; do
         --train-dataset.epoch-size 1125 1125 1125 750 375 \
         --train-dataset.highres-root None None None \
                                      "$ARKIT_OUT/processed_arkitscenes_highres" None \
+        --train-dataset.scannet-official-split train \
         --val-dataset.root "$DATA/processed_scannet" \
                            "$ARKIT_OUT/processed_arkitscenes" \
                            "$ARKIT_OUT/processed_arkitscenes_highres" \
@@ -161,6 +162,7 @@ for i in "${ARMS[@]}"; do
         --val-dataset.stride-range 1 1 1 1 1 1 1 1 \
         --val-dataset.epoch-size 1000 1000 1000 1000 \
         --val-dataset.highres-root None "$ARKIT_OUT/processed_arkitscenes_highres" None None \
+        --val-dataset.scannet-official-split val \
         --batch-size 1 \
         --accum-iter 1 \
         --epochs 15 \

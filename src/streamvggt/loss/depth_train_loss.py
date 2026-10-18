@@ -1,7 +1,7 @@
 import torch
 
 from .base import Details, MultiLoss, View
-from .gradient_loss import TemporalGradientMatchingLoss
+from .gradient_loss import TemporalGradientMatchingLoss, teacher_edge_loss
 from .head_loss import DepthOrPmapLoss
 from .utils import compute_scale_and_shift
 
@@ -19,8 +19,21 @@ class DepthTrainLoss(MultiLoss):
         metric: bool = False,
         log_space: bool = False,
         conf_weighting: bool = True,
+        edge_weight: float = 0.0,
     ) -> None:
         super().__init__()
+        # edge_weight > 0 adds Prompt Depth Anything's edge-aware term
+        # (gradient_loss.teacher_edge_loss) against a teacher depth that the
+        # training loop attaches to every GT view as g["teacher_depth"]
+        # (finetune_depth: TeacherCfg / --teacher.model). The data term keeps
+        # the sensor GT; only the spatial gradient comes from the teacher.
+        # It follows log_space, like the accuracy term.
+        self.edge_weight = edge_weight
+        if edge_weight > 0 and not metric:
+            # the edge term compares the UNALIGNED prediction with a teacher
+            # on GT scale; under a scale/shift-aligned data term it would
+            # push the metric scale through the edges alone
+            raise ValueError("DepthTrainLoss edge_weight > 0 requires metric=True")
         # metric=True supervises absolute depth end-to-end: the depth term skips
         # its scale/shift alignment and the temporal term skips its scale fit, so
         # the metric scale the model is conditioned on is actually penalized.
@@ -77,6 +90,7 @@ class DepthTrainLoss(MultiLoss):
         pred_depth = torch.stack([p["depth"] for p in preds], dim=1).squeeze(-1)
         gt_depth = torch.stack([g["depthmap"] for g in gts], dim=1)
         temp_mask = torch.stack([g["valid_mask"] for g in gts], dim=1)
+        raw_pred_depth = pred_depth  # the edge term below wants the unaligned output
 
         if not self.metric:
             # Align prediction to GT scale/shift over the clip before matching
@@ -141,6 +155,31 @@ class DepthTrainLoss(MultiLoss):
         for loss, weight in zip(losses, self.weights, strict=True):
             total += weight * loss[0]
             details[loss[1]] = loss[0]
+
+        # ---------- Ledge (teacher-gradient edge term, optional) ----------
+        if self.edge_weight > 0:
+            if any("teacher_depth" not in g for g in gts):
+                raise ValueError(
+                    "DepthTrainLoss edge_weight > 0 needs g['teacher_depth'] on "
+                    "every GT view (set --teacher.model); none was attached"
+                )
+            teacher = torch.stack([g["teacher_depth"] for g in gts], dim=1)
+            teacher_valid = (
+                torch.stack([g["teacher_valid"] for g in gts], dim=1).flatten(0, 1)
+                if all("teacher_valid" in g for g in gts)
+                else None
+            )
+            Ledge = teacher_edge_loss(
+                raw_pred_depth.flatten(0, 1),
+                teacher.flatten(0, 1).to(raw_pred_depth.dtype),
+                gt_depth.flatten(0, 1),
+                temp_mask.flatten(0, 1),
+                prealign=True,
+                log_space=self.log_space,
+                teacher_valid=teacher_valid,
+            )
+            total = total + self.edge_weight * Ledge
+            details["Ledge"] = Ledge
 
         # logging-only breakdown of Ldepth (NOT added to total; detached in
         # DepthOrPmapLoss). Zeros when no frame carried a depth prediction,

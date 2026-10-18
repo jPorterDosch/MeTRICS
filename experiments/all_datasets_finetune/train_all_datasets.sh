@@ -215,6 +215,10 @@ python finetune_depth.py \
     `#`                                                                        \
     `# highres-root is NOT passed: it only applies to ARKitScenes lowres and`  \
     `# the default no longer carries ARKitScenes entries to clear.`            \
+    `#`                                                                        \
+    `# ScanNet trains on ScanNet v2's official train list (1201 scenes,`       \
+    `# assets/scannet_splits). scans_train also holds the 312 official val`    \
+    `# scenes, which are held out for validation below.`                      \
     --train-dataset.root "$REBUILT/processed_scannetpp" \
                          "$DATA/processed_tartanair" \
                          "$DATA/processed_scannet" \
@@ -226,9 +230,12 @@ python finetune_depth.py \
     --train-dataset.epoch-size 1125 1125 1125 750 375 \
     --train-dataset.highres-root None None None \
                                  "$ARKIT_OUT/processed_arkitscenes_highres" None \
+    --train-dataset.scannet-official-split train \
     \
     `# --- val data: ScanNet, ARKitScenes lowres + highres, HAMMER ----------` \
-    `# Every dataset here with a real test partition: ScanNet scans_test,`     \
+    `# Every dataset here with a held-out partition: ScanNet official val`     \
+    `# (312 scenes under scans_train; scans_test is the video-depth`          \
+    `# benchmark's and is never used for selection),`                         \
     `# ARKitScenes Test (lowres) / Validation (highres), HAMMER test (naked`   \
     `# twins excluded). ScanNet++ and TartanAir are preprocessed train-only`   \
     `# and their loaders reject Split.TEST. 1000 clips each, one loader per`   \
@@ -246,6 +253,7 @@ python finetune_depth.py \
     --val-dataset.stride-range 1 1 1 1 1 1 1 1 \
     --val-dataset.epoch-size 1000 1000 1000 1000 \
     --val-dataset.highres-root None "$ARKIT_OUT/processed_arkitscenes_highres" None None \
+    --val-dataset.scannet-official-split val \
     \
     `# --- optimization ------------------------------------------------------` \
     `# batch-size 1 on an 80GB H100 (the HAMMER arms ran 1 on 48GB L40S and`  \

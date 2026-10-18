@@ -56,7 +56,9 @@ from streamvggt.depth_cond import (
     seed_everything,
     simulate_sparse_depth,
 )
+from eval.boundary import boundary_f1, fed_pixel_metrics
 from eval.temporal_consistency.metrics import depth_evaluation, tae
+from streamvggt.teacher import TeacherCfg, TeacherModel, build_teacher
 from finetune import save_current_code, setup_for_distributed  # reuse
 from bench_eval import BenchmarkCfg, run_benchmark, spot_missing
 from eval.vda_benchmark import bench_root_ok
@@ -131,6 +133,9 @@ class FinetuneDepthCfg:
     lora: LoRACfg = field(default_factory=LoRACfg)
     encoder_cache: EncoderCacheCfg = field(default_factory=EncoderCacheCfg)
     train: TrainCondCfg = field(default_factory=TrainCondCfg)
+    # frozen monocular teacher for the edge-aware loss (--loss.edge-weight);
+    # run online on every training and validation frame (streamvggt.teacher)
+    teacher: TeacherCfg = field(default_factory=TeacherCfg)
 
     # checkpointing / identity
     pretrained: str = "../ckpt/checkpoints.pth"
@@ -191,6 +196,10 @@ class FinetuneDepthCfg:
     # "silently skipped when absent" -- a wrong path would not raise, it would
     # quietly leave the highres scenes in BOTH datasets. Given these trees sit
     # under a non-standard root, that failure is a real possibility.
+    #
+    # ScanNet trains on the official v2 train list only (1201 scenes): the
+    # 312 official val scenes, which share scans_train on disk, are held out
+    # for val_dataset below, and scans_test is the benchmark's.
     train_dataset: MultiDatasetConfig = field(
         default_factory=lambda: MultiDatasetConfig(
             root=(
@@ -222,6 +231,7 @@ class FinetuneDepthCfg:
             aug_crop=16,
             transform=TransformName.SEQ_COLOR_JITTER,
             n_corres=0,
+            scannet_official_split="train",
         )
     )
 
@@ -230,8 +240,10 @@ class FinetuneDepthCfg:
     # num_views 4, seed 42 (per-__getitem__ reseed -> deterministic clips).
     # Note Split.VAL does not exist -- the dataset classes only accept
     # TRAIN/TEST (highres maps TEST to its Validation/ tree on disk).
-    # Default val: ScanNet scans_test (real-sensor depth, exists on the
-    # cluster today). ARKitScenes was dropped as the default when its raw
+    # Default val: ScanNet v2's official val scenes (312, under scans_train,
+    # excluded from training above). It used to be scans_test, which holds the
+    # video-depth benchmark's ScanNet scenes, so checkpoint-best was selected
+    # on benchmark scenes. ARKitScenes was dropped as the default when its raw
     # dataset was found to be ~5.7TB; runs can still override per-experiment
     # (the hammer sweep passes --val-dataset.* explicitly).
     val_dataset: MultiDatasetConfig = field(
@@ -247,6 +259,7 @@ class FinetuneDepthCfg:
             split=Split.TEST,
             n_corres=0,
             seed=42,
+            scannet_official_split="val",
         )
     )
 
@@ -318,6 +331,10 @@ _NON_IDENTITY_KEYS = ("depth_cond.sim_freq_map_path",)
 
 
 def build_manifest(cfg: FinetuneDepthCfg) -> dict:
+    # Every knob that could change training is hashed, new ones included:
+    # the teacher / edge-loss / ScanNet-split fields (2026-10-17) change the
+    # hash of every configuration, so runs from before them cannot --resume
+    # on this code. Accepted, in favour of a hash that never omits anything.
     manifest = experiment_manifest(cfg, exclude=_NON_IDENTITY_FIELDS)
     for key in _NON_IDENTITY_KEYS:
         manifest.pop(key, None)
@@ -553,6 +570,12 @@ def run(
     )
     device = accelerator.device
     setup_for_distributed(accelerator)
+    teacher = build_teacher(args.teacher, device)
+    if teacher is not None:
+        printer.info(
+            f">> Teacher {args.teacher.model.value} at {args.teacher.res_scale}x "
+            f"for the edge term (weight {args.loss.edge_weight})"
+        )
 
     printer.info("output_dir: " + args.output_dir)
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -672,6 +695,7 @@ def run(
             mcfg=mcfg,
             save_model=save_model,
             best_so_far=best_so_far,
+            teacher=teacher,
         )
 
         # the loop breaks at `epoch >= args.epochs` before training, so the
@@ -690,6 +714,7 @@ def run(
                 args=args,
                 mcfg=mcfg,
                 prefix="val",
+                teacher=teacher,
                 export_glb=args.export_glb and is_last_epoch,
             )
             # Select "best" on metric AbsRel, NOT the criterion loss. The
@@ -729,6 +754,7 @@ def run(
             mcfg=mcfg,
             prefix="val",
             export_glb=args.export_glb,
+            teacher=teacher,
         )
 
     # The deployment (per-frame KV-cache) path is scored by the benchmark
@@ -791,10 +817,11 @@ def _set_data_epoch(data_loader: DataLoader, epoch: int) -> None:
         data_loader.batch_sampler.set_epoch(epoch)
 
 
-def _prepare_batch(batch: list[dict], mcfg: MetricCfg) -> None:
+def _prepare_batch(batch: list[dict], mcfg: MetricCfg, teacher=None) -> None:
     """Shared train/val batch preprocessing, in this order: rescale imgs to
     [0, 1], then attach the sparse-depth conditioning input (patch-masked
-    samples of the GT depth)."""
+    samples of the GT depth), then the teacher depth for the edge term
+    (view["teacher_depth"], when a teacher is configured)."""
     if isinstance(batch, list) and all(
         isinstance(v, dict) and "img" in v for v in batch
     ):
@@ -807,6 +834,8 @@ def _prepare_batch(batch: list[dict], mcfg: MetricCfg) -> None:
         mask_ratio=mcfg.depth_cond.sim_mask_ratio,
         freq_map_path=mcfg.depth_cond.sim_freq_map_path,
     )
+    if teacher is not None:
+        teacher.annotate(batch)
 
 
 def sparse_depth_stats(batch: list[dict], mask_ratio: float) -> dict | None:
@@ -882,6 +911,7 @@ def train_loop(
     mcfg: MetricCfg,
     save_model: Callable[[int, str, float, int], None] | None = None,
     best_so_far: float = float("inf"),
+    teacher=None,
 ) -> dict:
     if not torch.backends.cuda.matmul.allow_tf32:
         raise RuntimeError("TF32 matmul must stay enabled (set at module import)")
@@ -900,7 +930,7 @@ def train_loop(
         metric_logger.log_every(data_loader, args.print_freq, accelerator, header)
     ):
         with accelerator.accumulate(model):
-            _prepare_batch(batch, mcfg)
+            _prepare_batch(batch, mcfg, teacher)
             sparse_stats = sparse_depth_stats(batch, mcfg.depth_cond.sim_mask_ratio)
 
             epoch_f = epoch + data_iter_step / len(data_loader)
@@ -1152,6 +1182,21 @@ def _val_depth_metrics(views: list[dict], preds: list[dict]) -> dict[str, list[f
         # RMSE in metres: absolute error magnitude the relative AbsRel hides --
         # the calibration number for a metric-conditioned model.
         out.setdefault(f"{ds}/rmse_metric", []).append(res_metric["RMSE"])
+
+        # hint uptake: error at the pixels the model was given, and the
+        # per-frame scale it is off by there (eval.boundary); plus whether
+        # its depth discontinuities sit where the GT's do
+        if all("sparse_depth_mask" in v for v in views):
+            fed = torch.stack([v["sparse_depth_mask"][b] for v in views]).cpu().bool()
+            fed_rel, fed_log_s = fed_pixel_metrics(pred[b], gt[b], fed & mask)
+            for name, vals in (("fed_absrel", fed_rel), ("fed_logscale", fed_log_s)):
+                finite = vals[torch.isfinite(vals)]
+                if len(finite):
+                    out.setdefault(f"{ds}/{name}", []).append(float(finite.mean()))
+        f1 = boundary_f1(pred[b], gt[b], mask)
+        f1 = f1[torch.isfinite(f1)]
+        if len(f1):
+            out.setdefault(f"{ds}/boundary_f1", []).append(float(f1.mean()))
 
         aligned = aligned.reshape(S, H, W).numpy()
         mask_np = mask.numpy()
@@ -1408,6 +1453,7 @@ def val_loop(
     mcfg: MetricCfg,
     prefix: str = "val",
     export_glb: bool = False,
+    teacher=None,
 ) -> dict:
     """Validation on the training forward path: loss_of_one_batch with
     inference=False gives the criterion loss AND the predictions for the depth
@@ -1467,7 +1513,7 @@ def val_loop(
             for batch in metric_logger.log_every(
                 data_loader, args.print_freq, accelerator, header
             ):
-                _prepare_batch(batch, mcfg)
+                _prepare_batch(batch, mcfg, teacher)
                 _accumulate_sparse_stats(
                     batch, loss_sums, loss_counts, mcfg.depth_cond.sim_mask_ratio
                 )
@@ -1572,6 +1618,12 @@ def main(cfg: FinetuneDepthCfg) -> None:
             "start_epoch must be 0 for a fresh run; use --resume to continue"
         )
     _check_trainable_heads(cfg)
+    cfg.teacher.validate()
+    if (cfg.loss.edge_weight > 0) != (cfg.teacher.model is not TeacherModel.NONE):
+        raise ValueError(
+            "--loss.edge-weight > 0 and --teacher.model go together: got "
+            f"edge_weight={cfg.loss.edge_weight}, teacher={cfg.teacher.model.value}"
+        )
 
     mcfg = MetricCfg(
         depth_cond=cfg.depth_cond,

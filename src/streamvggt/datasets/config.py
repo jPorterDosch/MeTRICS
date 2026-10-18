@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from .arkitscenes import ARKitScenes_Multi
 from .arkitscenes_highres import ARKitScenesHighRes_Multi
@@ -102,6 +102,14 @@ class DatasetConfig:
     empty-table recapture along the same trajectory -- near-duplicate, trivial
     geometry). Default ``False`` drops them (23/46 train, 9/18 test). A no-op
     for the other datasets, which have no naked twins."""
+    scannet_official_split: Optional[Literal["train", "val"]] = None
+    """SCANNET only: read exactly ScanNet v2's official ``train`` (1201) or
+    ``val`` (312) scene list from ``scans_train``, independent of ``split``,
+    which still sets the sampling (a validation set is ``val`` with
+    ``Split.TEST``). ``None`` keeps the original layout: all of
+    ``scans_train`` (train + val) for TRAIN, ``scans_test`` -- the
+    video-depth benchmark's scenes -- for TEST. A no-op for the other
+    datasets."""
 
     def validate(self) -> "DatasetConfig":
         """Coerce plain strings to enum members and fail fast on any
@@ -201,7 +209,9 @@ class DatasetConfig:
             case DatasetName.ARKITSCENES_HIGHRES:
                 dataset = ARKitScenesHighRes_Multi(**kwargs)
             case DatasetName.SCANNET:
-                dataset = ScanNet_Multi(**kwargs)
+                dataset = ScanNet_Multi(
+                    official_split=self.scannet_official_split, **kwargs
+                )
             case DatasetName.SCANNETPP:
                 dataset = ScanNetpp_Multi(**kwargs)
             case DatasetName.TARTANAIR:
@@ -289,6 +299,10 @@ class MultiDatasetConfig:
     """HAMMER only: keep the ``*_naked`` empty-table sequences (default ``False``
     drops them). Shared across the mixture; a no-op for datasets without naked
     twins."""
+    scannet_official_split: Optional[Literal["train", "val"]] = None
+    """SCANNET only: restrict ScanNet to an official v2 scene list (see
+    ``DatasetConfig.scannet_official_split``). Shared across the mixture; a
+    no-op for the other datasets."""
 
     def validate(self) -> "MultiDatasetConfig":
         """Fail fast on parallel-tuple length mismatches; per-dataset field
@@ -339,6 +353,7 @@ class MultiDatasetConfig:
                     None if self.highres_root is None else self.highres_root[i]
                 ),
                 include_naked=self.include_naked,
+                scannet_official_split=self.scannet_official_split,
             )
             if i == 0:
                 # a DatasetConfig knob this fan-out does not pass would

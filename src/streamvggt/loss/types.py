@@ -21,6 +21,8 @@ this package on the path to unpickle it.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from enum import Enum
 
@@ -149,6 +151,15 @@ class LossConfig:
     # absrel_metric / delta1 / TAE (also what checkpoint-best selects on) and
     # the logged Ldepth_main_raw / Ldepth_grad.
     depth_conf_weighting: bool = True
+    # Edge-aware term against a teacher's depth GRADIENT (DEPTH_TRAIN only;
+    # Prompt Depth Anything Eq. 2, lambda 0.5 there): weight 0 = off. Needs
+    # --teacher.model so every GT view carries g["teacher_depth"]. Values keep
+    # coming from the sensor / mesh GT; only edges come from the teacher.
+    # The term lives in the same space as the depth accuracy term: log-depth
+    # gradients under depth_log_space (scale-free, relative), linear metres
+    # otherwise with the teacher pre-aligned to GT per frame (median ratio; a
+    # no-op on log gradients). See gradient_loss.teacher_edge_loss.
+    edge_weight: float = 0.0
 
     # Regr3DPose / Regr3DPose_ScaleInv knobs.
     norm_mode: str = "?avg_dis"
@@ -178,6 +189,8 @@ class LossConfig:
                 raise ValueError(f"invalid depth_trim {self.depth_trim!r}")
             if self.diff_depth_th < 0:
                 raise ValueError(f"invalid diff_depth_th {self.diff_depth_th!r}")
+            if not math.isfinite(self.edge_weight) or self.edge_weight < 0:
+                raise ValueError(f"invalid edge_weight {self.edge_weight!r}")
 
     def _regr(
         self,
@@ -217,6 +230,7 @@ class LossConfig:
                     metric=self.depth_metric,
                     log_space=self.depth_log_space,
                     conf_weighting=self.depth_conf_weighting,
+                    edge_weight=self.edge_weight,
                 )
 
             case Recipe.DISTILL:

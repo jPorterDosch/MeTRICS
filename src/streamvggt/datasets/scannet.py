@@ -21,6 +21,24 @@ DEFAULT_STRIDE_RANGE = (1, 30)
 # frames, i.e. ~4.7 s at 30 fps). A clip spanning one of those is not video.
 MAX_FRAME_GAP = 1
 
+# ScanNet v2's official scene lists, vendored with their source and hashes in
+# assets/scannet_splits/README.md. scans_train holds the train and val scenes;
+# scans_test holds the 100 test scenes, which are the video-depth benchmark's.
+OFFICIAL_SPLIT_DIR = osp.join(
+    osp.dirname(__file__), "..", "..", "..", "assets", "scannet_splits"
+)
+OFFICIAL_SPLITS = ("train", "val")
+
+
+def official_scenes(name: str) -> list[str]:
+    """Scene ids of ScanNet v2's official `name` split ("train" or "val")."""
+    if name not in OFFICIAL_SPLITS:
+        raise ValueError(
+            f"ScanNet official_split must be one of {OFFICIAL_SPLITS}, got {name!r}"
+        )
+    with open(osp.join(OFFICIAL_SPLIT_DIR, f"scannetv2_{name}.txt")) as f:
+        return [line.strip() for line in f if line.strip()]
+
 
 class ScanNet_Multi(BaseMultiViewDataset):
     """ScanNet RGB-D video sequences with metric depth and per-frame cam2world
@@ -35,11 +53,24 @@ class ScanNet_Multi(BaseMultiViewDataset):
         stride_range=DEFAULT_STRIDE_RANGE,
         regular_stride=True,
         is_metric=True,
+        official_split=None,
         **kwargs,
     ):
+        """`official_split` ("train" or "val") reads exactly the scenes of
+        ScanNet v2's official list from scans_train, whatever `split` is;
+        `split` still sets the sampling (TEST: seeded, regular strides), so a
+        validation set is official_split="val" with Split.TEST. None keeps the
+        original behaviour: every scene of scans_train for TRAIN, of
+        scans_test for TEST."""
         if is_metric is not True:
             raise ValueError(f"ScanNet is_metric must be True, got {is_metric!r}")
+        if official_split is not None and official_split not in OFFICIAL_SPLITS:
+            raise ValueError(
+                f"ScanNet official_split must be one of {OFFICIAL_SPLITS}, "
+                f"got {official_split!r}"
+            )
         self.ROOT = ROOT
+        self.official_split = official_split
         self.video = True
         self.is_metric = is_metric
         super().__init__(
@@ -55,6 +86,8 @@ class ScanNet_Multi(BaseMultiViewDataset):
                     f"ScanNet split must be Split.TRAIN or Split.TEST, got {self.split!r}"
                 )
 
+        if official_split is not None:
+            subdir = "scans_train"
         self.loaded_data = self._load_data(subdir)
 
     def _load_data(self, subdir):
@@ -63,9 +96,24 @@ class ScanNet_Multi(BaseMultiViewDataset):
             raise FileNotFoundError(
                 f"ScanNet split directory not found: {self.scene_root}"
             )
-        self.scenes = [
-            scene for scene in os.listdir(self.scene_root) if scene.startswith("scene")
-        ]
+        if self.official_split is not None:
+            wanted = official_scenes(self.official_split)
+            missing = sorted(
+                s for s in wanted if not osp.isdir(osp.join(self.scene_root, s))
+            )
+            if missing:
+                raise FileNotFoundError(
+                    f"{len(missing)} of {len(wanted)} official ScanNet "
+                    f"{self.official_split} scenes missing under {self.scene_root}, "
+                    f"e.g. {missing[:3]}"
+                )
+            self.scenes = sorted(wanted)
+        else:
+            self.scenes = [
+                scene
+                for scene in os.listdir(self.scene_root)
+                if scene.startswith("scene")
+            ]
         if not self.scenes:
             raise ValueError(f"No ScanNet sequences found in {self.scene_root}")
 

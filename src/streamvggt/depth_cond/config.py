@@ -58,6 +58,9 @@ class EncoderType(str, enum.Enum):
     IDENTITY = "identity"  # raw passthrough ("naive")
     CONV = "conv"
     MAE = "mae"
+    # nearest-measurement prefill + distance channel, then a 3x3 conv stem
+    # before the stride-14 patch embed (conditioner.PrefillConvDepthEncoder)
+    PREFILL_CONV = "prefill_conv"
 
 
 class InjectionType(str, enum.Enum):
@@ -130,7 +133,7 @@ class DepthCondCfg:
     # train.train_heads when training a recipe that supervises points.
     heads: list[HeadType] = field(default_factory=lambda: [HeadType.DEPTH])
 
-    # conv encoder width (encoder == CONV)
+    # conv encoder width (encoder == CONV or PREFILL_CONV)
     conv_channels: int = 128
 
     # MAE encoder and training-only reconstruction head (encoder == MAE)
