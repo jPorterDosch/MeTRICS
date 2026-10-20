@@ -904,8 +904,9 @@
           "protocol": "metric",
           "metric": "l1",
           "gate": true,
-          "measured": 0.013207715306930452,
-          "within_tolerance": false
+          "measured": 0.013207673787614166,
+          "within_tolerance": false,
+          "measured_commit": "d83bce3+08b9d879"
         },
         {
           "id": "t1_384_rmse",
@@ -916,8 +917,9 @@
           "protocol": "metric",
           "metric": "rmse",
           "gate": true,
-          "measured": 0.03172034839921653,
-          "within_tolerance": false
+          "measured": 0.031720098611846013,
+          "within_tolerance": false,
+          "measured_commit": "d83bce3+08b9d879"
         },
         {
           "id": "t1_768_l1",
@@ -928,8 +930,9 @@
           "protocol": "metric",
           "metric": "l1",
           "gate": true,
-          "measured": 0.013096946364958327,
-          "within_tolerance": true
+          "measured": 0.013096929552069434,
+          "within_tolerance": true,
+          "measured_commit": "d83bce3+08b9d879"
         },
         {
           "id": "t1_768_rmse",
@@ -940,8 +943,9 @@
           "protocol": "metric",
           "metric": "rmse",
           "gate": true,
-          "measured": 0.031205377008709238,
-          "within_tolerance": true
+          "measured": 0.031205159634138443,
+          "within_tolerance": true,
+          "measured_commit": "d83bce3+08b9d879"
         },
         {
           "id": "t1_1440_l1",
@@ -952,8 +956,9 @@
           "protocol": "metric",
           "metric": "l1",
           "gate": true,
-          "measured": 0.013072952737356359,
-          "within_tolerance": false
+          "measured": 0.01307295869689629,
+          "within_tolerance": false,
+          "measured_commit": "d83bce3+08b9d879"
         },
         {
           "id": "t1_1440_rmse",
@@ -964,8 +969,9 @@
           "protocol": "metric",
           "metric": "rmse",
           "gate": true,
-          "measured": 0.031053561195955644,
-          "within_tolerance": true
+          "measured": 0.031053365985930507,
+          "within_tolerance": true,
+          "measured_commit": "d83bce3+08b9d879"
         },
         {
           "id": "t2_scannetpp_l1",
@@ -1025,6 +1031,12 @@
           "commit": "e4a9013+dirty",
           "job_id": "6322208",
           "host": "clrv1103"
+        },
+        {
+          "date": "2026-10-14T23:56:38",
+          "commit": "d83bce3+08b9d879",
+          "job_id": "6407133",
+          "host": "ilpa1209"
         }
       ],
       "close": true

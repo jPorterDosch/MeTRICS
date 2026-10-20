@@ -675,6 +675,11 @@ def aggregate(rows: list[dict], tae_rows: list[dict]) -> dict[str, float]:
             for m in P.METRIC_NAMES:
                 out[f"{base}/{proto}_{m}"] = _mean([r[proto][m] for r in rs])
             out[f"{base}/{proto}_frames"] = _mean([r[proto]["frames"] for r in rs])
+            # frames aligned to a constant by the s >= 0 bound, summed over the
+            # sequences (0 outside sparse_aligned; absent in pre-2026-10-18 rows)
+            out[f"{base}/{proto}_clipped_frames"] = float(
+                sum(r[proto].get("clipped", 0.0) for r in rs)
+            )
             # _mean skips NaN rows (e.g. a 1% KITTI frame set whose sparse
             # patches all miss the LiDAR), so n_sequences can overstate what a
             # protocol's mean covers; this is the count actually averaged

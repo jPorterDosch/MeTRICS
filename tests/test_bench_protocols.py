@@ -98,13 +98,14 @@ class MetricProtocolTest(unittest.TestCase):
 
 
 class SparseAlignedProtocolTest(unittest.TestCase):
-    def _case(self, s=0.5, t=-0.3, seed=1):
+    def _case(self, s=2.0, t=-0.05, seed=1):
         gt = _gt(seed=seed, holes=0.0)
         S, H, W = gt.shape
         rng = np.random.default_rng(seed)
         sparse_mask = rng.uniform(size=gt.shape) < 0.1
         sparse_depth = np.where(sparse_mask, gt, 0.0)
-        pred = (gt - t) / s  # so s*pred + t == gt exactly
+        # the fit is in disparity: s / pred + t == 1 / gt exactly
+        pred = s / (1.0 / gt - t)
         return gt, pred, sparse_depth, sparse_mask
 
     def test_sparse_fit_recovers_the_affine(self):
@@ -318,7 +319,8 @@ class ManifestTest(unittest.TestCase):
         H, W, h, w = 436, 1024, 224, 518
         rng = np.random.default_rng(0)
         idx = np.arange(H * W, dtype=np.float32).reshape(H, W)
-        src = cv2.resize(idx, (w, h), interpolation=cv2.INTER_NEAREST).astype(int)
+        src = cv2.resize(idx, (w, h), interpolation=cv2.INTER_NEAREST_EXACT)
+        src = src.astype(int)
         cells = rng.random((2, -(-h // 14), -(-w // 14))) < 0.4
         mask = np.repeat(np.repeat(cells, 14, 1), 14, 2)[:, :h, :w]
         out = VB.sparse_mask_to_gt(mask, (H, W))
@@ -327,9 +329,10 @@ class ManifestTest(unittest.TestCase):
             fed = np.zeros(H * W, bool)
             fed[src[mask[i]]] = True
             self.assertTrue(out[i].reshape(-1)[fed].all())
-            # the plain nearest upsample misses some of them (the old leak)
+            # (with floor-based INTER_NEAREST the plain upsample missed some
+            # fed pixels; centre-aligned NEAREST_EXACT happens not to here, and
+            # the index map keeps the guarantee either way)
             up = VB.resize_to_gt(mask[i : i + 1].astype(np.float32), (H, W), True)
-            self.assertGreater(int((fed & ~(up[0].reshape(-1) > 0.5)).sum()), 0)
             # and nothing outside fed pixels or fed patches is excluded
             self.assertTrue(((up[0] > 0.5) | fed.reshape(H, W))[out[i]].all())
 
@@ -433,6 +436,75 @@ class BenchmarkCfgAndAggregateTest(unittest.TestCase):
         self.assertEqual(out["bonn/stream/d40/published_n_scored"], 0.0)
         self.assertAlmostEqual(out["bonn/stream/d5/tae_vda"], 2.0)
         self.assertAlmostEqual(out["bonn/stream/d5/realized_density"], 0.045)
+
+
+class SparseFitPositiveScaleTest(unittest.TestCase):
+    def test_negative_slope_fit_clips_scale_to_zero(self):
+        pred = np.array([1.0, 2.0, 3.0, 4.0])
+        target = np.array([4.0, 3.0, 2.0, 1.0])  # anti-correlated: lstsq s < 0
+        self.assertLess(P.affine_fit(pred, target)[0], 0)
+        s, t = P.positive_affine_fit(pred, target)
+        # constrained optimum: s clipped to 0, t the target mean
+        self.assertEqual(s, 0.0)
+        self.assertAlmostEqual(t, float(target.mean()))
+
+    def test_clipped_frames_are_counted(self):
+        gt = _gt(seed=4, holes=0.0)
+        pm = np.zeros_like(gt, dtype=bool)
+        pm[:, ::4, ::4] = True
+        pd = np.where(pm, gt, 0.0)
+        pred = gt.copy()
+        pred[1] = 1.0 / (
+            1.0 / gt[1].max() + 1.0 / gt[1].min() - 1.0 / gt[1]
+        )  # inverted
+        m = P.sparse_aligned_metrics(pred, pd, pm, pred, pm, gt, 10.0)
+        self.assertEqual(m.clipped, 1)
+
+    def test_nonpositive_depth_stays_out_of_the_fit(self):
+        gt = _gt(seed=5, holes=0.0)
+        pm = np.zeros_like(gt, dtype=bool)
+        pm[:, ::3, ::3] = True
+        pd = np.where(pm, gt, 0.0)
+        pred = 1.3 * gt
+        clean = P.sparse_aligned_metrics(pred, pd, pm, pred, pm, gt, 10.0)
+        bad = pred.copy()
+        bad[0, 0, 0] = 0.0  # a ReLU head's exact zero, on a fed pixel
+        m = P.sparse_aligned_metrics(bad, pd, pm, bad, pm, gt, 10.0)
+        self.assertAlmostEqual(m.abs_rel, clean.abs_rel, places=6)
+
+    def test_positive_fit_unchanged(self):
+        pred = np.array([1.0, 2.0, 3.0, 4.0])
+        target = 2.0 * pred + 0.5
+        self.assertEqual(
+            P.positive_affine_fit(pred, target), P.affine_fit(pred, target)
+        )
+
+
+class NearestResizeCentreTest(unittest.TestCase):
+    def test_sparse_source_index_is_centre_aligned(self):
+        from eval.vda_benchmark import sparse_mask_to_gt
+
+        mask = np.zeros((1, 1, 5), dtype=bool)
+        mask[0, 0, 0] = True
+        out = sparse_mask_to_gt(mask, (1, 12))
+        # target pixel 0's centre maps to source x = 0.7 -> pixel 1, not 0
+        self.assertTrue(out[0, 0, 1])
+
+
+class SparseFitDisparitySpaceTest(unittest.TestCase):
+    def test_depth_and_disparity_models_get_the_same_fit(self):
+        gt = _gt(seed=3, holes=0.0)
+        rng = np.random.default_rng(3)
+        pm = rng.uniform(size=gt.shape) < 0.1
+        pd = np.where(pm, gt, 0.0)
+        # one prediction, handed over once as depth and once as disparity
+        depth = 1.7 * gt * (1 + 0.05 * rng.standard_normal(gt.shape))
+        a = P.sparse_aligned_metrics(depth, pd, pm, depth, pm, gt, 10.0)
+        b = P.sparse_aligned_metrics(
+            1.0 / depth, pd, pm, 1.0 / depth, pm, gt, 10.0, native_disparity=True
+        )
+        self.assertAlmostEqual(a.abs_rel, b.abs_rel, places=5)
+        self.assertAlmostEqual(a.delta1, b.delta1, places=6)
 
 
 if __name__ == "__main__":

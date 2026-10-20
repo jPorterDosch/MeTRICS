@@ -1797,6 +1797,31 @@ class ReviewFixesTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             CT.check_comparable(both_unknown, "d5")
 
+    def test_accept_replay_opens_exactly_one_arm_and_commit(self):
+        import compare_table as CT
+
+        def res(arm, pc):
+            agg = {f"{d}/stream/d5/n_sequences": 13 for d in CT.DATASETS}
+            return {
+                "arm": arm,
+                "aggregate": agg,
+                "config": {"image_size": 518, "seed": 42},
+                "failed": [],
+                "commit": "c1",
+                "manifests": {"scannet/x.json": "aa"},
+                "predictions_commit": pc,
+            }
+
+        ok = [("a", res("vda", None)), ("b", res("dav", "c0"))]
+        CT.check_comparable(ok, "d5", {"dav": "c0"})
+        for named, accept in (
+            (ok, None),  # no override: refused as before
+            (ok, {"dav": "c9"}),  # another commit
+            ([("a", res("vda", None)), ("b", res("ovda", "c0"))], {"dav": "c0"}),
+        ):
+            with self.assertRaises(SystemExit):
+                CT.check_comparable(named, "d5", accept)
+
     def test_table_refuses_two_files_under_one_label(self):
         import json as _json
 

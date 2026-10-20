@@ -94,11 +94,21 @@ def row(label: str, results: dict, dens: str) -> dict:
 SHARED = ("image_size", "seed", "patch_size", "max_sequences", "root")
 
 
-def check_comparable(named: list[tuple[str, dict]], dens: str) -> None:
+def check_comparable(
+    named: list[tuple[str, dict]],
+    dens: str,
+    accept_replay: dict[str, str] | None = None,
+) -> None:
     """Refuse to table results that were not scored on the same benchmark:
     shared settings, the same sequence count per dataset (and per TAE set),
     and no failed sequences (run_benchmark skips a failed one, which would
-    leave that model's mean over fewer sequences)."""
+    leave that model's mean over fewer sequences).
+
+    accept_replay: {arm: predictions commit} -- a replayed arm (benchmark
+    --predictions) whose dump was made by an earlier code state than the one
+    scoring it, accepted for exactly that arm and that commit. Only for a
+    dump whose prediction path is verified unchanged between the two."""
+    accept_replay = accept_replay or {}
     problems = []
     for key in SHARED:
         vals = {label: r.get("config", {}).get(key) for label, r in named}
@@ -135,7 +145,8 @@ def check_comparable(named: list[tuple[str, dict]], dens: str) -> None:
     # a replayed arm's predictions must come from the scoring code too
     for label, r in named:
         pc = r.get("predictions_commit")
-        if pc is not None and pc != r.get("commit"):
+        accepted = pc is not None and accept_replay.get(r.get("arm")) == pc
+        if pc is not None and pc != r.get("commit") and not accepted:
             problems.append(
                 f"{label}: predictions made by code {pc}, scored by {r.get('commit')}"
             )
@@ -167,9 +178,24 @@ def main() -> None:
         "--baseline", nargs="+", default=[], help="path/to/bench_results.json"
     )
     ap.add_argument("--density", type=float, default=0.05)
+    ap.add_argument(
+        "--accept-replay",
+        nargs="+",
+        default=[],
+        metavar="ARM=COMMIT",
+        help="accept a replayed arm's predictions made by COMMIT although a "
+        "later code state scored them (only where the prediction path is "
+        "verified unchanged); named in that arm's footnote",
+    )
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
     dens = f"d{round(args.density * 100):g}"
+    accept_replay = {}
+    for spec in args.accept_replay:
+        arm, _, commit = spec.partition("=")
+        if not commit:
+            raise SystemExit(f"--accept-replay wants ARM=COMMIT, got {spec!r}")
+        accept_replay[arm] = commit
 
     rows, notes, named = [], [], []
     for spec in args.ours:
@@ -185,7 +211,7 @@ def main() -> None:
     if dup:
         # every check is keyed by label: a duplicate would hide one file
         raise SystemExit(f"two results files under one label {dup}: one per model")
-    check_comparable(named, dens)
+    check_comparable(named, dens, accept_replay)
     for label, res in named[: len(args.ours)]:
         rows.append(row(label, res, dens))
     for i, path in enumerate(args.baseline, 1):
@@ -200,6 +226,8 @@ def main() -> None:
                 f"predictions by code {res['predictions_commit']}, "
                 f"scored by code {res.get('commit', '?')}"
             )
+        if res.get("predictions_commit") and arm in accept_replay:
+            code += " (prediction path verified unchanged between the two)"
         notes.append(
             f"{mark} {arm}: reproduction status {status}"
             + (" (compared under --allow-close)" if res.get("allow_close") else "")

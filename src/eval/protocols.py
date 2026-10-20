@@ -36,6 +36,8 @@ per-frame reduction is theirs and not a re-implementation of it.
 
 from __future__ import annotations
 
+import dataclasses
+
 import importlib.util
 import pathlib
 from dataclasses import dataclass
@@ -107,6 +109,9 @@ class FrameMetrics:
     rmse: float
     delta1: float
     frames: int  # frames that had at least one scored pixel
+    # sparse_aligned only: frames whose fit hit the s >= 0 bound (aligned to a
+    # constant); reported so a row that is mostly constants can be told apart
+    clipped: int = 0
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -114,6 +119,7 @@ class FrameMetrics:
             "rmse": self.rmse,
             "delta1": self.delta1,
             "frames": float(self.frames),
+            "clipped": float(self.clipped),
         }
 
 
@@ -268,6 +274,21 @@ def affine_fit(pred: np.ndarray, target: np.ndarray) -> tuple[float, float]:
     return float(s), float(t)
 
 
+def positive_affine_fit(pred: np.ndarray, target: np.ndarray) -> tuple[float, float]:
+    """Least-squares (s, t) with s*pred + t ~ target and s >= 0. A per-frame
+    fit on a few clustered sparse patches can come out with s < 0, which
+    inverts the depth order of the whole frame (Sintel mountain_1: 8 of 32
+    frames). The constrained optimum then lies on s = 0, where the best t is
+    the target mean: the frame is aligned to a constant, which scores as the
+    poor fit it is instead of an inverted one. VDA's per-video fit on the
+    dense GT has no such guard and needs none."""
+    s, t = affine_fit(pred, target)
+    if s >= 0:
+        return s, t
+    g = target.astype(np.float64).reshape(-1)
+    return 0.0, float(np.mean(g[np.isfinite(g)]))
+
+
 def sparse_aligned_metrics(
     pred_native: np.ndarray,
     sparse_depth: np.ndarray,
@@ -293,10 +314,14 @@ def sparse_aligned_metrics(
     and is dropped (counted out of `frames`).
 
     native_disparity: the prediction (both arrays) IS disparity, a baseline's
-    native output. The fit is then s*disparity + t ~ 1/sparse depth, the
-    aligned disparity is floored like VDA's and inverted; everything else is
-    the same, so a disparity model and a depth model get the same pixels and
-    the same scoring."""
+    native output; otherwise it is depth and is inverted first.
+
+    The fit is always in DISPARITY space, as VDA's published protocol aligns:
+    s*disparity + t ~ 1/sparse depth, the aligned disparity floored like
+    VDA's and inverted. A depth-space least-squares fit is dominated by the
+    far pixels and scored depth models worse than no alignment on KITTI and
+    Sintel; one space for every model also keeps the column comparable
+    between depth- and disparity-output models (2026-10-18)."""
     _check_seq("pred_native", pred_native, sparse_depth)
     _check_seq("sparse_mask", sparse_mask, sparse_depth)
     _check_seq("pred_gt_res", pred_gt_res, gt)
@@ -304,35 +329,44 @@ def sparse_aligned_metrics(
     S = gt.shape[0]
     aligned = np.full_like(gt, DEPTH_FLOOR, dtype=np.float32)
     valid = gt_valid_mask(gt, max_depth) & ~sparse_mask_gt_res
+    clipped = 0
     for i in range(S):
+        # per frame, not the whole clip at once: a full-resolution float64
+        # copy of a 110-frame KITTI clip is ~0.4 GB per array
+        if native_disparity:
+            native_disp, gt_res_disp = pred_native[i], pred_gt_res[i]
+            fit_ok = np.isfinite(native_disp)
+        else:
+            # a non-finite depth becomes a NaN disparity and a depth <= 0 the
+            # floored 1/1e-3: both scored as errors after the affine, but kept
+            # out of the fit, where one disparity of 1000 among values of
+            # 0.01-1 would set the slope by itself
+            native_disp = depth_to_disparity(pred_native[i])
+            gt_res_disp = depth_to_disparity(pred_gt_res[i])
+            fit_ok = np.isfinite(native_disp) & (pred_native[i] > 0)
         # fit only on sparse pixels inside the scored range (the sparse depth
         # should already be restricted to it; this keeps the protocol honest
         # for any caller whose sparse depth is not)
         m = (
             sparse_mask[i]
-            & np.isfinite(pred_native[i])
+            & fit_ok
             & (sparse_depth[i] > 1e-3)
             & (sparse_depth[i] < max_depth)
         )
         if int(m.sum()) < min_sparse_pixels:
             valid[i] = False
             continue
-        # design decision: the fit lives in each model's NATIVE output space
-        if native_disparity:
-            s, t = affine_fit(pred_native[i][m], 1.0 / sparse_depth[i][m])
-            disp = s * pred_gt_res[i] + t
-            # a non-finite pixel scores as an error here too: floored AFTER
-            # the affine, so it lands at max_depth rather than at whatever
-            # depth the fit would map a floored disparity to
-            disp = np.clip(_finite_or_floor(disp), DEPTH_FLOOR, None)
-            aligned[i] = np.clip(1.0 / disp, DEPTH_FLOOR, max_depth)
-        else:
-            s, t = affine_fit(pred_native[i][m], sparse_depth[i][m])
-            # floored AFTER the affine: a non-finite pixel scores at 1e-3 m
-            aligned[i] = np.clip(
-                _finite_or_floor(s * pred_gt_res[i] + t), DEPTH_FLOOR, max_depth
-            )
-    return vda_frame_metrics(aligned, gt, valid)
+        s, t = positive_affine_fit(native_disp[m], 1.0 / sparse_depth[i][m])
+        clipped += s == 0.0
+        disp = s * gt_res_disp + t
+        # a non-finite pixel scores as an error here too: floored AFTER the
+        # affine, so it lands at max_depth rather than at whatever depth the
+        # fit would map a floored disparity to
+        disp = np.clip(_finite_or_floor(disp), DEPTH_FLOOR, None)
+        aligned[i] = np.clip(1.0 / disp, DEPTH_FLOOR, max_depth)
+    return dataclasses.replace(
+        vda_frame_metrics(aligned, gt, valid), clipped=int(clipped)
+    )
 
 
 def _relative_pose(

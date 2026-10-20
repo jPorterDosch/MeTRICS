@@ -371,7 +371,7 @@ trusting Bonn TAE or Bonn snapshots.
 | protocol | alignment | what it answers |
 |---|---|---|
 | `published` | one scale+shift per **video**, in **disparity**, against dense GT (VDA's `eval.py`, verbatim) | the only mode in which numbers from their tables are comparable |
-| `sparse_aligned` | one scale+shift per **frame**, fitted on the **sparse-depth pixels only**, in each model's native output space; sparse-depth pixels held out of the score | given the same sparse sensor, who completes it best -- causal, and symmetric between models that consume the sparse depth and models that only see it post hoc |
+| `sparse_aligned` | one scale+shift per **frame**, fitted on the **sparse-depth pixels only**, in disparity for every model (VDA's convention; the scale is constrained to >= 0); sparse-depth pixels held out of the score | given the same sparse sensor, who completes it best -- causal, and symmetric between models that consume the sparse depth and models that only see it post hoc |
 | `metric` | none; sparse-depth pixels held out of the score, as in `sparse_aligned` | calibration -- of the completion, not of the copied input |
 
 plus two TAEs on the published-aligned depth: `tae_vda` (theirs, vendored,

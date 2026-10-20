@@ -379,7 +379,11 @@ def build_views(
             top, left, Hf, Wf = box
             src = np.zeros((Hf, Wf), dtype=gt.dtype)
             src[top : top + H, left : left + W] = gt[i]
-        depth = cv2.resize(src, (w, h), interpolation=cv2.INTER_NEAREST)
+        # NEAREST_EXACT: the source pixel nearest each target pixel's centre.
+        # Plain INTER_NEAREST takes floor(x * scale), which shifts every fed
+        # sample ~0.5 * (scale - 1) source pixels up-left of the RGB pixel it
+        # conditions (0.7 px on KITTI) and into the sparse_aligned fit target
+        depth = cv2.resize(src, (w, h), interpolation=cv2.INTER_NEAREST_EXACT)
         # the protocol's valid range (VDA: 1e-3 < gt < max_depth), not just
         # > 0: Sintel's sky is stored at up to 650 m, and a sparse-depth
         # sample from it conditions the model on a depth the protocol never
@@ -465,7 +469,7 @@ def resize_to_gt(
     """[S,h,w] -> [S,H,W], bilinear like VDA's get_infer (cv2 default), or
     nearest for masks."""
     H, W = hw
-    interp = cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR
+    interp = cv2.INTER_NEAREST_EXACT if nearest else cv2.INTER_LINEAR
     out = np.stack(
         [cv2.resize(p.astype(np.float32), (W, H), interpolation=interp) for p in pred],
         axis=0,
@@ -478,8 +482,8 @@ def sparse_mask_to_gt(mask: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
     every GT pixel the model was fed, for holding them out of the score.
 
     build_views samples the sparse depth from the GT nearest-DOWNsampled to
-    (h, w); nearest-upsampling the mask back is not its inverse (cv2 takes
-    floor(x * scale) both ways), so it misses some fed source pixels. The
+    (h, w); nearest-upsampling the mask back is not its inverse, so it misses
+    some fed source pixels. The
     exact set is the downsample's own source-index map, read off cv2 by
     resizing an index image the same way; the upsampled patches are kept on
     top so whole fed patches stay excluded as before."""
@@ -490,7 +494,9 @@ def sparse_mask_to_gt(mask: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
     if H * W >= 1 << 24:
         raise ValueError(f"GT {H}x{W} too large for a float32 index map")
     idx = np.arange(H * W, dtype=np.float32).reshape(H, W)
-    src = cv2.resize(idx, (w, h), interpolation=cv2.INTER_NEAREST).astype(np.int64)
+    src = cv2.resize(idx, (w, h), interpolation=cv2.INTER_NEAREST_EXACT).astype(
+        np.int64
+    )
     out = resize_to_gt(mask.astype(np.float32), hw, nearest=True) > 0.5
     flat = out.reshape(out.shape[0], -1)
     for i in range(mask.shape[0]):
