@@ -27,6 +27,11 @@
 #    2   prefill_conv  DA3 gradient, teacher 1x   edge-loss effect
 #    3   prefill_conv  DA3 gradient, teacher 2x   edge targets from a 2x denser
 #                                                 teacher prediction
+#    4   (none)        none                       no sparse depth at all
+#                                                 (--depth-cond.no-enabled):
+#                                                 LoRA + heads trained on the
+#                                                 same data and schedule, RGB
+#                                                 only
 #
 # prefill_conv (depth_cond/conditioner.py): the sparse map is filled from the
 # nearest measurement, a distance-to-measurement channel is added, and a 3x3
@@ -44,7 +49,9 @@
 # average-pools its depth back (--teacher.res-scale 2).
 #
 # Contrasts: 0 vs 1 = encoder; 1 vs 2 = edge loss; 2 vs 3 = teacher
-# resolution. Every arm: TOKEN injection, LoRA, TUBE_MASK training sparsity
+# resolution; 4 vs 0 = how much of the gain is depth injection rather than
+# the extra training and LoRA adaptation on this data (arm 4 still sees the
+# metric depth loss, so it learns metric scale from RGB alone). Every arm: TOKEN injection, LoRA, TUBE_MASK training sparsity
 # (the table's `tube` run, 50e636145fa9afbb; train_all_datasets.sh itself
 # uses RANDOM masks). Everything else is train_all_datasets.sh verbatim,
 # including the official ScanNet split (train 1201 / val 312; scans_test is
@@ -54,7 +61,7 @@
 #
 # Run as a job array, one arm per task:
 #
-#   sbatch --array=0-3 experiments/all_datasets_finetune/train_all_datasets_encoder_sweep.sh
+#   sbatch --array=0-4 experiments/all_datasets_finetune/train_all_datasets_encoder_sweep.sh
 #   sbatch --array=2   experiments/all_datasets_finetune/train_all_datasets_encoder_sweep.sh
 #
 # Cost: arm 0/1 as train_all_datasets.sh (~23 h on an H100); arms 2/3 add a
@@ -64,12 +71,13 @@
 
 set -euo pipefail
 
-ARM_NAMES=(identity_noedge prefill_noedge prefill_edge1x prefill_edge2x)
+ARM_NAMES=(identity_noedge prefill_noedge prefill_edge1x prefill_edge2x lora_nodepth)
 ARM_FLAGS=(
     "--depth-cond.encoder IDENTITY"
     "--depth-cond.encoder PREFILL_CONV"
     "--depth-cond.encoder PREFILL_CONV --loss.edge-weight 0.5 --teacher.model DA3 --teacher.res-scale 1"
     "--depth-cond.encoder PREFILL_CONV --loss.edge-weight 0.5 --teacher.model DA3 --teacher.res-scale 2"
+    "--depth-cond.no-enabled"
 )
 
 REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
