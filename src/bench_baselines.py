@@ -29,6 +29,10 @@ own venv, which has none of it. `benchmark` imports it lazily.
 
 from __future__ import annotations
 
+# first: eval.provenance's audit hook records every repository file run from
+# here on, with its content at that moment (results' code_files)
+import eval.provenance  # noqa: E402,F401,I001
+
 import argparse
 import datetime
 import inspect
@@ -547,6 +551,16 @@ def dump_predictions(args) -> None:
             f"[dump] {args.arm} {name}/{kind}/{seq.name}: {len(frames)} frames",
             flush=True,
         )
+    # the files that produced the predictions, for compare_table's check that
+    # the replaying run's shared code is the same; a resumed dump ran the same
+    # code by the commit check above, so the last job's record stands for all
+    with open(meta) as f:
+        record = json.load(f)
+    record["code_files"] = PROV.loaded_code()
+    tmp = meta.with_suffix(".tmp.json")
+    with open(tmp, "w") as f:
+        json.dump(record, f, indent=2)
+    tmp.replace(meta)
 
 
 class CachedArm:
@@ -560,8 +574,9 @@ class CachedArm:
             meta["name"], meta["output"], meta["causal"], meta["prompted"]
         )
         # the code that PRODUCED the predictions (the scoring run's own commit
-        # is recorded separately)
+        # is recorded separately); code_files only in dumps from 2026-10-22 on
         self.commit = meta.get("commit", "unknown")
+        self.code_files = meta.get("code_files")
         self.root = root
         self.key = None  # (dataset, kind, seq_name), set before each call
 
@@ -772,6 +787,12 @@ def benchmark(args) -> None:
                     for k, v in vars(cfg).items()
                 },
                 "commit": commit,
+                # every repository file this run imported (scoring, the arm's
+                # wrapper and its vendored code), for compare_table
+                "code_files": PROV.loaded_code(),
+                "predictions_code_files": (
+                    arm.code_files if args.predictions else None
+                ),
                 "gpu": PROV.device_info()["gpu"],
                 "manifests": PROV.manifest_hashes(
                     cfg.root, [SPECS[d] for d in cfg.datasets]

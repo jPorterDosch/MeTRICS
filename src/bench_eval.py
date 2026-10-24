@@ -65,7 +65,8 @@ from eval.vda_benchmark import (
 from streamvggt.depth_cond.config import SparseSimMode
 from streamvggt.depth_cond.sparse import simulate_sparse_depth
 from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
-from train_utils import to_primitive
+
+to_primitive = PROV.to_primitive
 
 # the code this process imported: fingerprinted at import, because the
 # benchmark may only run at the end of a multi-day training run, when the
@@ -474,7 +475,8 @@ def _spot_gif(
     path: Path, views: list[dict], sensor: np.ndarray, pred: Prediction, title: str
 ) -> None:
     """GIF of one SPOT window; a failure costs the GIF, never the scores."""
-    from eval.spot_gif import write_spot_gif
+    with PROV.display_only():
+        from eval.spot_gif import write_spot_gif
 
     try:
         imgs = torch.stack([v["img"][0] for v in views]).float().cpu()
@@ -486,7 +488,8 @@ def _spot_gif(
             .to(torch.uint8)
             .numpy()
         )
-        write_spot_gif(path, rgb, sensor, pred.depth, pred.conf, title)
+        with PROV.display_only():
+            write_spot_gif(path, rgb, sensor, pred.depth, pred.conf, title)
     except Exception as e:  # noqa: BLE001
         print(
             f"[bench] GIF for {title} failed ({type(e).__name__}: {e}); scores kept",
@@ -626,10 +629,12 @@ def save_cloud(
 def _render_cloud(path: Path) -> None:
     # trimesh via visual_util; imported here so this module stays importable
     # (and testable) without the GLB stack
-    from render_clouds import render_npz
+    with PROV.display_only():
+        from render_clouds import render_npz
 
     try:
-        render_npz(path)
+        with PROV.display_only():
+            render_npz(path)
     except Exception as e:  # the snapshot is the deliverable; a GLB is a convenience
         print(f"[bench] GLB render of {path.name} failed ({e}); npz kept", flush=True)
 
@@ -639,11 +644,13 @@ def _render_viewers(paths: list[Path], results: Path) -> None:
     confidence / sparse-input colouring, GT toggle, frame slider, and the
     sequence's rows next to the dataset means -- hence written AFTER
     bench_results.json exists, unlike the GLB."""
-    from cloud_viewer import write_html
+    with PROV.display_only():
+        from cloud_viewer import write_html
 
     for path in paths:
         try:
-            write_html(path, results=results)
+            with PROV.display_only():
+                write_html(path, results=results)
         except Exception as e:
             print(
                 f"[bench] HTML viewer for {path.name} failed ({e}); npz kept",
@@ -1037,6 +1044,9 @@ def run_benchmark(
                 {
                     "config": to_primitive(cfg),
                     **provenance,
+                    # taken now, after scoring: the code that ran, including
+                    # modules imported lazily during the run
+                    "code_files": PROV.loaded_code(),
                     "step": step,
                     "aggregate": result,
                     "rows": rows,

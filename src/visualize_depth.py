@@ -47,13 +47,6 @@ from finetune_depth import (
 )
 from streamvggt.datasets import DatasetName, MultiDatasetConfig, Split
 from visual_util import apply_scene_alignment, integrate_camera_into_scene
-from streamvggt.depth_cond import (
-    DepthCondCfg,
-    EncoderCacheCfg,
-    LoRACfg,
-    MetricCfg,
-    TrainCondCfg,
-)
 
 # Third comparison arm: PromptDA (Prompt Depth Anything), vendored verbatim in
 # third_party/promptda (see its README); loading and the sparse-prompt infill
@@ -64,16 +57,13 @@ from eval.baselines.arms import (
     load_promptda,
 )
 
-# Checkpoint basenames finetune_depth.py writes, best -> worst preference when
-# --checkpoint is left at "auto". The pipeline no longer writes a separate
-# checkpoint-final.pth; the end-of-training weights live in checkpoint-last.pth,
-# so the "final" alias now resolves there (kept for backward compatibility).
-_CKPT_NAMES = {
-    "final": "checkpoint-last.pth",
-    "best": "checkpoint-best.pth",
-    "last": "checkpoint-last.pth",
-}
-_AUTO_ORDER = ("final", "best", "last")
+# checkpoint config and model construction live in model_io (shared with the
+# benchmark, which must not import this module or finetune_depth)
+from model_io import (  # noqa: E402
+    load_saved_args,
+    rebuild_metric_cfg,
+    resolve_checkpoint,
+)
 
 
 def _format_frame_timing(frame_times_ms) -> str:
@@ -231,53 +221,6 @@ def _run_promptda_inference(pmodel, views, frame_times_ms=None) -> list[dict]:
                 frame_times_ms.append((time.perf_counter() - t0) * 1000.0)
             preds.append({"depth": depth.permute(0, 2, 3, 1)})  # [B,H,W,1]
     return preds
-
-
-def resolve_checkpoint(weights: str, which: str) -> Path:
-    """Resolve --weights (+ --checkpoint) to a concrete .pth. `weights` may be
-    the checkpoint file itself or the run directory that contains it."""
-    p = Path(weights)
-    if p.is_file():
-        return p
-    if not p.is_dir():
-        raise FileNotFoundError(f"--weights is neither a file nor a directory: {p}")
-    if which != "auto":
-        cand = p / _CKPT_NAMES[which]
-        if not cand.is_file():
-            raise FileNotFoundError(f"No {cand.name} in {p}")
-        return cand
-    for key in _AUTO_ORDER:
-        cand = p / _CKPT_NAMES[key]
-        if cand.is_file():
-            return cand
-    raise FileNotFoundError(
-        f"No checkpoint ({', '.join(_CKPT_NAMES.values())}) found in {p}"
-    )
-
-
-def load_saved_args(ckpt: dict) -> dict:
-    """The primitive config snapshot picklable_args() embedded at save time.
-    Everything is builtin types (enums as strings) -- the config dataclasses'
-    validate() coerces them back."""
-    if "args" not in ckpt:
-        raise KeyError(
-            "checkpoint has no 'args' snapshot; cannot reconstruct the model "
-            "architecture. Was it written by finetune_depth.py?"
-        )
-    saved = ckpt["args"]
-    return dict(vars(saved)) if not isinstance(saved, dict) else dict(saved)
-
-
-def rebuild_metric_cfg(raw: dict) -> MetricCfg:
-    """Reconstruct the architecture config from the primitive snapshot. Each
-    nested dataclass's validate() turns the string/list primitives back into
-    enum members, so the built model matches the checkpoint's key layout."""
-    return MetricCfg(
-        depth_cond=DepthCondCfg(**raw["depth_cond"]),
-        lora=LoRACfg(**raw["lora"]),
-        encoder_cache=EncoderCacheCfg(**raw["encoder_cache"]),
-        train=TrainCondCfg(**raw["train"]),
-    ).validate()
 
 
 # MultiDatasetConfig fields that are parallel per-dataset tuples (entry i

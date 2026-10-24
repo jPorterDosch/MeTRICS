@@ -59,6 +59,7 @@ from streamvggt.models.streamvggt import StreamVGGT  # noqa: E402
 from streamvggt.datasets import *  # noqa: E402,F403 (registers ScanNet_Multi)
 from streamvggt.depth_cond import MetricStreamVGGT  # noqa: E402
 from streamvggt.depth_cond.sparse import simulate_sparse_depth  # noqa: E402
+from eval.streaming_window import stream_depth  # noqa: E402
 from visualize_depth import (  # noqa: E402
     load_saved_args,
     rebuild_metric_cfg,
@@ -159,31 +160,6 @@ def load_finetuned_model(
     return model.to(device).eval()
 
 
-def truncate_cache(past_kv: list, window: int) -> list:
-    """Keep only the last `window` frame slices of every block's (K, V).
-
-    K/V are [B, heads, n_frames, P, head_dim]; dim 2 is the frame axis the
-    cached attention concatenates on. This slice is the exact op the ONNX
-    wrapper will apply to its cache outputs.
-
-    NOTE (frame-0 eviction risk): once n_frames exceeds `window`, frame 0's
-    K/V leave the cache. VGGT-family models anchor their world frame to frame
-    0, so the camera/point heads could drift under a pure sliding window; a
-    StreamingLLM-style sink (always retain kv[:, :, :1]) is the cheap fix if
-    this experiment -- or a future export that keeps those heads -- shows
-    drift. Depth is per-frame and expected to be the most robust to eviction.
-    """
-    out = []
-    for kv in past_kv:
-        if kv is None:
-            out.append(None)
-        else:
-            k, v = kv
-            out.append((k[:, :, -window:], v[:, :, -window:]))
-    return out
-
-
-@torch.no_grad()
 def run_stream(
     model,
     views: list[dict],
@@ -191,49 +167,18 @@ def run_stream(
     window: int | None,
     amp: bool,
 ) -> list[np.ndarray]:
-    """Per-frame causal streaming, depth head only. Mirrors the inference()
-    paths (StreamVGGT / MetricStreamVGGT) but owns the cache so it can
-    truncate between steps. Returns the [H, W] fp32 depth prediction per
-    frame."""
-    metric = isinstance(model, MetricStreamVGGT)
-    inner = model.model if metric else model
-    past_kv = [None] * inner.aggregator.depth
-    preds = []
-    for i, view in enumerate(views):
-        # dataset img is ImgNorm [-1,1]; the model wants [0,1] (same rescale
-        # as finetune_depth._prepare_batch)
-        images = ((view["img"] + 1.0) / 2.0)[None, None].to(device)  # [1,1,3,H,W]
-
-        # per-frame conditioning, exactly as MetricStreamVGGT.inference: token
-        # feats enter the aggregator (before the cache), head residuals enter
-        # the DPT head (after it). No-op for the base model / disabled arm.
-        token_feats, depth_residuals = None, None
-        if metric and model.conditioner is not None:
-            cond = model._route_conditioning([view], images)
-            token_feats = cond["depth_token_feats"]
-            if cond["depth_head_residuals"] is not None:
-                depth_residuals = cond["depth_head_residuals"]["depth"]
-
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            tokens, patch_start_idx, past_kv = inner.aggregator(
-                images,
-                past_key_values=past_kv,
-                use_cache=True,
-                past_frame_idx=i,
-                injected_patch_feats=token_feats,
-            )
-        # heads run fp32 (model.forward disables autocast around them)
-        tokens32 = [t.float() for t in tokens]
-        depth, _conf = inner.depth_head(
-            tokens32,
-            images=images,
-            patch_start_idx=patch_start_idx,
-            depth_residuals=depth_residuals,
-        )
-        preds.append(depth[0, 0, :, :, 0].float().cpu().numpy())
-        if window is not None:
-            past_kv = truncate_cache(past_kv, window)
-    return preds
+    """eval.streaming_window.stream_depth (the export wrapper's loop) on the
+    dataset views: img is ImgNorm [-1,1], the model wants [0,1] (as
+    finetune_depth._prepare_batch), batched and on the device."""
+    stream_views = []
+    for view in views:
+        v = dict(view)
+        v["img"] = ((torch.as_tensor(view["img"]) + 1.0) / 2.0)[None].to(device)
+        for key in ("sparse_depth", "sparse_depth_mask"):
+            if key in v:
+                v[key] = torch.as_tensor(v[key]).to(device)
+        stream_views.append(v)
+    return list(stream_depth(model, stream_views, window, amp))
 
 
 # same encodings as visualize_depth._export_heatmaps, so these drop into the

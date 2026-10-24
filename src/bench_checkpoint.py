@@ -17,6 +17,10 @@ Nothing is logged to wandb here; bench_results.json is the record.
 
 from __future__ import annotations
 
+# first: eval.provenance's audit hook records every repository file run from
+# here on, with its content at that moment (results' code_files)
+import eval.provenance  # noqa: E402,F401,I001
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,8 +30,15 @@ import tyro
 from accelerate import Accelerator
 
 from bench_eval import BenchmarkCfg, run_benchmark
-from finetune_depth import FinetuneDepthCfg, build_model
-from visualize_depth import load_saved_args, rebuild_metric_cfg, resolve_checkpoint
+
+# model_io, not finetune_depth / visualize_depth: the results record every
+# file this process imports, and training code must not be among them
+from model_io import (
+    build_model,
+    load_saved_args,
+    rebuild_metric_cfg,
+    resolve_checkpoint,
+)
 
 
 @dataclass
@@ -77,18 +88,9 @@ def main(cfg: BenchCheckpointCfg) -> None:
     out_dir = cfg.out_dir or str(
         Path(ckpt_path).parent / f"bench_{'base' if cfg.base else label}"
     )
-    train_cfg = FinetuneDepthCfg(
-        depth_cond=mcfg.depth_cond,
-        lora=mcfg.lora,
-        encoder_cache=mcfg.encoder_cache,
-        train=mcfg.train,
-        pretrained=pretrained,
-        resume=None,
-        output_dir=out_dir,
-    )
     accelerator = Accelerator()
     model, _ = build_model(
-        train_cfg, mcfg, accelerator.device, load_pretrained=cfg.base
+        mcfg, accelerator.device, pretrained=pretrained, load_pretrained=cfg.base
     )
     if not cfg.base:
         state_dict = {k.replace("module.", ""): v for k, v in ckpt["model"].items()}

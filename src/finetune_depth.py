@@ -59,6 +59,7 @@ from streamvggt.depth_cond import (
 from eval.boundary import boundary_f1, fed_pixel_metrics
 from eval.temporal_consistency.metrics import depth_evaluation, tae
 from streamvggt.teacher import TeacherCfg, TeacherModel, build_teacher
+import model_io
 from finetune import save_current_code, setup_for_distributed  # reuse
 from bench_eval import BenchmarkCfg, run_benchmark, spot_missing
 from eval.vda_benchmark import bench_root_ok
@@ -480,26 +481,14 @@ def build_model(
     device: torch.device,
     load_pretrained: bool = True,
 ) -> tuple[MetricStreamVGGT, dict]:
-    model = MetricStreamVGGT(mcfg)
-    if load_pretrained and args.pretrained and not args.resume:
-        print(f"Loading pretrained StreamVGGT: {args.pretrained}")
-        print(model.load_pretrained(args.pretrained))
-    elif load_pretrained and args.resume:
-        model.initialize_encoder_cache(args.resume)
-    n = model.apply_lora_adapters()
-    stats = model.freeze_for_finetune()
-    model.to(device)
-    print(
-        f"LoRA: wrapped {n} attention modules (targets={mcfg.lora.targets}, rank={mcfg.lora.rank})"
+    """model_io.build_model with the run config's pretrained / resume paths."""
+    return model_io.build_model(
+        mcfg,
+        device,
+        pretrained=args.pretrained,
+        resume=args.resume,
+        load_pretrained=load_pretrained,
     )
-    print(
-        f"Params: total {stats['total_params']:,} | trainable {stats['trainable_params']:,} "
-        f"({stats['trainable_pct']:.3f}%) | base attention frozen: {stats['base_attention_frozen']}"
-    )
-    if not stats["base_attention_frozen"]:
-        raise RuntimeError("base attention projections must stay frozen")
-
-    return model, stats
 
 
 def _commit_checkpoint(

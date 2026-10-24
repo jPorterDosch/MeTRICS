@@ -10,10 +10,7 @@ path, breaking croco's own `import utils.misc`.
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import enum
 import os
-import pathlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -64,23 +61,8 @@ def loss_from_cfg(node) -> "LossConfig":
     return LossConfig(**OmegaConf.to_container(node, resolve=True))
 
 
-def to_primitive(obj):
-    """Recursively strip a config to builtin types (enum -> value, dataclass /
-    mapping / sequence -> dict / list) so a snapshot of it pickles or serializes
-    without needing any project module to reconstruct it."""
-    if isinstance(obj, enum.Enum):
-        return obj.value
-    if isinstance(obj, pathlib.Path):
-        return str(obj)
-    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return {
-            f.name: to_primitive(getattr(obj, f.name)) for f in dataclasses.fields(obj)
-        }
-    if isinstance(obj, dict):
-        return {k: to_primitive(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [to_primitive(v) for v in obj]
-    return obj
+# moved to eval.provenance so a benchmark run need not import this module
+from eval.provenance import to_primitive  # noqa: E402,F401
 
 
 def picklable_args(cfg: FinetuneDepthCfg) -> argparse.Namespace:

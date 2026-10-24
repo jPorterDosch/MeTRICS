@@ -37,7 +37,7 @@
 
 set -euo pipefail
 
-REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
+REPO=${REPO:-/nfs/home/jdosch1/brown-visual-computing/MeTRICS}  # a worktree for a smoke run
 CKPT_ROOT=/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd
 PRETRAINED=${PRETRAINED:-/lustre/isaac24/proj/UTK0516/ckpt/checkpoints.pth}
 BENCH_ROOT=${BENCH_ROOT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench}

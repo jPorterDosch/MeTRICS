@@ -65,6 +65,7 @@ from streamvggt.export import (  # noqa: E402
 )
 from runtime_utils import n_cpus, set_torch_threads  # noqa: E402
 from streamvggt.models.streamvggt import StreamVGGT  # noqa: E402
+from model_io import load_base_streamvggt  # noqa: E402
 from visualize_depth import (  # noqa: E402
     load_saved_args,
     rebuild_metric_cfg,
@@ -78,18 +79,7 @@ PROBE_GATE = 1e-3  # frame-0 probe: max|diff| must stay below this (assertion)
 # checkpoint loading (same rules as tests/kv_cache_window_validation.py)
 # ---------------------------------------------------------------------------
 def load_base_model(ckpt_path: str) -> StreamVGGT:
-    model = StreamVGGT()
-    sd = torch.load(ckpt_path, map_location="cpu")
-    # raw state_dict, or {"model": state_dict} wrapper -- same unwrap rule as
-    # MetricStreamVGGT.load_pretrained
-    if (
-        isinstance(sd, dict)
-        and "model" in sd
-        and not any(k.startswith("aggregator.") for k in sd)
-    ):
-        sd = sd["model"]
-    model.load_state_dict(sd, strict=True)
-    return model.eval()
+    return load_base_streamvggt(ckpt_path)
 
 
 def load_finetuned_model(weights: str, which: str) -> MetricStreamVGGT:

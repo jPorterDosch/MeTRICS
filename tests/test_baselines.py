@@ -1797,6 +1797,69 @@ class ReviewFixesTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             CT.check_comparable(both_unknown, "d5")
 
+    def test_table_compares_code_file_by_file(self):
+        import compare_table as CT
+        from eval import provenance as PROV
+
+        def res(arm, files, commit, pc=None, pfiles=None):
+            agg = {f"{d}/stream/d5/n_sequences": 13 for d in CT.DATASETS}
+            return {
+                "arm": arm,
+                "aggregate": agg,
+                "config": {"image_size": 518, "seed": 42},
+                "failed": [],
+                "commit": commit,
+                "manifests": {"scannet/x.json": "aa"},
+                "code_files": files,
+                "predictions_commit": pc,
+                "predictions_code_files": pfiles,
+            }
+
+        shared = {"src/eval/protocols.py": "p1", "src/bench_eval.py": "b1"}
+        ours = {**shared, "src/streamvggt/model.py": "m1"}
+        vda = {**shared, "third_party/vda/model.py": "v1"}
+        # different commits, same shared files: comparable (the commit
+        # changed only code one row never loaded)
+        CT.check_comparable(
+            [("a", res("ours", ours, "c1")), ("b", res("vda", vda, "c2"))], "d5"
+        )
+        for bad in (
+            {**vda, "src/eval/protocols.py": "p2"},  # scoring code differs
+            {**vda, "src/bench_eval.py": PROV.MODIFIED},  # edited mid-run
+        ):
+            with self.assertRaises(SystemExit):
+                CT.check_comparable(
+                    [("a", res("ours", ours, "c1")), ("b", res("vda", bad, "c2"))],
+                    "d5",
+                )
+        # one row without code_files: falls back to the strict commit check
+        with self.assertRaises(SystemExit):
+            CT.check_comparable(
+                [("a", res("ours", ours, "c1")), ("b", res("vda", None, "c2"))], "d5"
+            )
+        # a replay whose dump shares its prediction code with the scoring run
+        dump = {"src/eval/baselines/arms.py": "a1", "third_party/dav/x.py": "d1"}
+        score = {**shared, "src/eval/baselines/arms.py": "a1"}
+        CT.check_comparable(
+            [("a", res("dav", score, "c2", pc="c0", pfiles=dump))], "d5"
+        )
+        with self.assertRaises(SystemExit):
+            CT.check_comparable(
+                [
+                    (
+                        "a",
+                        res(
+                            "dav",
+                            {**score, "src/eval/baselines/arms.py": "a2"},
+                            "c2",
+                            pc="c0",
+                            pfiles=dump,
+                        ),
+                    )
+                ],
+                "d5",
+            )
+
     def test_accept_replay_opens_exactly_one_arm_and_commit(self):
         import compare_table as CT
 
