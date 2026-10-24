@@ -68,7 +68,7 @@ LOG2_ERR_MAX = 1.0  # error row: log2(pred / GT) in [-1, 1], as compare_arms_gif
 # one input resolution, one manifest (render checks they agree)
 DRAW_KEYS = ("protocol", "density", "seed", "patch_size", "image_size", "tae")
 GAP = 6  # px between panels
-TITLE_PX = 30  # figure title
+TITLE_PX = 36  # figure title
 ROW_PAD_PX = 24  # panel titles above each row
 
 
@@ -471,7 +471,8 @@ def render_scene(
             left=0.002,
             right=0.998,
             bottom=0.005,
-            top=1 - TITLE_PX / (fig_h * dpi),
+            # the first row's panel titles sit above its axes, below the title
+            top=1 - (TITLE_PX + ROW_PAD_PX) / (fig_h * dpi),
             wspace=GAP * len(widths) / sum(widths),
             hspace=ROW_PAD_PX / H,
         )

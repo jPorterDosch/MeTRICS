@@ -719,9 +719,7 @@ def parse_args():
         help="finetune_depth.py run dir (or checkpoint file) -> "
         "MetricStreamVGGT with the run's conditioning arm",
     )
-    src.add_argument(
-        "--checkpoint", default="auto", choices=["auto", "best", "last"]
-    )
+    src.add_argument("--checkpoint", default="auto", choices=["auto", "best", "last"])
     ap.add_argument(
         "--variant",
         default=None,

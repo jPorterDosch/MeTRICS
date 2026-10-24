@@ -274,9 +274,7 @@ def main() -> None:
         required=True,
         help="run dir or .pth (architecture + finetuned weights)",
     )
-    ap.add_argument(
-        "--checkpoint", choices=["auto", "best", "last"], default="auto"
-    )
+    ap.add_argument("--checkpoint", choices=["auto", "best", "last"], default="auto")
     ap.add_argument(
         "--base",
         action="store_true",

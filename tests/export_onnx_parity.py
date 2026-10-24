@@ -153,9 +153,7 @@ def parse_args():
     )
     ap.add_argument("--ckpt", default=os.path.join(ROOT, "ckpt", "checkpoints.pth"))
     ap.add_argument("--weights", default=None)
-    ap.add_argument(
-        "--checkpoint", default="auto", choices=["auto", "best", "last"]
-    )
+    ap.add_argument("--checkpoint", default="auto", choices=["auto", "best", "last"])
     ap.add_argument(
         "--frames",
         type=int,
