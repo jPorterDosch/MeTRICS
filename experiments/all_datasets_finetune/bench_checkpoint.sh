@@ -18,8 +18,8 @@
 #
 #   sbatch experiments/all_datasets_finetune/bench_checkpoint.sh
 #   WEIGHTS=/path/to/run_dir sbatch ...                 # a specific run
-#   CKPT=last sbatch ...                                # checkpoint-last instead of best
-#   DATASETS="scannet bonn" DENSITIES="0.05" sbatch ... # subset
+#   CKPT=best sbatch ...                                # checkpoint-best (selected on val, which includes the benchmark ScanNet scenes)
+#   DATASETS="scannet bonn_all" DENSITIES="0.05" sbatch ... # subset (bonn = DepthCrafter's 5 sequences)
 #   MAX_SEQ=2 sbatch ...                                # smoke test
 #   BASE=1 sbatch ...                                   # pretrained backbone, same config
 #   IMAGE_SIZE=1036 DATASETS=kitti sbatch ...           # 2x input (long side); default 518
@@ -41,8 +41,8 @@ REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
 CKPT_ROOT=/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd
 PRETRAINED=${PRETRAINED:-/lustre/isaac24/proj/UTK0516/ckpt/checkpoints.pth}
 BENCH_ROOT=${BENCH_ROOT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/bench}
-CKPT="${CKPT:-best}"
-DATASETS=${DATASETS:-sintel scannet kitti bonn nyuv2}
+CKPT="${CKPT:-last}"  # not best: selected on val incl. the benchmark's ScanNet scenes
+DATASETS=${DATASETS:-sintel scannet kitti bonn_all nyuv2}
 DENSITIES=${DENSITIES:-0.01 0.05 0.4}
 MAX_SEQ=${MAX_SEQ:-0}
 BASE=${BASE:-0}

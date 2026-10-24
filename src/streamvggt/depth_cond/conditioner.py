@@ -25,6 +25,7 @@ from .config import (
     TemporalType,
 )
 from .mae import MAEDepthDecoder, MAEDepthEncoder
+from .prefill import nearest_fill
 
 
 def masked_downsample(
@@ -72,6 +73,57 @@ class ConvDepthEncoder(nn.Module):
         y = self.stem(x.flatten(0, 1))
         y = y + self.refine(y)
         return y.reshape(B, S, *y.shape[1:])
+
+
+class PrefillConvDepthEncoder(nn.Module):
+    """ConvDepthEncoder with sub-patch structure kept: the input is the
+    PREFILLED map (nearest measurement everywhere, see prefill_channels), so
+    a 3x3 stem at full resolution sees edges and gradients inside a patch
+    before the stride-patch_size embed averages them away. Three input
+    channels: (filled transformed disparity, measured mask, log-distance to
+    the nearest measurement)."""
+
+    def __init__(self, channels: int, patch_size: int) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+        mid = max(channels // 2, 8)
+        self.pre = nn.Sequential(
+            nn.Conv2d(3, mid, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(mid, mid, kernel_size=3, padding=1),
+            nn.GELU(),
+        )
+        self.stem = nn.Conv2d(mid, channels, kernel_size=patch_size, stride=patch_size)
+        self.refine = nn.Sequential(
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+        )
+        self.out_channels = channels
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, S, 3, H, W] -> [B, S, C, H/ps, W/ps]
+        B, S = x.shape[:2]
+        y = self.stem(self.pre(x.flatten(0, 1)))
+        y = y + self.refine(y)
+        return y.reshape(B, S, *y.shape[1:])
+
+
+def prefill_channels(x: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """[B,S,2,H,W] (transformed disparity, mask) from prepare() ->
+    [B,S,3,H,W]: channel 0 filled from the nearest measurement, channel 1 the
+    mask unchanged, channel 2 log1p(distance / patch_size), 0 at a reading
+    and ~1.6 four patches away. The hint stays a hint: nothing here is fed
+    to the output, only to the encoder."""
+    B, S, C, H, W = x.shape
+    if C != 2:
+        raise ValueError(f"prefill_channels wants (signal, mask) channels, got {C}")
+    flat = x.flatten(0, 1)
+    filled, dist = nearest_fill(flat[:, 0], flat[:, 1] > 0.5)
+    dist = torch.log1p(dist / patch_size)
+    out = torch.stack([filled, flat[:, 1], dist.to(x.dtype)], dim=1)
+    return out.reshape(B, S, 3, H, W)
 
 
 class TemporalAttention(nn.Module):
@@ -134,6 +186,9 @@ class DepthConditioner(nn.Module):
                 enc_channels = 2
             case EncoderType.CONV:
                 self.encoder = ConvDepthEncoder(cfg.conv_channels, patch_size)
+                enc_channels = cfg.conv_channels
+            case EncoderType.PREFILL_CONV:
+                self.encoder = PrefillConvDepthEncoder(cfg.conv_channels, patch_size)
                 enc_channels = cfg.conv_channels
             case EncoderType.MAE:
                 self.encoder = MAEDepthEncoder(
@@ -319,6 +374,8 @@ class DepthConditioner(nn.Module):
         """
         self._aux_loss = None
         x = self.prepare(depth, mask)  # [B,S,2,H,W]
+        if self.cfg.encoder is EncoderType.PREFILL_CONV:
+            x = prefill_channels(x, self.patch_size)  # [B,S,3,H,W]
         if self.encoder is not None:
             x = self.encoder(x)
         if self.cfg.encoder is EncoderType.MAE:
@@ -363,7 +420,7 @@ class DepthConditioner(nn.Module):
                     # channel 1 the validity
                     pooled, frac = masked_downsample(flat[:, 0:1], flat[:, 1:2], out_hw)
                     scale_inputs.append(torch.cat([pooled, frac], dim=1))
-                case EncoderType.CONV | EncoderType.MAE:
+                case EncoderType.CONV | EncoderType.MAE | EncoderType.PREFILL_CONV:
                     # Learned latent channels are no longer a (signal, mask)
                     # pair, so resize instead of masked pooling.
                     scale_inputs.append(
@@ -398,7 +455,7 @@ class DepthConditioner(nn.Module):
             case EncoderType.IDENTITY:
                 # raw full-res map: fold patches into channels to reach the patch grid
                 flat = F.pixel_unshuffle(flat, self.patch_size)  # [B*S, 2*ps^2, ph, pw]
-            case EncoderType.CONV | EncoderType.MAE:
+            case EncoderType.CONV | EncoderType.MAE | EncoderType.PREFILL_CONV:
                 pass  # learned encoder already produced a patch-grid latent
             case _:
                 # new EncoderType members must be threaded here explicitly

@@ -106,8 +106,8 @@ python finetune_depth.py \
     --val-dataset.highres-root None \
     \
     `# --- optimization ------------------------------------------------------` \
-    `# batch-size 1: streaming_eval has its own batch-1 loader, so the train`  \
-    `# batch is unconstrained -- raising it was considered (4 clips x 10`      \
+    `# batch-size 1: the train batch is unconstrained by evaluation --`        \
+    `# raising it was considered (4 clips x 10`                                \
     `# views on a >=40GB card) but never memory-profiled, so it stayed at 1.`  \
     `# lr 1e-5 -> cosine to min-lr 1e-7 with 0.5-epoch warmup, AdamW wd 0.05,` \
     `# bf16 autocast (amp 1), grads clipped to 1.0 in the loop`                \

@@ -61,14 +61,13 @@ from finetune_depth import (
     build_model,
 )
 from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
+from eval.baselines.arms import PROMPTDA_CKPT_DEFAULT, load_promptda
 from visualize_depth import (
     _CONF_VMAX,
     _CONF_VMIN,
-    _PROMPTDA_CKPT_DEFAULT,
     _REL_VMAX,
     _export_heatmaps,
     _format_frame_timing,
-    _load_promptda,
     _per_frame_scene,
     _run_promptda_inference,
     _run_streaming_inference,
@@ -296,7 +295,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--promptda-ckpt",
-        default=_PROMPTDA_CKPT_DEFAULT,
+        default=PROMPTDA_CKPT_DEFAULT,
         help="PromptDA checkpoint: local model.ckpt or HF repo id",
     )
     ap.add_argument(
@@ -469,7 +468,7 @@ def main() -> None:
     if args.promptda:
         # the checkpoint is still loaded above: mcfg drives _prepare_batch, so
         # PromptDA sees exactly the frames/prompt the other arms see
-        pmodel = _load_promptda(args.promptda_ckpt, device, args.promptda_local_ckpt)
+        pmodel = load_promptda(args.promptda_ckpt, device, args.promptda_local_ckpt)
         model = None
     elif args.base:
         print(f"BASE model: loading pretrained weights {pretrained_path}")

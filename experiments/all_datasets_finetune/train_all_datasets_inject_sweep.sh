@@ -105,7 +105,7 @@ for d in "$REBUILT/processed_scannetpp" "$DATA/processed_tartanair" "$DATA/proce
 done
 
 if [ "$BENCH" = 1 ]; then
-    for d in sintel scannet kitti bonn nyuv2; do
+    for d in sintel scannet kitti bonn_all nyuv2; do
         ls "$BENCH_ROOT/$d"/*.json >/dev/null 2>&1 \
             || { echo "[fatal] no benchmark manifest under $BENCH_ROOT/$d (BENCH=0 to skip)"; exit 1; }
     done
@@ -146,6 +146,7 @@ for i in "${ARMS[@]}"; do
         --train-dataset.epoch-size 1125 1125 1125 750 375 \
         --train-dataset.highres-root None None None \
                                      "$ARKIT_OUT/processed_arkitscenes_highres" None \
+        --train-dataset.scannet-official-split train \
         --val-dataset.root "$DATA/processed_scannet" \
                            "$ARKIT_OUT/processed_arkitscenes" \
                            "$ARKIT_OUT/processed_arkitscenes_highres" \
@@ -154,6 +155,7 @@ for i in "${ARMS[@]}"; do
         --val-dataset.stride-range 1 1 1 1 1 1 1 1 \
         --val-dataset.epoch-size 1000 1000 1000 1000 \
         --val-dataset.highres-root None "$ARKIT_OUT/processed_arkitscenes_highres" None None \
+        --val-dataset.scannet-official-split val \
         --batch-size 1 \
         --accum-iter 1 \
         --epochs 15 \

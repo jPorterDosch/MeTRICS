@@ -22,7 +22,7 @@
 # Execute:  sbatch /oscar/home/jdosch/MeTRIC/experiments/hammer_finetune/smoke_hammer.sh
 #
 # PASS = job completes; log shows loss decreasing over the 5 epochs, one
-# "Val Epoch: [N]" block per epoch, a final "Streaming eval:" block, and
+# "Val Epoch: [N]" block per epoch, and
 # checkpoint-last/best/final in the scratch dir. NOTE: the train sampler
 # draws a fresh 10-clip subset each epoch (epoch-seeded), so expect a noisy
 # downward loss trend, not textbook single-batch overfitting.
