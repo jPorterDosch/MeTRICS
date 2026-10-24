@@ -89,13 +89,23 @@ class SensorData:
                 frame.load(f)
                 self.frames.append(frame)
 
-    def export_depth_images(self, output_path, image_size=None, frame_skip=1):
+    def _frame_count(self, max_frames):
+        """Frames to export: all of them, or the first max_frames (a positive
+        cap; the video-depth benchmark reads only a scan's first 510)."""
+        if max_frames is None:
+            return len(self.frames)
+        if max_frames <= 0:
+            raise ValueError(f"max_frames must be positive, got {max_frames}")
+        return min(len(self.frames), max_frames)
+
+    def export_depth_images(
+        self, output_path, image_size=None, frame_skip=1, max_frames=None
+    ):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
-        print(
-            "exporting", len(self.frames) // frame_skip, " depth frames to", output_path
-        )
-        for f in range(0, len(self.frames), frame_skip):
+        n = self._frame_count(max_frames)
+        print("exporting", n // frame_skip, " depth frames to", output_path)
+        for f in range(0, n, frame_skip):
             depth_data = self.frames[f].decompress_depth(self.depth_compression_type)
             # frombuffer replaces the deprecated fromstring(binary): identical
             # uint16 values from the same bytes. The only object-level diff is
@@ -121,19 +131,22 @@ class SensorData:
                 depth = depth.reshape(-1, depth.shape[1]).tolist()
                 writer.write(f, depth)
 
-    def export_color_images(self, output_path, image_size=None, frame_skip=1):
+    def export_color_images(
+        self, output_path, image_size=None, frame_skip=1, max_frames=None
+    ):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
-        print(
-            "exporting", len(self.frames) // frame_skip, "color frames to", output_path
-        )
-        for f in range(0, len(self.frames), frame_skip):
+        n = self._frame_count(max_frames)
+        print("exporting", n // frame_skip, "color frames to", output_path)
+        for f in range(0, n, frame_skip):
             color = self.frames[f].decompress_color(self.color_compression_type)
             if image_size is not None:
+                # AREA, not NEAREST: colour is downscaled (1296x968 -> 640x480
+                # for the benchmark) and nearest would alias it
                 color = cv2.resize(
                     color,
                     (image_size[1], image_size[0]),
-                    interpolation=cv2.INTER_NEAREST,
+                    interpolation=cv2.INTER_AREA,
                 )
             imageio.imwrite(os.path.join(output_path, str(f) + ".jpg"), color)
 
@@ -142,13 +155,12 @@ class SensorData:
             for line in matrix:
                 np.savetxt(f, line[np.newaxis], fmt="%f")
 
-    def export_poses(self, output_path, frame_skip=1):
+    def export_poses(self, output_path, frame_skip=1, max_frames=None):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
-        print(
-            "exporting", len(self.frames) // frame_skip, "camera poses to", output_path
-        )
-        for f in range(0, len(self.frames), frame_skip):
+        n = self._frame_count(max_frames)
+        print("exporting", n // frame_skip, "camera poses to", output_path)
+        for f in range(0, n, frame_skip):
             self.save_mat_to_file(
                 self.frames[f].camera_to_world,
                 os.path.join(output_path, str(f) + ".txt"),

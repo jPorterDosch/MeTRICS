@@ -1,0 +1,10 @@
+# Vendored code is checked in verbatim (see third_party/*/README_VENDORED.md)
+# and must lint as upstream ships it, not as we would write it.
+#
+# force-exclude: the ruff workflow passes PR-changed files explicitly
+# (`ruff format --check $PR_FILES`), and an explicit path overrides `exclude`
+# unless this is set.
+force-exclude = true
+extend-exclude = [
+    "third_party/video_depth_anything",
+]
