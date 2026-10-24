@@ -124,7 +124,7 @@ MODIFIED = "modified-during-run"
 _SELF = os.path.realpath(__file__)
 _EXEC: dict[str, str] = {}  # realpath -> sha256[:16] when its code ran
 _DISPLAY: set[str] = set()
-_display_depth = 0
+_in_display = False  # inside display_only()
 
 
 def _hash(path: str) -> str:
@@ -145,7 +145,7 @@ def _audit(event: str, args: tuple) -> None:
         _EXEC[path] = _hash(path)
     except OSError:
         return
-    if _display_depth:
+    if _in_display:
         _DISPLAY.add(path)
 
 
@@ -158,12 +158,16 @@ def display_only():
     scored (cloud renders, GIFs, viewers) and is left out of loaded_code(): a
     change to a renderer must not separate two rows. Scoring code must never
     run in here."""
-    global _display_depth
-    _display_depth += 1
+    # a flag, restored on exit rather than cleared: _render_cloud's import and
+    # its render_npz call are separate blocks, and one block may sit inside
+    # another, whose code must stay marked until the outer one ends
+    global _in_display
+    outer = _in_display
+    _in_display = True
     try:
         yield
     finally:
-        _display_depth -= 1
+        _in_display = outer
 
 
 def loaded_code() -> dict[str, str]:

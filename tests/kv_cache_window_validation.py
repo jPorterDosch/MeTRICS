@@ -91,7 +91,7 @@ def parse_args():
     ap.add_argument(
         "--checkpoint",
         default="auto",
-        choices=["auto", "best", "last", "final"],
+        choices=["auto", "best", "last"],
         help="which checkpoint of --weights to load",
     )
     ap.add_argument("--window", type=int, default=20, help="cache window W (frames)")

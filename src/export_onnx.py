@@ -720,7 +720,7 @@ def parse_args():
         "MetricStreamVGGT with the run's conditioning arm",
     )
     src.add_argument(
-        "--checkpoint", default="auto", choices=["auto", "best", "last", "final"]
+        "--checkpoint", default="auto", choices=["auto", "best", "last"]
     )
     ap.add_argument(
         "--variant",

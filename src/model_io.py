@@ -10,7 +10,9 @@ make an earlier benchmark row look like it ran different code.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import NamedTuple
 
 import torch
 
@@ -23,16 +25,10 @@ from streamvggt.depth_cond import (
     TrainCondCfg,
 )
 
-# Checkpoint basenames finetune_depth.py writes, best -> worst preference when
-# --checkpoint is left at "auto". The pipeline no longer writes a separate
-# checkpoint-final.pth; the end-of-training weights live in checkpoint-last.pth,
-# so the "final" alias now resolves there (kept for backward compatibility).
-CKPT_NAMES = {
-    "final": "checkpoint-last.pth",
-    "best": "checkpoint-best.pth",
-    "last": "checkpoint-last.pth",
-}
-AUTO_ORDER = ("final", "best", "last")
+# Checkpoint basenames finetune_depth.py writes; --checkpoint auto takes the
+# first that exists (last: best was selected on validation).
+CKPT_NAMES = {"last": "checkpoint-last.pth", "best": "checkpoint-best.pth"}
+AUTO_ORDER = ("last", "best")
 
 
 def build_model(
@@ -65,6 +61,59 @@ def build_model(
     if not stats["base_attention_frozen"]:
         raise RuntimeError("base attention projections must stay frozen")
     return model, stats
+
+
+class LoadedRun(NamedTuple):
+    model: MetricStreamVGGT
+    raw: dict
+    """the run's saved config snapshot (sparse simulation switched off)"""
+    mcfg: MetricCfg
+    ckpt_path: Path
+
+
+def load_run_model(
+    weights: str,
+    which: str,
+    device: torch.device,
+    base: bool = False,
+    pretrained: str | None = None,
+    encoder_cache: bool = True,
+) -> LoadedRun:
+    """A finetune_depth.py run's model in eval mode on `device`, with its saved
+    config and the checkpoint file used. Its training-time sparse simulation
+    is not rebuilt (callers draw their own sparse depth, and a pixel_freq
+    run's map path would have to exist on this machine). With `base`, the run
+    supplies only the architecture and the weights are the pretrained
+    StreamVGGT (`pretrained`, default the path the run recorded; zero-init
+    conditioning makes it the raw backbone). encoder_cache=False skips the
+    run's encoder feature cache, for callers that never pass cache keys
+    (constructing it creates the run's cache directory)."""
+    ckpt_path = resolve_checkpoint(weights, which)
+    # mmap: the state dict is ~5 GB fp32 and build_model makes a second copy
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False, mmap=True)
+    raw = load_saved_args(ckpt)
+    raw["depth_cond"] = dict(raw["depth_cond"])
+    raw["depth_cond"]["sim_mode"] = "none"
+    raw["depth_cond"]["sim_freq_map_path"] = ""
+    raw["depth_cond"]["sim_freq_map_sha256"] = ""
+    mcfg = rebuild_metric_cfg(raw)
+    if not encoder_cache:
+        mcfg.encoder_cache.enabled = False
+    if base:
+        pretrained = pretrained or raw.get("pretrained") or ""
+        if not pretrained or not os.path.exists(pretrained):
+            raise FileNotFoundError(
+                f"base weights not found (saved path: {raw.get('pretrained')!r})"
+            )
+    model, _ = build_model(
+        mcfg, device, pretrained=pretrained or "", load_pretrained=base
+    )
+    if not base:
+        state_dict = {k.replace("module.", ""): v for k, v in ckpt["model"].items()}
+        model.load_state_dict(state_dict, strict=True)
+        del state_dict
+    del ckpt
+    return LoadedRun(model.eval(), raw, mcfg, Path(ckpt_path))
 
 
 def load_base_streamvggt(ckpt_path: str):

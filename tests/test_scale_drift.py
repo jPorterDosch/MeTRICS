@@ -1,6 +1,7 @@
 """src/scale_drift.py: the CPU pieces of the depth-dropout experiment."""
 
 import numpy as np
+import pytest
 import torch
 
 import scale_drift as SD
@@ -115,28 +116,46 @@ def test_sine_fit_recovers_gain_and_lag() -> None:
     r = 0.5 * a * np.sin(2 * np.pi * (t - 3) / period)  # half gain, 3-frame lag
     gain, phase = SD.sine_fit(r, period, a, start=20)
     assert abs(gain - 0.5) < 1e-6
-    assert abs(SD.circular_lag([phase], period) - 3) < 1e-6
+    assert abs(SD.lags_across_periods([period], [phase])[0] - 3) < 1e-6
     # a lead is a negative lag, not P - lead
     r_lead = a * np.sin(2 * np.pi * (t + 2) / period)
-    assert (
-        abs(SD.circular_lag([SD.sine_fit(r_lead, period, a, 20)[1]], period) + 2) < 1e-6
-    )
+    lead = SD.lags_across_periods([period], [SD.sine_fit(r_lead, period, a, 20)[1]])
+    assert abs(lead[0] + 2) < 1e-6
     # a negative amplitude (factor < 1) still reads a perfect follower as gain 1, lag 0
     gain, phase = SD.sine_fit(-a * np.sin(2 * np.pi * t / period), period, -a, 20)
     assert abs(gain - 1) < 1e-6 and abs(phase) < 1e-6
 
 
-def test_circular_lag_does_not_split_noise_around_zero() -> None:
-    # true lag 0: clip phases scattered on both sides of 0 must not average to P/2
+def test_mean_response_does_not_split_noise_around_zero() -> None:
+    # true lag 0: clip phases scattered on both sides of 0 must not average to pi
     rng = np.random.default_rng(0)
-    phases = rng.normal(0.0, 0.2, size=100)
-    assert abs(SD.circular_lag(phases, 16.0)) < 0.2
+    fits = [(0.5, ph) for ph in rng.normal(0.0, 0.2, size=100)]
+    gain, phase = SD.mean_response(fits)
+    assert abs(phase) < 0.05 and 0.45 < gain <= 0.5
+
+
+def test_mean_response_gain_is_not_lifted_by_noise() -> None:
+    # a filtered-out period: per-clip fits are pure noise with random phase;
+    # their median magnitude is the noise floor, the complex mean is ~0
+    rng = np.random.default_rng(1)
+    fits = [(0.1, ph) for ph in rng.uniform(-np.pi, np.pi, size=400)]
+    assert SD.mean_response(fits)[0] < 0.02
+
+
+def test_lags_unwrap_across_periods() -> None:
+    # a fixed 6-frame delay: at P=8 the phase wraps to -pi/2 (a 2-frame lead)
+    periods = [64.0, 32.0, 16.0, 8.0]
+    wrapped = [np.angle(np.exp(1j * 2 * np.pi * 6 / p)) for p in periods]
+    assert np.allclose(SD.lags_across_periods(periods, wrapped), 6.0)
 
 
 def test_step_stats() -> None:
     tracking = np.concatenate([np.zeros(40), [0.3, 0.5, 0.7, 0.9], np.ones(148)])
-    t63, final = SD.step_stats(tracking, 40)
-    assert t63 == 2 and final == 1.0
+    tau, settled = SD.step_stats(tracking, 40)
+    assert tau == 2 and settled == 1.0
+    # the time constant is relative to where the curve settles, not to 1
+    tau, settled = SD.step_stats(0.5 * tracking, 40)
+    assert tau == 2 and settled == 0.5
     assert SD.step_stats(np.zeros(192), 40)[0] is None
 
 
@@ -164,8 +183,9 @@ def test_validate_rejects_degenerate_settings() -> None:
         experiment="step",
         window=20,
         ref_frames=20,
+        dropout_at=None,
         step_at=40,
-        step_factor=1.25,
+        step_factor=[0.8, 1.25, 2.0],
         sine_amplitude=1.2,
         sine_periods=[8.0],
         jitter_sigma=0.1,
@@ -176,12 +196,22 @@ def test_validate_rejects_degenerate_settings() -> None:
     for change, curves in (
         ({"step_at": 10}, ours),  # inside the first window
         ({"step_at": 200}, ours),  # past the clip
-        ({"step_factor": 1.0}, ours),
+        ({"step_at": 180}, ours),  # no settled tail after it
+        ({"step_factor": [1.0]}, ours),
+        ({"step_factor": [1.5, 1.5]}, ours),  # one run each: no duplicates
+        ({"step_factor": [0.0]}, ours),
         ({"experiment": "sine", "sine_amplitude": 0.8}, ours),
         ({"experiment": "sine", "sine_periods": [2.0]}, ours),
         ({"experiment": "jitter", "jitter_sigma": 0.0}, ours),
         ({}, [SD.parse_curve("StreamVGGT=base")]),  # nothing to perturb
         ({"experiment": "jitter"}, [SD.parse_curve("Ours=/runs/x@20")]),
+        ({"experiment": "splice", "splice_scale": 1.0}, ours),  # that is the control
+        ({"experiment": "dropout"}, [SD.parse_curve("Ours=/runs/x@192")]),
+        ({"experiment": "dropout", "ref_frames": 30}, [SD.parse_curve("O=/r@20")]),
+        (
+            {"experiment": "dropout", "dropout_at": 40},
+            [SD.parse_curve("O=/r@20")],
+        ),
     ):
         try:
             SD.validate(argparse.Namespace(**{**base, **change}), curves, 192)
@@ -196,3 +226,102 @@ def test_median_scaled_absrel_ignores_global_scale() -> None:
     gt = rng.uniform(1, 5, size=(2, 6, 6))
     scored = np.ones_like(gt, dtype=bool)
     assert np.allclose(SD.median_scaled_absrel(gt * 3.0, gt, scored), 0.0)
+
+
+def _ours_and_base():
+    return [SD.parse_curve("StreamVGGT=base"), SD.parse_curve("Ours=/runs/x@20")]
+
+
+def test_rows_round_trip_through_the_csv(tmp_path) -> None:
+    import csv
+
+    header = SD.header_for("step")
+    rows = [("Ours", "k=2", "c0", i, 0.0, 0.1 * i, 0.0, float("nan")) for i in range(3)]
+    with open(tmp_path / "per_frame.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+    h, back = SD.read_rows(tmp_path / "per_frame.csv")
+    assert h == header and back[2][:6] == rows[2][:6] and np.isnan(back[2][7])
+    series = SD.group(h, back, ("curve", "perturbation", "clip"))
+    assert np.allclose(series[("Ours", "k=2", "c0")]["r"], [0.0, 0.1, 0.2])
+    with pytest.raises(ValueError):  # frames out of order
+        SD.group(h, back[::-1], ("curve", "perturbation", "clip"))
+
+
+def test_dropout_summary_includes_base_absolute_error(tmp_path) -> None:
+    import argparse
+
+    args = argparse.Namespace(ref_frames=2, dropout_at=4, window=3)
+    header = SD.header_for("dropout")
+    rows = []
+    for label, a in (("StreamVGGT", 0.8), ("Ours (dropout @20)", 0.05)):
+        for clip in ("c0", "c1"):
+            rows += [(label, clip, i, np.exp(a), 0.0, a) for i in range(8)]
+    summary = SD.summarize_dropout(
+        args,
+        _ours_and_base()[:1] + [SD.parse_curve("Ours (dropout @20)=/runs/x@4")],
+        header,
+        rows,
+        tmp_path,
+    )
+    base, ours = summary["curves"]
+    assert np.allclose(base["abs_median"], 0.8) and base["metric"] is False
+    assert np.allclose(ours["abs_median"], 0.05) and ours["metric"] is True
+    assert (tmp_path / "scale_drift.png").stat().st_size > 0
+
+
+def test_step_summary_per_factor_and_fed_split(tmp_path) -> None:
+    import argparse
+
+    S, step_at = 80, 40
+    args = argparse.Namespace(
+        experiment="step", step_factor=[2.0, 0.8], step_at=step_at, window=20
+    )
+    t = np.arange(S)
+    rows = []
+    for k, gain in ((0.8, 0.9), (2.0, 0.5)):  # the bigger step followed less
+        u = np.where(t >= step_at, np.log(k), 0.0)
+        for clip in ("c0", "c1"):
+            # fed pixels copy the input; held-out pixels follow `gain` of it
+            rows += [
+                ("Ours", f"k={k:g}", clip, i, u[i], gain * u[i], 0.0, u[i])
+                for i in range(S)
+            ]
+    summary = SD.summarize_response(
+        args, [SD.parse_curve("Ours=/runs/x")], SD.header_for("step"), rows, tmp_path
+    )
+    (entry,) = summary["curves"]
+    settled = [f["tracking_settled"] for f in entry["factors"]]
+    fed = [f["tracking_fed_settled"] for f in entry["factors"]]
+    # ascending factors whatever order they were given in
+    assert [f["factor"] for f in entry["factors"]] == [0.8, 2.0]
+    assert np.allclose(settled, [0.9, 0.5]) and np.allclose(fed, [1.0, 1.0])
+    assert (tmp_path / "scale_step_gain.png").stat().st_size > 0
+    # a run from before r_fed: same summary, the fed part empty
+    old = [r[:7] for r in rows]
+    summary = SD.summarize_response(
+        args, [SD.parse_curve("Ours=/runs/x")], SD.header_for("step")[:7], old, tmp_path
+    )
+    assert np.isnan(summary["curves"][0]["factors"][0]["tracking_fed_settled"])
+
+
+def test_jitter_summary_skips_a_clip_without_scored_pixels(tmp_path) -> None:
+    import argparse
+
+    S = 60
+    args = argparse.Namespace(experiment="jitter", jitter_sigma=0.1, window=20)
+    rng = np.random.default_rng(3)
+    rows = []
+    for clip, gain in (("c0", 0.5), ("c1", 0.5), ("c2", float("nan"))):
+        u = 0.1 * rng.standard_normal(S)
+        rows += [
+            ("Ours", "sigma=0.1", clip, i, u[i], gain * u[i], 0.0, u[i])
+            for i in range(S)
+        ]
+    summary = SD.summarize_response(
+        args, [SD.parse_curve("Ours=/runs/x")], SD.header_for("jitter"), rows, tmp_path
+    )
+    (entry,) = summary["curves"]
+    assert abs(entry["gain_median"] - 0.5) < 1e-9
+    assert abs(entry["gain_median_fed"] - 1.0) < 1e-9

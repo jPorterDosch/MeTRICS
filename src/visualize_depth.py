@@ -886,7 +886,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--checkpoint",
-        choices=["auto", "final", "best", "last"],
+        choices=["auto", "best", "last"],
         default="auto",
         help="which checkpoint to load from a weights dir (default: auto)",
     )

@@ -37,7 +37,9 @@
 # =============================================================================
 set -euo pipefail
 
-REPO=${REPO:-/nfs/home/jdosch1/brown-visual-computing/MeTRICS}
+# the checkout sbatch was run from (a worktree runs its own code), not a
+# hard-coded path; SLURM copies the script, so its own location is no guide
+REPO=${REPO:-$(git -C "${SLURM_SUBMIT_DIR:-$PWD}" rev-parse --show-toplevel)}
 CK=/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd/metric_all_datasets
 RUN=${RUN:-$CK/50e636145fa9afbb}
 DROP=${DROP:-20}
@@ -63,6 +65,8 @@ export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
 [ -e "$OUT/summary.json" ] && { echo "[fatal] $OUT already has results; set OUT"; exit 1; }
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
+# the code that runs: REPO follows the submit directory, not this script
+echo "[drift] REPO=$REPO HEAD=$(git -C "$REPO" rev-parse --short HEAD) dirty=$(git -C "$REPO" status --porcelain -- src | wc -l)"
 cd "$REPO/src"
 COMMON=(--out "$OUT" --window "$WINDOW" --max-clips "$MAX_CLIPS")
 # shellcheck disable=SC2086
