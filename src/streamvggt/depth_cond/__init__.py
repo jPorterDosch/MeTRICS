@@ -16,12 +16,35 @@ from .config import (
     experiment_id,
     experiment_manifest,
 )
-from .conditioner import DepthConditioner, dpt_fusion_sizes, masked_downsample
-from .lora import LoRALinear, LoRAQKV, apply_lora, param_stats
-from .cache import EncoderFeatureCache
-from .model import MetricStreamVGGT
 from .sparse import simulate_sparse_depth
-from .utils import seed_everything
+
+# The model-side modules load on first use (PEP 562), not with the package:
+# the benchmark's scoring imports only config and sparse, and its results
+# record every file a run imports (eval.provenance.loaded_code), so an
+# eager import here would tie a baseline's results to our model's code.
+_LAZY = {
+    "DepthConditioner": "conditioner",
+    "dpt_fusion_sizes": "conditioner",
+    "masked_downsample": "conditioner",
+    "LoRALinear": "lora",
+    "LoRAQKV": "lora",
+    "apply_lora": "lora",
+    "param_stats": "lora",
+    "EncoderFeatureCache": "cache",
+    "MetricStreamVGGT": "model",
+    "seed_everything": "utils",
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        import importlib
+
+        value = getattr(importlib.import_module(f".{_LAZY[name]}", __name__), name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "DepthCondCfg",

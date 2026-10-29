@@ -493,6 +493,19 @@ marks it `"close": true` (a user decision, with the gap kept in its
 `status_note`): `benchmark --allow-close` then runs it and writes its computed
 status into the results, and `src/compare_table.py` footnotes it.
 
+**Comparable rows.** Every results file records `code_files`: a content hash
+of each repository source file the run imported, vendored baseline code
+included (`eval.provenance.loaded_code`). `compare_table.py` tables two rows
+only if every file both imported is byte-identical, so a commit that touches
+training code, launchers or another model's code does not force a rerun of
+rows scored before it. A file edited while a run was in flight makes that run
+unidentifiable. The benchmark entry points import no training code
+(`src/model_io.py` holds the model construction they share with
+`finetune_depth.py`). Rows scored before 2026-10-22 carry no `code_files` and
+fall back to an exact match of the whole-repository `commit` string. A replay
+(`benchmark --predictions`) is checked the same way against the files its
+dump recorded.
+
 ```bash
 python src/bench_baselines.py status                        # per arm: status, gating targets met
 python src/bench_baselines.py fetch --arm vda               # login node: released weights -> Lustre

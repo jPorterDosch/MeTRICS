@@ -130,23 +130,44 @@ def check_comparable(
         if r.get("failed"):
             problems.append(f"{label} has failed sequences: {len(r['failed'])}")
     # one scoring code for every row (a protocol change between runs would mix
-    # definitions), and one precision for our runs (bf16 vs fp16 autocast)
-    commits = {label: r.get("commit") for label, r in named}
-    if (
-        not all(PROV.identifiable(c) for c in commits.values())
-        or len(set(commits.values())) > 1
-    ):
-        problems.append(f"scoring code differs or is unrecorded: {commits}")
+    # definitions). With every row's code_files recorded, compared file by
+    # file: any file two rows both imported must be identical, so a commit
+    # that touched only code a run never loaded does not separate it. A row
+    # without them (scored before 2026-10-22) falls back to the whole-repo
+    # commit string, which must then match exactly.
+    files = {label: r.get("code_files") for label, r in named}
+    if all(files.values()):
+        problems += PROV.code_differences(files)
+    else:
+        commits = {label: r.get("commit") for label, r in named}
+        if (
+            not all(PROV.identifiable(c) for c in commits.values())
+            or len(set(commits.values())) > 1
+        ):
+            problems.append(f"scoring code differs or is unrecorded: {commits}")
     dtypes = {
         label: r.get("autocast_dtype") for label, r in named if "autocast_dtype" in r
     }
     if len(set(dtypes.values())) > 1:
         problems.append(f"our runs used different autocast dtypes: {dtypes}")
-    # a replayed arm's predictions must come from the scoring code too
+    # a replayed arm's predictions must come from the same code as the run
+    # that scores them: file by file where the dump recorded its files (every
+    # file both the dump and the scoring run imported identical), else by
+    # commit, or by an explicit --accept-replay ARM=COMMIT
     for label, r in named:
         pc = r.get("predictions_commit")
-        accepted = pc is not None and accept_replay.get(r.get("arm")) == pc
-        if pc is not None and pc != r.get("commit") and not accepted:
+        if pc is None:
+            continue
+        if accept_replay.get(r.get("arm")) == pc:
+            continue  # the user verified the prediction path (footnoted)
+        pfiles, sfiles = r.get("predictions_code_files"), r.get("code_files")
+        if pfiles and sfiles:
+            problems += [
+                f"{label} (dump vs scoring): {p} -- if only scoring code "
+                f"changed, --accept-replay {r.get('arm')}={pc}"
+                for p in PROV.code_differences({"dump": pfiles, "scoring": sfiles})
+            ]
+        elif pc != r.get("commit"):
             problems.append(
                 f"{label}: predictions made by code {pc}, scored by {r.get('commit')}"
             )

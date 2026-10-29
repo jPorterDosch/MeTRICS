@@ -41,7 +41,7 @@ DATASETS=${DATASETS:-sintel scannet kitti bonn_all nyuv2}
 TAE_DATASETS=${TAE_DATASETS:-sintel scannet kitti bonn_all}
 DENSITIES=${DENSITIES:-0.01 0.05 0.4}
 MAX_SEQ=${MAX_SEQ:-0}
-REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
+REPO=${REPO:-/nfs/home/jdosch1/brown-visual-computing/MeTRICS}  # a worktree for a smoke run
 ENVS=/lustre/isaac24/proj/UTK0516/metrics_data/envs_jd
 
 export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/envs/metrics/bin:$PATH
