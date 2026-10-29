@@ -10,6 +10,10 @@ holds or filters what it is fed (--experiment; default `dropout`).
   splice   two clips back to back, the second one's GT AND fed depth
            multiplied by --splice-scale (a world --splice-scale times larger:
            the images cannot tell, the sparse depth can)
+  cut      two clips back to back, both at their TRUE scale, picked so their
+           median GT depths differ (a small room into a large one, and the
+           reverse): how long until the model is as good on the second clip
+           as after a cut into it from a scene of matching depth
 
 step / sine / jitter measure the model's response against its own
 unperturbed run on the same clip, so neither GT nor its errors enter:
@@ -24,7 +28,7 @@ A persistent step is a real change of scale that the output should follow
 should not pass (passthrough std r / std u, regression gain); the sine sweep
 gives the gain and lag at each period, a Bode plot of the scale channel.
 
-Dropout and splice score against GT, as below.
+Dropout, splice and cut score against GT, as below.
 
 Each curve streams the ScanNet TAE clips of the benchmark (100 scenes x 192
 consecutive frames, the longest sequences it has) frame by frame through a
@@ -95,13 +99,23 @@ from bench_eval import (  # noqa: E402
 from eval import provenance as PROV  # noqa: E402
 from eval.protocols import gt_valid_mask  # noqa: E402
 from eval.streaming_window import stream_depth  # noqa: E402
-from eval.vda_benchmark import SPECS, load_manifest, model_to_gt  # noqa: E402
+from eval.vda_benchmark import (  # noqa: E402
+    SPECS,
+    gt_stack,
+    load_manifest,
+    model_to_gt,
+)
 from model_io import load_base_streamvggt, load_run_model  # noqa: E402
 
 DENSITY = 0.05
 DATASET = "scannet"
 DEFAULT_BASE = "/lustre/isaac24/proj/UTK0516/ckpt/checkpoints.pth"
-EXPERIMENTS = ("dropout", "step", "sine", "jitter", "splice")
+EXPERIMENTS = ("dropout", "step", "sine", "jitter", "splice", "cut")
+# cut: pairs binned by the ratio of their median GT depths, |log| edges; the
+# first bin (< x1.25) is a same-scale control, the gap to x1.5 keeps it apart
+CUT_BINS = ((1.0, 1.25), (1.5, 2.0), (2.0, 2.5), (2.5, math.inf))
+RECOVER_HOLD = 5  # cut: frames it must stay back, so one lucky frame does not count
+CUT_ROLE_CAP = 2  # cut: times one clip may lead (or follow) within one bin
 _COLORS = [
     "#2563eb",
     "#e8590c",
@@ -117,12 +131,16 @@ _COLORS = [
 @dataclass
 class Curve:
     label: str
-    source: str  # "base" or a run directory
+    source: str  # "base", "promptda", "promptda-hold" or a run directory
     drop: int | None  # first frame without sparse depth; None = always fed
 
     @property
     def is_base(self) -> bool:
         return self.source == "base"
+
+    @property
+    def is_promptda(self) -> bool:
+        return self.source in PROMPTDA_SOURCES
 
 
 def parse_curve(spec: str) -> Curve:
@@ -136,14 +154,72 @@ def parse_curve(spec: str) -> Curve:
     return Curve(label, source, int(drop) if at else None)
 
 
+# PromptDA (dropout only): a per-frame model that needs depth on every frame.
+# `promptda` gets nothing once the depth stops (no prediction: a NaN frame);
+# `promptda-hold` keeps being handed the last depth frame it had, the fallback
+# a deployment of such a model would use.
+PROMPTDA_SOURCES = ("promptda", "promptda-hold")
+
+
 def load_curve_model(curve: Curve, base_ckpt: str, device: torch.device):
     """(model, amp): the run's checkpoint-last and its own saved precision, as
-    bench_checkpoint scores it; the pretrained StreamVGGT under bf16 autocast."""
+    bench_checkpoint scores it; the pretrained StreamVGGT under bf16 autocast;
+    PromptDA's arm (its own precision, amp unused)."""
+    if curve.is_promptda:
+        from eval.baselines import arms as A
+        from eval.baselines import record as R
+
+        # through the reproduction gate, as bench_baselines builds it: PromptDA
+        # is recorded close, so it runs under --allow-close semantics, and its
+        # computed status goes into summary.json (promptda_status)
+        record = R.load()
+        arm = A.build_arm(
+            "promptda", device, [("scannet", "published")], record, allow_close=True
+        )
+        arm.parity_status = R.computed_status(
+            R.arm_entry(record, "promptda"), record["tolerance"]
+        )
+        return arm, None
     if curve.is_base:
         return load_base_streamvggt(base_ckpt).to(device), True
     # the streaming loop calls the aggregator directly, never with a cache key
     run = load_run_model(curve.source, "last", device, encoder_cache=False)
     return run.model, bool(run.raw.get("amp", 1))
+
+
+def hold_depth(depth: np.ndarray, mask: np.ndarray, drop: int | None):
+    """(depth, mask) with every frame from `drop` on replaced by frame
+    drop - 1's: the last measurement, re-used while the camera moves on."""
+    if drop is None:
+        return depth, mask
+    depth, mask = depth.copy(), mask.copy()
+    depth[drop:] = depth[drop - 1]
+    mask[drop:] = mask[drop - 1]
+    return depth, mask
+
+
+def promptda_depth(
+    arm, seq, spec, views: list[dict], gt_hw, hold_from: int | None
+) -> np.ndarray:
+    """[S, H, W] PromptDA depth on the GT grid, exactly as bench_baselines
+    benchmarks it: the manifest's native frames (read_frames; the arm does its
+    own upstream sizing), prompted with each view's sparse depth at OUR model
+    resolution (or the held one), mapped to the GT grid by register_to_gt, and
+    TF32 off for its call (the arms were verified without it; bench_eval's
+    croco import turns it on process-wide). A frame with no prompt pixel has
+    no prediction (NaN, the arm's rule)."""
+    import bench_baselines as BB
+
+    frames = BB.read_frames(seq)
+    depth, mask = _sparse_arrays(views)
+    depth, mask = hold_depth(depth, mask, hold_from)
+    tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        raw = arm.predict(frames, (depth, mask))
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+    return BB.register_to_gt(raw, seq, spec, frames.shape[1:3], tuple(gt_hw))
 
 
 def withhold_depth(views: list[dict], drop: int | None) -> None:
@@ -279,15 +355,33 @@ def jitter_stats(r: np.ndarray, u: np.ndarray, start: int) -> tuple[float, float
     return gain, float(np.std(r[ok]) / np.std(u[ok]))
 
 
+RECOVER_TOL = 0.02  # |log s| above the reference: "back"
+
+
+def frames_until_within(
+    err: np.ndarray,
+    reference: np.ndarray,
+    start: int = 0,
+    tol: float = RECOVER_TOL,
+    hold: int = 1,
+) -> int | None:
+    """Frames from `start` until err is within `tol` of `reference` for `hold`
+    frames in a row; None if it never is. The one definition of "recovered"
+    behind both splice's relock and cut's recovery."""
+    ok = np.nan_to_num(err - reference, nan=np.inf) <= tol
+    for t in range(start, len(ok) - hold + 1):
+        if ok[t : t + hold].all():
+            return t - start
+    return None
+
+
 def relock_frames(
-    err: np.ndarray, control: np.ndarray, cut: int, tol: float = 0.02
+    err: np.ndarray, control: np.ndarray, cut: int, tol: float = RECOVER_TOL
 ) -> int | None:
     """Frames after the cut until the scale error is back within `tol` of the
     same pair spliced at x1: a scene cut alone also disturbs scale, and the
     control removes that part. None if it never is."""
-    t = np.arange(len(err))
-    back = np.where((t >= cut) & (err <= control + tol))[0]
-    return None if not len(back) else int(back[0] - cut)
+    return frames_until_within(err, control, cut, tol)
 
 
 def median_scaled_absrel(
@@ -357,8 +451,17 @@ HEADERS = {
     "dropout": ["curve", "clip", "frame", "scale", "rel_log_drift", "abs_log_error"],
     "response": ["curve", "perturbation", "clip", "frame", "u", "r", "q", "r_fed"],
     "splice": ["curve", "factor", "pair", "frame", "scale", "median_scaled_absrel"],
+    "cut": [
+        "curve",
+        "pair",
+        "ratio",
+        "run",
+        "frame",
+        "scale",
+        "median_scaled_absrel",
+    ],
 }
-_TEXT = {"curve", "clip", "perturbation", "pair"}
+_TEXT = {"curve", "clip", "perturbation", "pair", "run"}
 
 
 def header_for(experiment: str) -> list[str]:
@@ -421,11 +524,21 @@ def run_dropout(args, curves, models, seqs, spec, bench, device):
             # shallow per-view copies: withhold_depth replaces tensors, never
             # writes into them, so the next curve still sees the full draw
             curve_views = [dict(v) for v in views]
-            if not curve.is_base:
-                withhold_depth(curve_views, curve.drop)
             model, amp = models[curve.label]
-            pred = stream_depth(model, curve_views, args.window, amp)
-            s = frame_scales(model_to_gt(pred, gt.shape[1:], box), gt, scored)
+            if curve.is_promptda:
+                # already on the GT grid (register_to_gt, as benchmarked)
+                hold = curve.drop if curve.source == "promptda-hold" else None
+                if curve.source == "promptda":
+                    withhold_depth(curve_views, curve.drop)
+                pred_gt = promptda_depth(
+                    model, seq, spec, curve_views, gt.shape[1:], hold
+                )
+            else:
+                if not curve.is_base:
+                    withhold_depth(curve_views, curve.drop)
+                pred = stream_depth(model, curve_views, args.window, amp)
+                pred_gt = model_to_gt(pred, gt.shape[1:], box)
+            s = frame_scales(pred_gt, gt, scored)
             r, a = drift_rows(s, args.ref_frames)
             rows += [
                 (curve.label, seq.name, i, s[i], r[i], a[i]) for i in range(len(s))
@@ -480,9 +593,40 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
             f": depth withheld from frame {drop} (solid line); no conditioned frame in "
             f"cache from {drop + args.window} (dotted)"
         )
+        if any(c.is_promptda for c in curves):
+            title += (
+                f"\nPromptDA has no cache (per frame); its hold curve keeps receiving "
+                f"frame {drop - 1}'s depth"
+            )
     ax1.set_title(title, fontsize=9)
     fig.savefig(out / "scale_drift.png", dpi=150)
     plt.close(fig)
+
+    # the curves that keep their input all clip long: on the shared axes they
+    # sit on top of each other, so they get a figure of their own, each panel
+    # on its own scale (same colours as above)
+    kept = [(k, c) for k, c in enumerate(curves) if c.drop is None and not c.is_base]
+    if len(kept) > 1:
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(9, 7), sharex=True, constrained_layout=True
+        )
+        for k, c in kept:
+            x = np.arange(rel[c.label].shape[1])
+            color = _COLORS[k % len(_COLORS)]
+            _band_line(ax1, x, rel[c.label], color, c.label)
+            _band_line(ax2, x, absol[c.label], color, c.label)
+        ax1.set_ylabel("|log(s_t / s_ref)|  (drift from own early scale)")
+        ax2.set_ylabel("|log s_t|  (metric scale error)")
+        ax2.set_xlabel("frame index")
+        for ax in (ax1, ax2):
+            _style(ax)
+        ax1.set_title(
+            "Scale drift, ScanNet TAE clips, zoomed: every curve without a "
+            "dropout (the pretrained StreamVGGT left out)",
+            fontsize=9,
+        )
+        fig.savefig(out / "scale_drift_kept.png", dpi=150)
+        plt.close(fig)
     return {
         "ref_frames": args.ref_frames,
         "curves": [
@@ -645,7 +789,8 @@ def summarize_response(args, curves, header, rows, out: Path) -> dict:
             _style(ax)
         ax1.set_title(
             f"Step response: fed depth x k from frame {args.step_at} "
-            f"(KV window {args.window}); dashed: on the fed pixels themselves",
+            f"(KV window {args.window})"
+            + ("; dashed: on the fed pixels themselves" if "r_fed" in cols else ""),
             fontsize=9,
         )
         fig.savefig(out / "scale_step.png", dpi=150)
@@ -834,11 +979,265 @@ def summarize_splice(args, curves, header, rows, out: Path, cut: int) -> dict:
     return summary
 
 
+def clip_depth(gt: np.ndarray, max_depth: float) -> float:
+    """A clip's scale: the median GT depth over its valid pixels."""
+    return float(np.median(gt[gt_valid_mask(gt, max_depth)]))
+
+
+def cut_bin(ratio: float) -> int | None:
+    """Index into CUT_BINS of a depth ratio (either direction), or None in a gap."""
+    r = math.exp(abs(math.log(ratio)))
+    for i, (lo, hi) in enumerate(CUT_BINS):
+        if lo <= r < hi:
+            return i
+    return None
+
+
+def select_cut_pairs(
+    depths: list[float], per_bin: int, seed: int, cap: int = CUT_ROLE_CAP
+) -> list[tuple[int, int, float]]:
+    """(a, b, depth_b / depth_a) clip index pairs: up to per_bin per
+    (CUT_BINS bin, direction), in a seeded random order over every ordered
+    pair of distinct clips, each clip leading at most `cap` and following at
+    most `cap` pairs of a bin -- the extreme bins are built from the few
+    smallest and largest rooms, which would otherwise fill them. Direction
+    matters (into a larger scene, into a smaller one), so both are sampled."""
+    rng = np.random.default_rng(seed)
+    cells: dict = {}
+    for i, da in enumerate(depths):
+        for j, db in enumerate(depths):
+            if i == j:
+                continue
+            b = cut_bin(db / da)
+            if b is not None:
+                cells.setdefault((b, db >= da), []).append((i, j, db / da))
+    out = []
+    for key in sorted(cells):
+        cand = cells[key]
+        lead: dict = {}
+        follow: dict = {}
+        picked = []
+        for k in rng.permutation(len(cand)):
+            i, j, r = cand[k]
+            if lead.get(i, 0) < cap and follow.get(j, 0) < cap:
+                picked.append(cand[k])
+                lead[i] = lead.get(i, 0) + 1
+                follow[j] = follow.get(j, 0) + 1
+                if len(picked) == per_bin:
+                    break
+        out += sorted(picked)
+    return out
+
+
+def matched_lead(depths: list[float], b: int, exclude: set[int]) -> int:
+    """The clip closest in median depth to clip b (not b, not `exclude`):
+    leading b with it is a scene cut without a scale change, the reference
+    each spliced pair is measured against."""
+    order = sorted(
+        (abs(math.log(d / depths[b])), i)
+        for i, d in enumerate(depths)
+        if i != b and i not in exclude
+    )
+    return order[0][1]
+
+
+def recovery_frames(
+    excess: np.ndarray, tol: float = RECOVER_TOL, hold: int = RECOVER_HOLD
+) -> int | None:
+    """Frames after the cut until the excess error (over the matched-depth
+    reference) stays within `tol` for `hold` frames; None if never."""
+    return frames_until_within(excess, np.zeros_like(excess), 0, tol, hold)
+
+
+def run_cut(args, curves, models, seqs, spec, bench, device):
+    """Clip a then clip b, both at their true scale, for pairs whose median
+    GT depths differ (select_cut_pairs); and, once per clip b, the reference
+    run m then b, m the clip closest to b in depth (matched_lead). Both runs
+    cut into b at the same stream position with the same cache size, so the
+    difference on b's frames is clip a's scale alone, not the cut itself or
+    b's frames being off the stream's first (anchor) frame."""
+    (c,) = curves
+    model, amp = models[c.label]
+    depths = [clip_depth(gt_stack(seq, spec), spec.max_depth) for seq in seqs]
+    pairs = select_cut_pairs(depths, args.cut_pairs_per_bin, bench.seed)
+    print(f"[cut] {len(pairs)} pairs from {len(seqs)} clips", flush=True)
+
+    loaded: dict = {}  # the last few clips: a pair's b is reused by its reference
+
+    def clip(k):
+        if k not in loaded:
+            if len(loaded) >= 3:
+                loaded.pop(next(iter(loaded)))
+            loaded[k] = _clip(seqs[k], spec, bench, device, tae=False)
+        return loaded[k]
+
+    def splice(i, j):
+        """(scale, structure) per frame of clip i then clip j, each clip's
+        prediction mapped onto its own GT grid."""
+        gt_i, views_i, scored_i, _, box_i = clip(i)
+        gt_j, views_j, scored_j, _, box_j = clip(j)
+        pred = stream_depth(model, views_i + views_j, args.window, amp)
+        n = len(views_i)
+        p_i = model_to_gt(pred[:n], gt_i.shape[1:], box_i)
+        p_j = model_to_gt(pred[n:], gt_j.shape[1:], box_j)
+        s = np.concatenate(
+            [frame_scales(p_i, gt_i, scored_i), frame_scales(p_j, gt_j, scored_j)]
+        )
+        st = np.concatenate(
+            [
+                median_scaled_absrel(p_i, gt_i, scored_i),
+                median_scaled_absrel(p_j, gt_j, scored_j),
+            ]
+        )
+        return s, st
+
+    rows = []
+    done_ref = set()
+    for n, (i, j, ratio) in enumerate(pairs):
+        name = f"{seqs[i].name}+{seqs[j].name}"
+        s, st = splice(i, j)
+        rows += [
+            (c.label, name, ratio, "spliced", t, s[t], st[t]) for t in range(len(s))
+        ]
+        if j not in done_ref:
+            # never one of the leads cut into j: the reference must be a
+            # different stream from every spliced run it is compared against
+            m = matched_lead(depths, j, exclude={a for a, b, _ in pairs if b == j})
+            s, st = splice(m, j)
+            ref = f"{seqs[m].name}+{seqs[j].name}"
+            rows += [
+                (
+                    c.label,
+                    ref,
+                    depths[j] / depths[m],
+                    f"ref:{seqs[j].name}",
+                    t,
+                    s[t],
+                    st[t],
+                )
+                for t in range(len(s))
+            ]
+            done_ref.add(j)
+        print(f"[cut] pair {n + 1}/{len(pairs)} {name} depth x{ratio:.2f}", flush=True)
+    return rows
+
+
+def summarize_cut(args, curves, header, rows, out: Path, cut: int) -> dict:
+    series = group(header, rows, ("curve", "pair", "run"))
+    summary = {
+        "cut_frame": cut,
+        # JSON has no infinity: the open top bin's upper edge is null
+        "bins": [[lo, hi if math.isfinite(hi) else None] for lo, hi in CUT_BINS],
+        "recover_tol": RECOVER_TOL,
+        "recover_hold": RECOVER_HOLD,
+        "curves": [],
+    }
+    fig, axes = plt.subplots(
+        2, 2, figsize=(11, 6.5), sharex=True, sharey="row", constrained_layout=True
+    )
+    fig_r, axr = plt.subplots(figsize=(7, 4), constrained_layout=True)
+    for c in curves:
+        pairs = []  # (ratio, scale excess [T], structure excess [T], recovery)
+        refs = {
+            run[len("ref:") :]: v
+            for (lab, _, run), v in series.items()
+            if lab == c.label and run.startswith("ref:")
+        }
+        for (lab, pair, run), v in series.items():
+            if lab != c.label or run != "spliced":
+                continue
+            # clip b's frames in both runs: same stream position, same cache
+            ref = refs[pair.split("+", 1)[1]]
+            ex = np.abs(np.log(v["scale"][cut:])) - np.abs(np.log(ref["scale"][cut:]))
+            ex_st = v["median_scaled_absrel"][cut:] - ref["median_scaled_absrel"][cut:]
+            pairs.append((float(v["ratio"][0]), ex, ex_st, recovery_frames(ex)))
+        entry = {"label": c.label, "bins": []}
+        for bi, (lo, hi) in enumerate(CUT_BINS):
+            for up in (True, False):
+                sel = [p for p in pairs if cut_bin(p[0]) == bi and (p[0] >= 1) == up]
+                if not sel:
+                    continue
+                ex = np.stack([p[1] for p in sel])
+                ex_st = np.stack([p[2] for p in sel])
+                rec = [p[3] for p in sel]
+                done = sorted(r for r in rec if r is not None)
+                entry["bins"].append(
+                    {
+                        "ratio": [lo, hi if math.isfinite(hi) else None],
+                        "into": "larger" if up else "smaller",
+                        "pairs": len(sel),
+                        "recovered": len(done),
+                        # median over pairs, a never-recovered pair counted as
+                        # longer than any: None once half never recover
+                        "recovery_frames_median": (
+                            done[(len(sel) - 1) // 2]
+                            if len(done) > (len(sel) - 1) // 2
+                            else None
+                        ),
+                        "scale_excess_median": band(ex)[0],
+                        "structure_excess_median": band(ex_st)[0],
+                    }
+                )
+                x = np.arange(ex.shape[1])
+                col = 0 if up else 1
+                label = f"x{lo:g}-{hi:g}" if math.isfinite(hi) else f">= x{lo:g}"
+                color = _COLORS[bi % len(_COLORS)]
+                _band_line(axes[0, col], x, ex, color, f"{label} (n={len(sel)})")
+                _band_line(axes[1, col], x, ex_st, color, label)
+        summary["curves"].append(entry)
+        for up, marker in ((True, "o"), (False, "s")):
+            sel = [p for p in pairs if (p[0] >= 1) == up]
+            xs = [math.log2(p[0]) for p in sel]
+            T = len(sel[0][1]) if sel else 0
+            ys = [T if p[3] is None else p[3] for p in sel]
+            face = ["none" if p[3] is None else None for p in sel]
+            for xv, yv, f in zip(xs, ys, face, strict=True):
+                axr.scatter(
+                    xv,
+                    yv,
+                    marker=marker,
+                    facecolors=f or ("#2563eb" if up else "#e8590c"),
+                    edgecolors="#2563eb" if up else "#e8590c",
+                    s=22,
+                )
+        axr.scatter([], [], marker="o", color="#2563eb", label="into a larger scene")
+        axr.scatter([], [], marker="s", color="#e8590c", label="into a smaller scene")
+    for row, name in (
+        (0, "|log s_t| above the matched cut"),
+        (1, "structure above the matched cut"),
+    ):
+        axes[row, 0].set_ylabel(name)
+        for col in (0, 1):
+            axes[row, col].axhline(0.0, color="#9ca3af", linewidth=1)
+            _style(axes[row, col])
+    axes[0, 0].set_title("into a larger scene (depth_b > depth_a)", fontsize=9)
+    axes[0, 1].set_title("into a smaller scene", fontsize=9)
+    for col in (0, 1):
+        axes[1, col].set_xlabel("frames since the cut")
+    fig.suptitle(
+        f"Scene cut at true scale, KV window {args.window}: excess error on the "
+        "second clip over the same clip cut into from a scene of matching depth",
+        fontsize=10,
+    )
+    fig.savefig(out / "scale_cut.png", dpi=150)
+    plt.close(fig)
+    axr.set_xlabel("log2(depth_b / depth_a)")
+    axr.set_ylabel(
+        f"frames to recover (within {RECOVER_TOL} for {RECOVER_HOLD}; open: never)"
+    )
+    _style(axr)
+    fig_r.savefig(out / "scale_cut_recovery.png", dpi=150)
+    plt.close(fig_r)
+    return summary
+
+
 def summarize(args, curves, header, rows, out: Path, cut: int | None) -> dict:
     if args.experiment == "dropout":
         return summarize_dropout(args, curves, header, rows, out)
     if args.experiment == "splice":
         return summarize_splice(args, curves, header, rows, out, cut)
+    if args.experiment == "cut":
+        return summarize_cut(args, curves, header, rows, out, cut)
     return summarize_response(args, curves, header, rows, out)
 
 
@@ -851,6 +1250,12 @@ def validate(args, curves, clip_len: int) -> None:
         raise ValueError("--window and --ref-frames must be >= 1")
     if args.experiment != "dropout" and any(c.drop is not None for c in curves):
         raise ValueError("@DROP only applies to --experiment dropout")
+    if args.experiment != "dropout" and any(c.is_promptda for c in curves):
+        # its output is network(prompt / range) * range: a scaled prompt gives
+        # an exactly scaled output, so step / sine / jitter only restate that
+        raise ValueError("PromptDA curves only apply to --experiment dropout")
+    if any(c.source == "promptda-hold" and c.drop is None for c in curves):
+        raise ValueError("promptda-hold needs @DROP: the frame it starts holding from")
     if args.experiment in ("step", "sine", "jitter") and any(c.is_base for c in curves):
         raise ValueError(
             f"--experiment {args.experiment}: `base` takes no depth to perturb"
@@ -889,6 +1294,13 @@ def validate(args, curves, clip_len: int) -> None:
         args.splice_scale > 0 and args.splice_scale != 1
     ):
         raise ValueError("splice needs --splice-scale > 0 and != 1 (x1 is its control)")
+    if args.experiment == "cut":
+        if len(curves) != 1:
+            raise ValueError("cut takes one --curve (its figures are per model)")
+        if any(c.is_base for c in curves):
+            raise ValueError("cut scores metric scale: `base` has none")
+        if args.cut_pairs_per_bin < 1:
+            raise ValueError("--cut-pairs-per-bin must be >= 1")
 
 
 def replot(args) -> None:
@@ -952,6 +1364,12 @@ def main() -> None:
         "--jitter-sigma", type=float, default=0.1, help="std of the log factor"
     )
     ap.add_argument("--splice-scale", type=float, default=2.0)
+    ap.add_argument(
+        "--cut-pairs-per-bin",
+        type=int,
+        default=12,
+        help="cut: pairs per (depth-ratio bin, direction)",
+    )
     ap.add_argument("--base-ckpt", default=DEFAULT_BASE)
     ap.add_argument("--max-clips", type=int, default=0, help="0 = all")
     args = ap.parse_args()
@@ -970,12 +1388,12 @@ def main() -> None:
     # dropout / step / sine / jitter: the 192-frame TAE clips; splice: the
     # 90-frame main clips, two to a stream
     seqs = load_manifest(
-        bench.root, spec, tae=args.experiment != "splice", tae_slice=False
+        bench.root, spec, tae=args.experiment not in ("splice", "cut"), tae_slice=False
     )
     if args.max_clips:
         seqs = seqs[: args.max_clips]
-    if args.experiment == "splice" and len(seqs) < 2:
-        raise ValueError("splice needs at least two clips")
+    if args.experiment in ("splice", "cut") and len(seqs) < 2:
+        raise ValueError(f"{args.experiment} needs at least two clips")
     lengths = {len(seq) for seq in seqs}
     if len(lengths) != 1:
         raise ValueError(
@@ -993,10 +1411,14 @@ def main() -> None:
     # one copy per checkpoint: two curves of one run share it
     loaded = {}
     for c in curves:
-        if c.source not in loaded:
-            loaded[c.source] = load_curve_model(c, args.base_ckpt, device)
-    models = {c.label: loaded[c.source] for c in curves}
-    runner = {"dropout": run_dropout, "splice": run_splice}.get(
+        # one copy per model: both PromptDA sources share one arm
+        key = "promptda" if c.is_promptda else c.source
+        if key not in loaded:
+            loaded[key] = load_curve_model(c, args.base_ckpt, device)
+    models = {
+        c.label: loaded["promptda" if c.is_promptda else c.source] for c in curves
+    }
+    runner = {"dropout": run_dropout, "splice": run_splice, "cut": run_cut}.get(
         args.experiment, run_response
     )
     rows = runner(args, curves, models, seqs, spec, bench, device)
@@ -1014,11 +1436,16 @@ def main() -> None:
         "settings": {
             k: v for k, v in vars(args).items() if k not in ("curve", "out", "replot")
         },
-        "cut_frame": clip_len if args.experiment == "splice" else None,
+        "cut_frame": clip_len if args.experiment in ("splice", "cut") else None,
         "curve_specs": [vars(c) for c in curves],
         "commit": PROV.code_fingerprint(),
         "code_files": PROV.loaded_code(),
         "job_id": os.environ.get("SLURM_JOB_ID", "none"),
+        # PromptDA runs under --allow-close semantics: its parity status, as
+        # bench_baselines stamps it into a benchmark's results
+        "promptda_status": getattr(
+            loaded.get("promptda", (None,))[0], "parity_status", None
+        ),
     }
 
     def write_summary(extra: dict) -> None:

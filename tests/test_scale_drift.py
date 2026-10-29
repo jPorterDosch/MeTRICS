@@ -325,3 +325,111 @@ def test_jitter_summary_skips_a_clip_without_scored_pixels(tmp_path) -> None:
     (entry,) = summary["curves"]
     assert abs(entry["gain_median"] - 0.5) < 1e-9
     assert abs(entry["gain_median_fed"] - 1.0) < 1e-9
+
+
+def test_cut_bins_and_pair_selection() -> None:
+    assert SD.cut_bin(1.1) == 0 and SD.cut_bin(1 / 1.1) == 0
+    assert SD.cut_bin(1.4) is None  # the gap keeps the control apart
+    assert SD.cut_bin(1.8) == 1 and SD.cut_bin(1 / 2.2) == 2 and SD.cut_bin(4.0) == 3
+    depths = [1.0, 1.1, 1.7, 2.2, 3.0]
+    pairs = SD.select_cut_pairs(depths, per_bin=1, seed=0)
+    cells = {(SD.cut_bin(r), r >= 1) for _, _, r in pairs}
+    assert len(cells) == len(pairs)  # at most one per (bin, direction)
+    for i, j, r in pairs:
+        assert i != j and abs(r - depths[j] / depths[i]) < 1e-12
+    assert pairs == SD.select_cut_pairs(depths, per_bin=1, seed=0)  # seeded
+    # the cap: one tiny room cannot lead every "into larger" pair of a bin
+    depths = [0.5] + [2.0 + 0.01 * k for k in range(10)]
+    pairs = SD.select_cut_pairs(depths, per_bin=8, seed=0, cap=2)
+    big_up = [p for p in pairs if SD.cut_bin(p[2]) == 3 and p[2] >= 1]
+    assert big_up and sum(1 for i, _, _ in big_up if i == 0) <= 2
+    assert SD.matched_lead([1.0, 1.9, 2.05, 3.0], 1, exclude=set()) == 2
+
+
+def test_frames_until_within_is_shared_by_relock_and_recovery() -> None:
+    err = np.array([0.0, 0.0, 0.5, 0.3, 0.045, 0.04])
+    assert SD.frames_until_within(err, np.full(6, 0.03), start=2) == 2
+    assert SD.relock_frames(err, np.full(6, 0.03), 2) == 2
+
+
+def test_recovery_needs_a_held_stretch() -> None:
+    ex = np.array([0.5, 0.3, 0.01, 0.5, 0.01, 0.01, 0.01, 0.01, 0.01, 0.3])
+    assert SD.recovery_frames(ex, tol=0.02, hold=5) == 4  # not the lone frame 2
+    assert SD.recovery_frames(np.full(10, 0.1), tol=0.02, hold=5) is None
+
+
+def test_cut_summary_measures_excess_over_clip_b_alone(tmp_path) -> None:
+    import argparse
+
+    cut, T = 10, 10
+    args = argparse.Namespace(experiment="cut", window=5)
+    rows = []
+    for pair, ratio in (("a+b", 2.2), ("b+a", 1 / 2.2), ("c+d", 1.1)):
+        # spliced: clip b starts 0.3 off and decays to b's own 0.05 by frame 4
+        b_err = np.r_[0.3, 0.2, 0.1, 0.06, np.full(T - 4, 0.05)]
+        spliced = np.r_[np.full(cut, 0.05), b_err]
+        rows += [
+            ("Ours", pair, ratio, "spliced", t, np.exp(spliced[t]), 0.02)
+            for t in range(cut + T)
+        ]
+        # the matched-depth reference into the same clip b: 0.05 throughout
+        b = pair.split("+")[1]
+        rows += [
+            ("Ours", f"m+{b}", 1.0, f"ref:{b}", t, np.exp(0.05), 0.02)
+            for t in range(cut + T)
+        ]
+    summary = SD.summarize_cut(
+        args,
+        [SD.parse_curve("Ours=/runs/x")],
+        SD.header_for("cut"),
+        rows,
+        tmp_path,
+        cut,
+    )
+    bins = summary["curves"][0]["bins"]
+    assert sorted((tuple(b["ratio"]), b["into"], b["pairs"]) for b in bins) == [
+        ((1.0, 1.25), "larger", 1),
+        ((2.0, 2.5), "larger", 1),
+        ((2.0, 2.5), "smaller", 1),
+    ]
+    assert all(b["recovery_frames_median"] == 3 for b in bins)
+    assert (tmp_path / "scale_cut.png").exists()
+    assert (tmp_path / "scale_cut_recovery.png").exists()
+
+
+def test_hold_depth_repeats_the_last_measured_frame() -> None:
+    depth = np.arange(5, dtype=np.float32)[:, None, None] * np.ones(
+        (5, 2, 2), np.float32
+    )
+    mask = np.ones((5, 2, 2), bool)
+    d, m = SD.hold_depth(depth, mask, 2)
+    assert np.allclose(d[:, 0, 0], [0, 1, 1, 1, 1]) and m.all()
+    assert np.allclose(depth[:, 0, 0], [0, 1, 2, 3, 4])  # input untouched
+    d, _ = SD.hold_depth(depth, mask, None)
+    assert d is depth
+
+
+def test_promptda_curves_are_dropout_only() -> None:
+    import argparse
+
+    base = dict(
+        experiment="dropout",
+        window=20,
+        ref_frames=20,
+        dropout_at=20,
+        step_at=40,
+        step_factor=[1.25],
+        sine_amplitude=1.2,
+        sine_periods=[8.0],
+        jitter_sigma=0.1,
+        splice_scale=2.0,
+        cut_pairs_per_bin=1,
+    )
+    ok = [SD.parse_curve("P=promptda"), SD.parse_curve("H=promptda-hold@20")]
+    SD.validate(argparse.Namespace(**base), ok, 192)
+    for change, curves in (
+        ({"experiment": "step", "dropout_at": None}, [SD.parse_curve("P=promptda")]),
+        ({}, [SD.parse_curve("H=promptda-hold")]),  # hold needs a drop frame
+    ):
+        with pytest.raises(ValueError):
+            SD.validate(argparse.Namespace(**{**base, **change}), curves, 192)

@@ -31,6 +31,7 @@
 #   EXPERIMENT=sine   sbatch ...          # periods 4..64, +-20%
 #   EXPERIMENT=jitter sbatch ...          # sigma 0.1 per-frame log noise
 #   EXPERIMENT=splice sbatch ...          # two clips, the second world x2
+#   EXPERIMENT=cut    sbatch ...          # two clips at true scale, depths differing
 #   MAX_CLIPS=2 sbatch -p ai-tenn-debug -q ai-tenn-debug --gres=gpu:h100:1 --time=01:00:00 ...   # smoke
 #
 # A40 / H100 only: our model was benchmarked in bf16.
@@ -52,12 +53,20 @@ case "$EXPERIMENT" in
     *) TAG=$EXPERIMENT ;;
 esac
 # a smoke or an EXTRA variant must not land in (or block) the full run's dir
+if [ "${PROMPTDA:-0}" = 1 ]; then
+    # PromptDA curves exist for dropout only (scale_drift.py rejects them elsewhere)
+    [ "$EXPERIMENT" = dropout ] || { echo "[fatal] PROMPTDA=1 only applies to EXPERIMENT=dropout" >&2; exit 1; }
+    TAG=${TAG}_promptda
+fi
 [ "$MAX_CLIPS" != 0 ] && TAG=${TAG}_clips${MAX_CLIPS}
 [ -n "$EXTRA" ] && TAG=${TAG}_$(printf '%s' "$EXTRA" | tr -cs 'A-Za-z0-9.' '_' | sed 's/^_//;s/_$//')
 OUT=${OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/scale_drift/$(basename "$RUN")_${TAG}_w${WINDOW}}
 
 export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/envs/metrics/bin:$PATH
 export LD_LIBRARY_PATH=/nfs/home/jdosch1/.local/lib:${LD_LIBRARY_PATH:-}  # libbz2 shim
+# the baseline arms' extra dependencies (PromptDA curves), as experiments/baselines/benchmark.sh
+export PYTHONPATH="/lustre/isaac24/proj/UTK0516/metrics_data/envs_jd/baselines_pydeps${PYTHONPATH:+:$PYTHONPATH}"
+export HF_HUB_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
 
@@ -69,16 +78,24 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 echo "[drift] REPO=$REPO HEAD=$(git -C "$REPO" rev-parse --short HEAD) dirty=$(git -C "$REPO" status --porcelain -- src | wc -l)"
 cd "$REPO/src"
 COMMON=(--out "$OUT" --window "$WINDOW" --max-clips "$MAX_CLIPS")
+# PROMPTDA=1 (dropout): PromptDA fed every frame, and holding its last depth frame
+PROMPTDA_CURVES=()
+if [ "${PROMPTDA:-0}" = 1 ]; then
+    PROMPTDA_CURVES=(--curve "PromptDA (fed)=promptda" --curve "PromptDA (hold @${DROP})=promptda-hold@$DROP")
+fi
 # shellcheck disable=SC2086
 case "$EXPERIMENT" in
     dropout)
         python scale_drift.py "${COMMON[@]}" --ref-frames "$DROP" --dropout-at "$DROP" \
             --curve "StreamVGGT=base" \
             --curve "Ours (dropout @${DROP})=$RUN@$DROP" \
-            --curve "Ours (fed)=$RUN" $EXTRA ;;
+            --curve "Ours (fed)=$RUN" "${PROMPTDA_CURVES[@]}" $EXTRA ;;
     splice)
         python scale_drift.py "${COMMON[@]}" --experiment splice \
             --curve "StreamVGGT=base" --curve "Ours=$RUN" $EXTRA ;;
+    cut)
+        python scale_drift.py "${COMMON[@]}" --experiment cut \
+            --curve "Ours=$RUN" $EXTRA ;;
     step|sine|jitter)
         python scale_drift.py "${COMMON[@]}" --experiment "$EXPERIMENT" \
             --curve "Ours=$RUN" $EXTRA ;;
