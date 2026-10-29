@@ -77,7 +77,8 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 if [ "$ARM" = infinite_vggt ] || [ "$ARM" = ovggt ]; then
     # the forks run on StreamVGGT's released weights, linked from our copy:
     # make sure it is that file (lch01/StreamVGGT checkpoints.pth)
-    W=/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd/baselines/$ARM/checkpoints.pth
+    # the root arms.WEIGHTS_ROOT resolves, so the file checked is the file loaded
+    W=${BASELINE_WEIGHTS:-/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd/baselines}/$ARM/checkpoints.pth
     SHA=3d3d914d09609fdb485e16947c4885cca0e5ea4e5557598a3b3ffb1cfe0a2f59
     [ "$(sha256sum "$W" | cut -d' ' -f1)" = "$SHA" ] || { echo "[fatal] $W is not lch01/StreamVGGT checkpoints.pth" >&2; exit 1; }
 fi

@@ -251,14 +251,13 @@ class TestGate(unittest.TestCase):
         rec = R.load()
         for arm in ("infinite_vggt", "ovggt"):
             entry = R.arm_entry(rec, arm)
-            self.assertEqual(R.computed_status(entry, rec["tolerance"]), R.PENDING)
+            # reproduced 2026-10-27 (jobs 6485945, 6485902)
+            self.assertEqual(R.computed_status(entry, rec["tolerance"]), R.VERIFIED)
             for t in R.runnable_targets(entry):
                 self.assertEqual(BB.runner_for(t["dataset"]), "cut3r")
                 self.assertEqual(t["protocol"], "cut3r_scale")
-            uses = sorted(R.paper_uses(entry))
-            R.require_allowed(rec, arm, uses)  # their own paper: open
-            with self.assertRaises(R.GateError):  # anything else: closed
-                R.require_allowed(rec, arm, [("scannet", "published")])
+            # verified: our benchmark protocols open, without --allow-close
+            R.require_allowed(rec, arm, [("scannet", "published"), ("scannet", "tae")])
 
 
 if __name__ == "__main__":

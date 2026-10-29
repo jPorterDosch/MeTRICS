@@ -677,7 +677,10 @@ def benchmark(args) -> None:
     # the whole process (croco/models/croco.py). The arms were verified in
     # `reproduce`, which never imports it, so they run without TF32 here too:
     # otherwise an arm's numbers would depend on the GPU (Ampere+ only) and
-    # differ from the verified path
+    # differ from the verified path. The StreamVGGT-cache arms (infinite_vggt,
+    # ovggt) switch TF32 on inside their own predict(), as their upstream
+    # launch.py does and as they were verified, so their rows assume an
+    # Ampere+ GPU
     torch.backends.cuda.matmul.allow_tf32 = False
     if REQUIRE_CUDA and torch.device(args.device).type != "cuda":
         # the sparse draws (torch.rand under a fixed seed) differ between CPU
@@ -734,21 +737,13 @@ def benchmark(args) -> None:
         # the sparse-fit copy at OUR model resolution covers what our model
         # saw: the whole frame for an uncropped manifest, else the GT region
         native = resize_to_gt(raw if seq.rgb_uncropped else at_gt, native_hw)
-        output = arm.info.output
-        if not arm.info.metric:
-            # depth up to scale: handed over as the disparity every protocol
-            # would compute from it (as_disparity, after the same resize), so
-            # score_sequence leaves `metric` empty instead of scoring an
-            # arbitrary scale
-            at_gt, native = P.depth_to_disparity(at_gt), P.depth_to_disparity(native)
-            output = "disparity"
         S = len(raw)
         return BE.Prediction(
             native,
             np.zeros_like(native),
             np.full((S, 3, 4), np.nan),
             np.full((S, 3, 3), np.nan),
-            output=output,
+            output=arm.info.output,
             at_gt=at_gt,
         )
 
@@ -793,6 +788,11 @@ def benchmark(args) -> None:
                 row, aligned = BE.score_sequence(
                     spec, seq, gt, views, pred, mode, density, realized
                 )
+                if not arm.info.metric:
+                    # depth up to scale: scored as depth, the path our own
+                    # (depth-output) model takes, incl. the sparse fit's
+                    # `depth > 0` guard; only its arbitrary scale is not scored
+                    row["metric"] = P.EMPTY.as_dict()
                 rows.append(row)
                 if main_tae:
                     tae_rows.append(
