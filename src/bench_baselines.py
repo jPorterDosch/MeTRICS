@@ -47,6 +47,7 @@ from PIL import Image
 from PIL.ImageOps import exif_transpose
 
 from eval import arkit_upsampling as ARKIT
+from eval import cut3r_video_paper as CUT3R
 from eval import da_metric_paper as DAM
 from eval import marigold_paper as MG
 from eval import ovda_paper as OVDA
@@ -120,7 +121,7 @@ def score_main(arm, pred_gt: np.ndarray, gt: np.ndarray, keys: set) -> dict:
                 P.as_disparity(pred_gt, arm.info.output), gt, max_depth
             )
         elif protocol == "metric":
-            if arm.info.output != "depth":
+            if arm.info.output != "depth" or not arm.info.metric:
                 raise ValueError(f"{arm.info.name} is not metric: no `metric` protocol")
             m = P.metric_metrics(pred_gt, gt, max_depth)
         else:
@@ -334,6 +335,63 @@ def run_marigold(
     return measured, rows
 
 
+def run_cut3r_paper(
+    arm,
+    dataset: str,
+    targets: list[dict],
+    max_sequences: int,
+    longest: dict[str, int],
+    cache: dict,
+) -> tuple[dict[str, float], list[dict]]:
+    """InfiniteVGGT's / OVGGT's long video-depth tables with CUT3R's scoring
+    (eval/cut3r_video_paper.py): TTT3R's frame selection, per-sequence scale
+    fit in depth, pixel-weighted totals.
+
+    Every length N of one kind selects a PREFIX of the same frames (Bonn from
+    frame 30, KITTI from the first annotated frame), and the arms are causal:
+    each sequence is predicted once, at the kind's longest N in `longest`,
+    kept in `cache` and sliced for the shorter ones -- the prediction for
+    frame t never depends on frames after it."""
+    if arm.info.output != "depth" or not arm.info.causal:
+        raise ValueError(f"{arm.info.name}: the CUT3R protocol needs causal depth")
+    bad = sorted({t["protocol"] for t in targets} - set(CUT3R.PROTOCOLS))
+    if bad:
+        raise ValueError(f"{dataset}: protocols {bad} are not scored by this runner")
+    kind, _ = CUT3R.parse(dataset)
+    seqs = CUT3R.sequences(dataset)
+    full = {s.name: s for s in CUT3R.sequences(f"ttt3r_{kind}_{longest[kind]}")}
+    if max_sequences:
+        seqs = seqs[:max_sequences]
+    rows, per_seq = [], []
+    for seq in seqs:
+        gt = CUT3R.read_gt(dataset, seq)
+        key = (arm.info.name, kind, seq.name)
+        if key not in cache:
+            long_seq = full[seq.name]
+            if long_seq.images[: len(seq.images)] != seq.images:
+                raise ValueError(f"{dataset}/{seq.name}: not a prefix of the longest")
+            frames = CUT3R.read_frames(long_seq)
+            cache[key] = arm.predict(frames)
+            if len(cache[key]) != len(frames):
+                raise ValueError(
+                    f"{arm.info.name} returned {len(cache[key])} frames for {len(frames)}"
+                )
+            del frames
+        pred = cache[key][: len(seq.images)]
+        m = CUT3R.evaluate(pred, gt, dataset)
+        per_seq.append(m)
+        rows.append(
+            {"dataset": dataset, "sequence": seq.name, "frames": len(pred), **m}
+        )
+        del gt, pred
+        print(
+            f"[repro] {arm.info.name} {dataset}/{seq.name}: {rows[-1]['frames']} frames",
+            flush=True,
+        )
+    summary = CUT3R.summarize(per_seq)
+    return {t["id"]: summary[t["metric"]] for t in targets}, rows
+
+
 def _commit() -> str:
     """eval.provenance.code_fingerprint: HEAD plus a hash of uncommitted
     code, the record excluded (two runs with the same string ran the same
@@ -354,12 +412,14 @@ def runner_for(dataset: str) -> str:
         return "da_metric"
     if dataset in MG.DATASETS:
         return "marigold"
+    if dataset in CUT3R.DATASETS:
+        return "cut3r"
     if dataset in SPECS:
         return "video"
     raise SystemExit(f"no reproduction runner for dataset {dataset!r}")
 
 
-RUNNERS = ("arkit", "ovda", "da_metric", "marigold", "video")
+RUNNERS = ("arkit", "ovda", "da_metric", "marigold", "cut3r", "video")
 
 
 def _group_by_runner(targets: list[dict]) -> dict[str, list[dict]]:
@@ -390,6 +450,12 @@ def reproduce(args) -> None:
 
     measured: dict[str, float] = {}
     rows: list[dict] = []
+    # cut3r: one prediction per sequence at the longest length of its kind
+    cut3r_longest: dict[str, int] = {}
+    for t in by_runner["cut3r"]:
+        kind, n = CUT3R.parse(t["dataset"])
+        cut3r_longest[kind] = max(n, cut3r_longest.get(kind, 0))
+    cut3r_cache: dict = {}
     if by_runner["arkit"]:  # one prediction per frame serves every size
         m, r = run_arkit(arm, by_runner["arkit"], args.arkit_root, args.max_sequences)
         measured.update(m)
@@ -398,6 +464,9 @@ def reproduce(args) -> None:
         "ovda": lambda ds, ts: run_ovda_paper(arm, ds, ts, args.max_sequences),
         "da_metric": lambda ds, ts: run_da_metric(arm, ds, ts, args.max_sequences),
         "marigold": lambda ds, ts: run_marigold(arm, ds, ts, args.max_sequences),
+        "cut3r": lambda ds, ts: run_cut3r_paper(
+            arm, ds, ts, args.max_sequences, cut3r_longest, cut3r_cache
+        ),
         "video": lambda ds, ts: run_video_dataset(
             arm, ds, ts, args.bench_root, args.max_sequences
         ),
@@ -571,7 +640,13 @@ class CachedArm:
         with open(root / "arm.json") as f:
             meta = json.load(f)
         self.info = A.ArmInfo(
-            meta["name"], meta["output"], meta["causal"], meta["prompted"]
+            meta["name"],
+            meta["output"],
+            meta["causal"],
+            meta["prompted"],
+            meta.get(
+                "metric", True
+            ),  # dumps before 2026-10-26: all metric-or-disparity
         )
         # the code that PRODUCED the predictions (the scoring run's own commit
         # is recorded separately); code_files only in dumps from 2026-10-22 on
@@ -602,7 +677,10 @@ def benchmark(args) -> None:
     # the whole process (croco/models/croco.py). The arms were verified in
     # `reproduce`, which never imports it, so they run without TF32 here too:
     # otherwise an arm's numbers would depend on the GPU (Ampere+ only) and
-    # differ from the verified path
+    # differ from the verified path. The StreamVGGT-cache arms (infinite_vggt,
+    # ovggt) switch TF32 on inside their own predict(), as their upstream
+    # launch.py does and as they were verified, so their rows assume an
+    # Ampere+ GPU
     torch.backends.cuda.matmul.allow_tf32 = False
     if REQUIRE_CUDA and torch.device(args.device).type != "cuda":
         # the sparse draws (torch.rand under a fixed seed) differ between CPU
@@ -710,6 +788,11 @@ def benchmark(args) -> None:
                 row, aligned = BE.score_sequence(
                     spec, seq, gt, views, pred, mode, density, realized
                 )
+                if not arm.info.metric:
+                    # depth up to scale: scored as depth, the path our own
+                    # (depth-output) model takes, incl. the sparse fit's
+                    # `depth > 0` guard; only its arbitrary scale is not scored
+                    row["metric"] = P.EMPTY.as_dict()
                 rows.append(row)
                 if main_tae:
                     tae_rows.append(
