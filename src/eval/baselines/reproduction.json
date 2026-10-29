@@ -1184,6 +1184,338 @@
           "host": "clrv1201"
         }
       ]
+    },
+    "infinite_vggt": {
+      "name": "InfiniteVGGT (StreamVGGT + rolling diversity-pruned KV memory)",
+      "paper": "arXiv:2601.02281",
+      "code": {
+        "repo": "https://github.com/AutoLab-SAI-SJTU/InfiniteVGGT",
+        "commit": "7f9a5a26c2e2f9603151d1dcc61fd402ef3f6a27"
+      },
+      "weights": {
+        "hf_repo": "lch01/StreamVGGT",
+        "file": "checkpoints.pth",
+        "license": "StreamVGGT's (code Apache-2.0); training-free on StreamVGGT weights"
+      },
+      "settings": "CUT3R's video-depth evaluation as both forks ship it (src/eval/video_depth/{launch.py, eval_depth.py, tools.py}; src/eval/cut3r_video_paper.py): frames as TTT3R's long_prepare_{bonn,kitti}.py select them -- Bonn: the five sequences balloon2, crowd2, crowd3, person_tracking2, synchronous, RGB and depth each sorted and sliced [30:30+N] (shorter sequences keep what exists: synchronous has 302 frames after 30), paired by index; KITTI: the first N annotated frames of the 13 `val` drives, image_02, no crop. Input: load_images_for_eval(size=518, crop=False). Scoring: prediction INTER_CUBIC to GT, per-sequence scale-only IRLS fit in depth (tools.depth_evaluation align_with_scale), Bonn GT/5000 max_depth 70, KITTI GT/256 no cap, metrics weighted by valid pixels over sequences. ASSUMED: scale-only alignment -- the paper names none; both repos' run.sh pass --align scale. Model defaults: total_budget 1,200,000 tokens, first frame kept as anchor; fp16 autocast (its loss_of_one_batch). ASSUMED for KITTI as well: the shipped eval_depth.py has no long-KITTI branch (it matches only `kitti`, reading CUT3R's groundtruth_depth_gathered); the long-KITTI targets are scored with that branch's settings (no depth cap, GT > 0, /256) on TTT3R's groundtruth_depth_gathered_N frames.",
+      "status": "verified",
+      "status_note": "Verified 2026-10-27 at code 3301f0a+e7bc6acd (job 6485945): 8 of 8 gating targets on the CUT3R / TTT3R long video-depth protocol (src/eval/cut3r_video_paper.py), e.g. Bonn-500 AbsRel 0.0698 (paper 0.069). Paper Sec. on Bonn: 'continuous sequences ranging from 200 to 500 frames, beginning after the initial 30 frames like TTT3R'.",
+      "reference_only": [
+        {
+          "source": "OVGGT paper (arXiv:2603.05959) Table 3, row InfiniteVGGT",
+          "values": {
+            "bonn 100/300/500 AbsRel": "0.056 / 0.073 / 0.070",
+            "bonn delta1": "0.975 / 0.957 / 0.960",
+            "kitti 100/300/500 AbsRel": "0.165 / 0.249 / 0.257",
+            "kitti delta1": "0.742 / 0.556 / 0.577"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "id": "t3_bonn200_absrel",
+          "source": "Table 3, row InfiniteVGGT, input 200, Bonn, Abs Rel",
+          "published": "0.063",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_200",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.06405919911418588,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn200_delta1",
+          "source": "Table 3, row InfiniteVGGT, input 200, Bonn, delta<1.25",
+          "published": "0.964",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_200",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9650398116572303,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn300_absrel",
+          "source": "Table 3, row InfiniteVGGT, input 300, Bonn, Abs Rel",
+          "published": "0.072",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_300",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.07309432630222634,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn300_delta1",
+          "source": "Table 3, row InfiniteVGGT, input 300, Bonn, delta<1.25",
+          "published": "0.958",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_300",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9571614800872189,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn400_absrel",
+          "source": "Table 3, row InfiniteVGGT, input 400, Bonn, Abs Rel",
+          "published": "0.070",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_400",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.07164003662896204,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn400_delta1",
+          "source": "Table 3, row InfiniteVGGT, input 400, Bonn, delta<1.25",
+          "published": "0.958",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_400",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9584615578720113,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn500_absrel",
+          "source": "Table 3, row InfiniteVGGT, input 500, Bonn, Abs Rel",
+          "published": "0.069",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_500",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.06982814983018461,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn500_delta1",
+          "source": "Table 3, row InfiniteVGGT, input 500, Bonn, delta<1.25",
+          "published": "0.960",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_500",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.960013433456653,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        }
+      ],
+      "runs": [
+        {
+          "date": "2026-10-27T02:07:49",
+          "commit": "3301f0a+e7bc6acd",
+          "job_id": "6485945",
+          "host": "ilpa1209"
+        }
+      ]
+    },
+    "ovggt": {
+      "name": "OVGGT (StreamVGGT + constant-cost cache with anchors)",
+      "paper": "arXiv:2603.05959",
+      "code": {
+        "repo": "https://github.com/VAISR/OVGGT",
+        "commit": "43304e42ba823fc1622799154fc07597b66a1389"
+      },
+      "weights": {
+        "hf_repo": "lch01/StreamVGGT",
+        "file": "checkpoints.pth",
+        "license": "CC-BY-NC-SA-4.0 (LICENSE.txt: StreamVGGT's)"
+      },
+      "settings": "CUT3R's video-depth evaluation as both forks ship it (src/eval/video_depth/{launch.py, eval_depth.py, tools.py}; src/eval/cut3r_video_paper.py): frames as TTT3R's long_prepare_{bonn,kitti}.py select them -- Bonn: the five sequences balloon2, crowd2, crowd3, person_tracking2, synchronous, RGB and depth each sorted and sliced [30:30+N] (shorter sequences keep what exists: synchronous has 302 frames after 30), paired by index; KITTI: the first N annotated frames of the 13 `val` drives, image_02, no crop. Input: load_images_for_eval(size=518, crop=False). Scoring: prediction INTER_CUBIC to GT, per-sequence scale-only IRLS fit in depth (tools.depth_evaluation align_with_scale), Bonn GT/5000 max_depth 70, KITTI GT/256 no cap, metrics weighted by valid pixels over sequences. ASSUMED: scale-only alignment -- the paper names none; both repos' run.sh pass --align scale. Model defaults: total_budget 200,000 tokens, first frame kept as global anchor, history anchors (coverage, interval 250, min 100, max 3); bf16 autocast on compute capability >= 8, else fp16 (its loss_of_one_batch). ASSUMED for KITTI as well: the shipped eval_depth.py has no long-KITTI branch (it matches only `kitti`, reading CUT3R's groundtruth_depth_gathered); the long-KITTI targets are scored with that branch's settings (no depth cap, GT > 0, /256) on TTT3R's groundtruth_depth_gathered_N frames.",
+      "status": "verified",
+      "status_note": "Verified 2026-10-27 at code 3301f0a+e7bc6acd (job 6485902): 12 of 12 gating targets on the CUT3R / TTT3R long video-depth protocol (src/eval/cut3r_video_paper.py), e.g. Bonn-500 AbsRel 0.0669 (paper 0.067), KITTI-500 AbsRel 0.1352 (paper 0.135).",
+      "reference_only": [
+        {
+          "source": "OVGGT paper Table 3, row StreamVGGT (OOM beyond 100 frames there)",
+          "values": {
+            "bonn 100 AbsRel / delta1": "0.055 / 0.974",
+            "kitti 100 AbsRel / delta1": "0.166 / 0.740"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "id": "t3_bonn100_absrel",
+          "source": "Table 3, row Ours (OVGGT), Bonn, length 100, Abs Rel",
+          "published": "0.055",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_100",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.05514865817184051,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn100_delta1",
+          "source": "Table 3, row Ours (OVGGT), Bonn, length 100, delta<1.25",
+          "published": "0.974",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_100",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9742694456269239,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn300_absrel",
+          "source": "Table 3, row Ours (OVGGT), Bonn, length 300, Abs Rel",
+          "published": "0.071",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_300",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.07099012945898711,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn300_delta1",
+          "source": "Table 3, row Ours (OVGGT), Bonn, length 300, delta<1.25",
+          "published": "0.956",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_300",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9558936928664405,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn500_absrel",
+          "source": "Table 3, row Ours (OVGGT), Bonn, length 500, Abs Rel",
+          "published": "0.067",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_500",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.06692336075747136,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_bonn500_delta1",
+          "source": "Table 3, row Ours (OVGGT), Bonn, length 500, delta<1.25",
+          "published": "0.959",
+          "scale": 1,
+          "dataset": "ttt3r_bonn_500",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.9585221287276433,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_kitti100_absrel",
+          "source": "Table 3, row Ours (OVGGT), KITTI, length 100, Abs Rel",
+          "published": "0.128",
+          "scale": 1,
+          "dataset": "ttt3r_kitti_100",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.1271625357118633,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_kitti100_delta1",
+          "source": "Table 3, row Ours (OVGGT), KITTI, length 100, delta<1.25",
+          "published": "0.839",
+          "scale": 1,
+          "dataset": "ttt3r_kitti_100",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.8398627513983391,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_kitti300_absrel",
+          "source": "Table 3, row Ours (OVGGT), KITTI, length 300, Abs Rel",
+          "published": "0.133",
+          "scale": 1,
+          "dataset": "ttt3r_kitti_300",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.1335215820937917,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_kitti300_delta1",
+          "source": "Table 3, row Ours (OVGGT), KITTI, length 300, delta<1.25",
+          "published": "0.844",
+          "scale": 1,
+          "dataset": "ttt3r_kitti_300",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.8435068564660243,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_kitti500_absrel",
+          "source": "Table 3, row Ours (OVGGT), KITTI, length 500, Abs Rel",
+          "published": "0.135",
+          "scale": 1,
+          "dataset": "ttt3r_kitti_500",
+          "protocol": "cut3r_scale",
+          "metric": "abs_rel",
+          "gate": true,
+          "measured": 0.13521331504472414,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        },
+        {
+          "id": "t3_kitti500_delta1",
+          "source": "Table 3, row Ours (OVGGT), KITTI, length 500, delta<1.25",
+          "published": "0.839",
+          "scale": 1,
+          "dataset": "ttt3r_kitti_500",
+          "protocol": "cut3r_scale",
+          "metric": "delta1",
+          "gate": true,
+          "measured": 0.8390086943282238,
+          "within_tolerance": true,
+          "measured_commit": "3301f0a+e7bc6acd"
+        }
+      ],
+      "runs": [
+        {
+          "date": "2026-10-27T01:48:30",
+          "commit": "3301f0a+e7bc6acd",
+          "job_id": "6485902",
+          "host": "ilpa1209"
+        }
+      ]
     }
   }
 }

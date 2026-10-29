@@ -24,6 +24,8 @@
 #   ARM=promptda   sbatch -J repro_promptda   experiments/baselines/reproduce.sh
 #   ARM=dav        sbatch -J repro_dav        experiments/baselines/reproduce.sh
 #   ARM=da3_metric sbatch -J repro_da3_metric --time=01:00:00 experiments/baselines/reproduce.sh
+#   ARM=infinite_vggt sbatch -J repro_infinite_vggt -p campus-gpu-bigmem --gres=gpu:a40:1 experiments/baselines/reproduce.sh
+#   ARM=ovggt         sbatch -J repro_ovggt         -p campus-gpu-bigmem --gres=gpu:a40:1 experiments/baselines/reproduce.sh
 #   ARM=vda MAX_SEQ=2 sbatch -p ai-tenn-debug -q ai-tenn-debug --gres=gpu:h100:1 --time=01:00:00 ...   # smoke test, record untouched
 #
 # Defaults are what verified vda and ovda (2026-10-08): one 32 GB V100S;
@@ -47,9 +49,9 @@
 
 set -euo pipefail
 
-ARM="${ARM:?set ARM to one of: vda vda_metric ovda promptda dav da3_metric}"
+ARM="${ARM:?set ARM to one of: vda vda_metric ovda promptda dav da3_metric infinite_vggt ovggt}"
 MAX_SEQ=${MAX_SEQ:-0}
-REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
+REPO=${REPO:-/nfs/home/jdosch1/brown-visual-computing/MeTRICS}  # a worktree for a smoke run
 ENVS=/lustre/isaac24/proj/UTK0516/metrics_data/envs_jd
 
 if [ "$ARM" = dav ]; then
@@ -71,6 +73,14 @@ export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
 
 echo "arm: $ARM max_seq=$MAX_SEQ python=$(command -v python)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+
+if [ "$ARM" = infinite_vggt ] || [ "$ARM" = ovggt ]; then
+    # the forks run on StreamVGGT's released weights, linked from our copy:
+    # make sure it is that file (lch01/StreamVGGT checkpoints.pth)
+    W=/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd/baselines/$ARM/checkpoints.pth
+    SHA=3d3d914d09609fdb485e16947c4885cca0e5ea4e5557598a3b3ffb1cfe0a2f59
+    [ "$(sha256sum "$W" | cut -d' ' -f1)" = "$SHA" ] || { echo "[fatal] $W is not lch01/StreamVGGT checkpoints.pth" >&2; exit 1; }
+fi
 
 cd "$REPO"
 python src/bench_baselines.py reproduce --arm "$ARM" --max-sequences "$MAX_SEQ" "$@"
