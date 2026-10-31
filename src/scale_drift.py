@@ -36,7 +36,13 @@ sliding KV cache of `--window` frames, the deployment setting. A curve is
 `LABEL=SOURCE[@DROP]`:
 
   SOURCE  `base` for the pretrained StreamVGGT (RGB only), or a
-          finetune_depth.py run directory (its checkpoint-last)
+          finetune_depth.py run directory (its checkpoint-last), or
+          `ovggt:<run directory>`: that run streamed through OVGGT's cache
+          policy instead of the sliding window (eval/ovggt_cache.py; OVGGT's
+          own 200,000-token budget, --window does not apply), or
+          `infinite_vggt` / `ovggt`: those baseline arms as verified, on
+          StreamVGGT's own weights (RGB only, their own cache budgets;
+          dropout only, @DROP ignored -- they take no depth)
   DROP    the frame index from which the sparse depth is withheld (an
           all-zero validity mask, the model's "no measurement"); omitted =
           fed on every frame. Ignored for `base`, which takes no depth.
@@ -142,6 +148,20 @@ class Curve:
     def is_promptda(self) -> bool:
         return self.source in PROMPTDA_SOURCES
 
+    @property
+    def is_ovggt(self) -> bool:
+        return self.source.startswith(OVGGT_PREFIX)
+
+    @property
+    def is_cache_arm(self) -> bool:
+        return self.source in CACHE_ARM_SOURCES
+
+    @property
+    def metric(self) -> bool:
+        """Whether the output has a metric scale (an absolute error it could
+        avoid): not the RGB-only StreamVGGT or cache arms."""
+        return not (self.is_base or self.is_cache_arm)
+
 
 def parse_curve(spec: str) -> Curve:
     """LABEL=SOURCE[@DROP]."""
@@ -159,6 +179,9 @@ def parse_curve(spec: str) -> Curve:
 # `promptda-hold` keeps being handed the last depth frame it had, the fallback
 # a deployment of such a model would use.
 PROMPTDA_SOURCES = ("promptda", "promptda-hold")
+OVGGT_PREFIX = "ovggt:"
+# training-free StreamVGGT cache variants, RGB only (bench_baselines arms)
+CACHE_ARM_SOURCES = ("infinite_vggt", "ovggt")
 
 
 def load_curve_model(curve: Curve, base_ckpt: str, device: torch.device):
@@ -182,9 +205,30 @@ def load_curve_model(curve: Curve, base_ckpt: str, device: torch.device):
         return arm, None
     if curve.is_base:
         return load_base_streamvggt(base_ckpt).to(device), True
+    if curve.is_cache_arm:
+        from eval.baselines import arms as A
+        from eval.baselines import record as R
+
+        # through the reproduction gate, as bench_baselines builds it
+        return A.build_arm(curve.source, device, [("scannet", "published")], R.load()), None
+    if curve.is_ovggt:
+        from eval import ovggt_cache
+
+        ovggt, metric, amp = ovggt_cache.load(curve.source[len(OVGGT_PREFIX) :], device)
+        return (ovggt, metric), amp
     # the streaming loop calls the aggregator directly, never with a cache key
     run = load_run_model(curve.source, "last", device, encoder_cache=False)
     return run.model, bool(run.raw.get("amp", 1))
+
+
+def curve_depth(curve: Curve, model, views: list[dict], window: int, amp) -> np.ndarray:
+    """[S, h, w] model-grid depth of one streamed curve: the sliding window,
+    or OVGGT's cache for an `ovggt:` curve."""
+    if curve.is_ovggt:
+        from eval import ovggt_cache
+
+        return ovggt_cache.stream_depth(*model, views, amp)
+    return stream_depth(model, views, window, amp)
 
 
 def hold_depth(depth: np.ndarray, mask: np.ndarray, drop: int | None):
@@ -219,6 +263,18 @@ def promptda_depth(
         raw = arm.predict(frames, (depth, mask))
     finally:
         torch.backends.cuda.matmul.allow_tf32 = tf32
+    return BB.register_to_gt(raw, seq, spec, frames.shape[1:3], tuple(gt_hw))
+
+
+def cache_arm_depth(arm, seq, spec, gt_hw) -> np.ndarray:
+    """[S, H, W] an RGB-only cache arm's depth on the GT grid, as
+    bench_baselines benchmarks it: the manifest's native frames through the
+    arm's own sizing, streaming loop and cache, then register_to_gt. The arm
+    sets TF32 itself."""
+    import bench_baselines as BB
+
+    frames = BB.read_frames(seq)
+    raw = arm.predict(frames)
     return BB.register_to_gt(raw, seq, spec, frames.shape[1:3], tuple(gt_hw))
 
 
@@ -533,10 +589,12 @@ def run_dropout(args, curves, models, seqs, spec, bench, device):
                 pred_gt = promptda_depth(
                     model, seq, spec, curve_views, gt.shape[1:], hold
                 )
+            elif curve.is_cache_arm:  # RGB only: nothing to withhold
+                pred_gt = cache_arm_depth(model, seq, spec, gt.shape[1:])
             else:
                 if not curve.is_base:
                     withhold_depth(curve_views, curve.drop)
-                pred = stream_depth(model, curve_views, args.window, amp)
+                pred = curve_depth(curve, model, curve_views, args.window, amp)
                 pred_gt = model_to_gt(pred, gt.shape[1:], box)
             s = frame_scales(pred_gt, gt, scored)
             r, a = drift_rows(s, args.ref_frames)
@@ -562,7 +620,7 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
     for k, c in enumerate(curves):
         x = np.arange(rel[c.label].shape[1])
         _band_line(ax1, x, rel[c.label], _COLORS[k % len(_COLORS)], c.label)
-        if c.is_base:
+        if not c.metric:
             # no metric scale to hold: its |log s_t| is how far off an RGB-only
             # model starts, the gap that metric conditioning closes
             ax2.plot(
@@ -598,6 +656,13 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
                 f"\nPromptDA has no cache (per frame); its hold curve keeps receiving "
                 f"frame {drop - 1}'s depth"
             )
+    own_cache = [c.label for c in curves if c.is_cache_arm or c.is_ovggt]
+    if own_cache:
+        # the window (and the dotted refill line) is the sliding-window curves'
+        title += (
+            f"\n{', '.join(own_cache)}: their own cache budget, not the "
+            f"{args.window}-frame window"
+        )
     ax1.set_title(title, fontsize=9)
     fig.savefig(out / "scale_drift.png", dpi=150)
     plt.close(fig)
@@ -605,7 +670,7 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
     # the curves that keep their input all clip long: on the shared axes they
     # sit on top of each other, so they get a figure of their own, each panel
     # on its own scale (same colours as above)
-    kept = [(k, c) for k, c in enumerate(curves) if c.drop is None and not c.is_base]
+    kept = [(k, c) for k, c in enumerate(curves) if c.drop is None and c.metric]
     if len(kept) > 1:
         fig, (ax1, ax2) = plt.subplots(
             2, 1, figsize=(9, 7), sharex=True, constrained_layout=True
@@ -637,7 +702,7 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
                 "rel_median": band(rel[c.label])[0],
                 # base: not a metric model, so not an error it could avoid
                 "abs_median": band(absol[c.label])[0],
-                "metric": not c.is_base,
+                "metric": c.metric,
             }
             for c in curves
         ],
@@ -675,11 +740,11 @@ def run_response(args, curves, models, seqs, spec, bench, device):
         inputs = _inputs(args, S, n, bench)
         for c in curves:
             model, amp = models[c.label]
-            native_0 = stream_depth(model, views, args.window, amp)
+            native_0 = curve_depth(c, model, views, args.window, amp)
             pred_0 = model_to_gt(native_0, gt.shape[1:], box)
             for key, u in inputs.items():
-                native = stream_depth(
-                    model, scale_fed(views, np.exp(u)), args.window, amp
+                native = curve_depth(
+                    c, model, scale_fed(views, np.exp(u)), args.window, amp
                 )
                 pred = model_to_gt(native, gt.shape[1:], box)
                 r, q = response(pred, pred_0, scored)
@@ -908,7 +973,7 @@ def run_splice(args, curves, models, seqs, spec, bench, device):
                 if c.is_base and factor != k:
                     continue  # no fed depth: the control is the same run
                 model, amp = models[c.label]
-                pred = stream_depth(model, views, args.window, amp)
+                pred = curve_depth(c, model, views, args.window, amp)
                 pred = model_to_gt(pred, gt.shape[1:], box)
                 s = frame_scales(pred, gt, scored)
                 st = median_scaled_absrel(pred, gt, scored)
@@ -1076,7 +1141,7 @@ def run_cut(args, curves, models, seqs, spec, bench, device):
         prediction mapped onto its own GT grid."""
         gt_i, views_i, scored_i, _, box_i = clip(i)
         gt_j, views_j, scored_j, _, box_j = clip(j)
-        pred = stream_depth(model, views_i + views_j, args.window, amp)
+        pred = curve_depth(c, model, views_i + views_j, args.window, amp)
         n = len(views_i)
         p_i = model_to_gt(pred[:n], gt_i.shape[1:], box_i)
         p_j = model_to_gt(pred[n:], gt_j.shape[1:], box_j)
@@ -1250,6 +1315,8 @@ def validate(args, curves, clip_len: int) -> None:
         raise ValueError("--window and --ref-frames must be >= 1")
     if args.experiment != "dropout" and any(c.drop is not None for c in curves):
         raise ValueError("@DROP only applies to --experiment dropout")
+    if args.experiment != "dropout" and any(c.is_cache_arm for c in curves):
+        raise ValueError("cache-arm curves (infinite_vggt, ovggt) only apply to dropout")
     if args.experiment != "dropout" and any(c.is_promptda for c in curves):
         # its output is network(prompt / range) * range: a scaled prompt gives
         # an exactly scaled output, so step / sine / jitter only restate that
@@ -1261,7 +1328,7 @@ def validate(args, curves, clip_len: int) -> None:
             f"--experiment {args.experiment}: `base` takes no depth to perturb"
         )
     if args.experiment == "dropout":
-        drops = {c.drop for c in curves if not c.is_base and c.drop is not None}
+        drops = {c.drop for c in curves if c.metric and c.drop is not None}
         if any(not 0 < d < clip_len for d in drops):
             raise ValueError(f"@DROP must be in (0, {clip_len}), got {sorted(drops)}")
         if drops and args.ref_frames > min(drops):
@@ -1269,7 +1336,9 @@ def validate(args, curves, clip_len: int) -> None:
                 f"--ref-frames {args.ref_frames} reaches past the earliest drop "
                 f"{min(drops)}: s_ref would include frames without depth"
             )
-        if args.dropout_at is not None and drops != {args.dropout_at}:
+        # a run of RGB-only curves alone (merged into a figure later) has no
+        # drop of its own; --dropout-at then only draws the lines
+        if args.dropout_at is not None and drops and drops != {args.dropout_at}:
             raise ValueError(
                 f"--dropout-at {args.dropout_at} (plot lines) must be the curves' "
                 f"drop frame, got {sorted(drops)}"

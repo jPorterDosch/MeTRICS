@@ -214,6 +214,7 @@ class Aggregator(nn.Module):
         anchor_token_count: int = None,
         importance_weight: float = 0.5,
         window_token_count: int = 0,
+        injected_patch_feats=None,  # MeTRICS: added (see below)
     ) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
@@ -258,6 +259,14 @@ class Aggregator(nn.Module):
             patch_tokens = patch_tokens["x_norm_patchtokens"]
 
         _, P, C = patch_tokens.shape
+
+        # MeTRICS: added. Our depth conditioning (token injection): features
+        # added residually to the patch tokens before any attention block, so
+        # before the KV cache and its eviction -- as our own Aggregator does
+        # (src/streamvggt/models/aggregator.py). None: upstream behaviour.
+        if injected_patch_feats is not None:
+            patch_tokens = patch_tokens + injected_patch_feats.reshape(B * S, P, C)
+        # MeTRICS: end
 
         if use_cache:
             camera_token_full = slice_expand_and_flatten(self.camera_token, B, S_true)
