@@ -959,7 +959,9 @@ def train_loop(
             st = mcfg.scale_token
             if st.enabled and st.readout is not ScaleReadout.NONE:
                 if already_backprop:
-                    raise RuntimeError("the scale readout loss needs the loss before backprop")
+                    raise RuntimeError(
+                        "the scale readout loss needs the loss before backprop"
+                    )
                 readout = scale_readout_loss(result["pred"], result["views"])
                 loss = loss + st.readout_weight * readout
                 loss_details["scale_readout"] = readout.detach()
@@ -1636,9 +1638,10 @@ def main(cfg: FinetuneDepthCfg) -> None:
         train=cfg.train,
         scale_token=cfg.scale_token,
     ).validate()
-    if mcfg.train.window is not None and cfg.loss.recipe is Recipe.DISTILL:
+    if mcfg.train.window is not None and cfg.loss.recipe in _POINT_SUPERVISED_RECIPES:
         raise ValueError(
-            "train.window drops the track head, which the distill recipe supervises"
+            "train.window runs the depth head only; the "
+            f"{cfg.loss.recipe.value} recipe reads point / track outputs"
         )
     if (
         mcfg.scale_token.enabled

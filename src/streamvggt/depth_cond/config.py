@@ -380,8 +380,8 @@ class ScaleTokenCfg:
     # i.e. train.window set.
     recurrent: bool = True
     readout: ScaleReadout = ScaleReadout.AUX
-    # weight of the readout loss: L1 between each frame's readout and the
-    # log of the clip's mean GT depth (scale_token.scale_readout_loss)
+    # weight of the readout loss: L1 between frame t's readout and the log
+    # of the mean GT depth over frames 0..t (scale_token.scale_readout_loss)
     readout_weight: float = 0.1
 
     def validate(self) -> None:

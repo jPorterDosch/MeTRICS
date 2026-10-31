@@ -452,7 +452,9 @@ def _fed(values, fed_frames, hw=(2, 3)):
         mask = torch.zeros((1, *hw), dtype=torch.bool)
         if t in fed_frames:
             mask[0, 0, 0] = True
-        views.append({"sparse_depth": torch.full((1, *hw), v) * mask, "sparse_depth_mask": mask})
+        views.append(
+            {"sparse_depth": torch.full((1, *hw), v) * mask, "sparse_depth_mask": mask}
+        )
     return views
 
 

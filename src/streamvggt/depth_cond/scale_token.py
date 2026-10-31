@@ -22,31 +22,39 @@ def _gt_depth(view: dict) -> tuple[torch.Tensor, torch.Tensor]:
     return depth, valid
 
 
-def clip_log_scale(views: list[dict]) -> torch.Tensor:
-    """[B] log of the clip's mean valid GT depth: the scale of the scene, one
-    value for every frame of the clip (the time-invariant part, as opposed to
-    the per-frame structure). NaN for a clip with no valid pixel."""
-    total, count = None, None
+def running_log_scale(views: list[dict]) -> torch.Tensor:
+    """[B, S] log of the mean valid GT depth over frames 0..t: the scale of
+    the scene the stream has shown so far (causal: frame t's target never
+    reads a later frame). It settles as the clip goes on, the time-invariant
+    part as opposed to the per-frame structure. NaN until a clip's first
+    valid pixel."""
+    total, count, out = 0.0, 0, []
     for view in views:
         depth, valid = _gt_depth(view)
-        d = torch.where(valid, depth, torch.zeros_like(depth)).flatten(1).sum(1)
-        n = valid.flatten(1).sum(1)
-        total = d if total is None else total + d
-        count = n if count is None else count + n
-    mean = total.double() / count.clamp(min=1)
-    return torch.where(count > 0, mean.log(), torch.full_like(mean, float("nan")))
+        total = (
+            total
+            + torch.where(valid, depth, torch.zeros_like(depth))
+            .flatten(1)
+            .sum(1)
+            .double()
+        )
+        count = count + valid.flatten(1).sum(1)
+        mean = total / count.clamp(min=1)
+        out.append(
+            torch.where(count > 0, mean.log(), torch.full_like(mean, float("nan")))
+        )
+    return torch.stack(out, dim=1)
 
 
 def scale_readout_loss(preds: list[dict], views: list[dict]) -> torch.Tensor:
-    """Mean |readout_t - log clip scale| over frames and clips: every frame's
-    readout predicts the same clip-level value from what the stream has shown
-    so far. Clips without valid GT are left out (zero loss if none has any)."""
+    """Mean |readout_t - running_log_scale_t| over the frames and clips with a
+    target (zero loss if none has one)."""
     s = torch.stack([p["scale_log"] for p in preds], dim=1)  # [B, S]
-    target = clip_log_scale(views).to(device=s.device, dtype=s.dtype)
+    target = running_log_scale(views).to(device=s.device, dtype=s.dtype)
     keep = torch.isfinite(target)
     if not keep.any():
         return s.sum() * 0.0
-    return (s[keep] - target[keep, None]).abs().mean()
+    return (s[keep] - target[keep]).abs().mean()
 
 
 def withhold_depth_tail(views: list[dict], p: float) -> int:

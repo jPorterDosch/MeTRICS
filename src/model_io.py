@@ -100,14 +100,10 @@ def load_run_model(
     mcfg = rebuild_metric_cfg(raw)
     if not encoder_cache:
         mcfg.encoder_cache.enabled = False
-    if base and mcfg.scale_token.enabled:
-        # the token (a register copy), its carry and readout are extra modules:
-        # not the raw backbone, whatever their zero-init
-        raise ValueError(
-            "--base with a scale-token run is not the raw StreamVGGT; "
-            "take the architecture from a run without the token"
-        )
     if base:
+        # the raw backbone has no scale token: the token (a register copy), its
+        # carry and readout would be extra modules, whatever their zero-init
+        mcfg.scale_token = ScaleTokenCfg()
         pretrained = pretrained or raw.get("pretrained") or ""
         if not pretrained or not os.path.exists(pretrained):
             raise FileNotFoundError(

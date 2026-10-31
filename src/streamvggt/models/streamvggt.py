@@ -193,7 +193,8 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
         
     def inference(self, frames, query_points: torch.Tensor = None, past_key_values=None,
                   depth_token_feats_list=None, depth_head_residuals_list=None,
-                  frame_times_ms=None, window=None, patch_tokens_list=None):
+                  frame_times_ms=None, window=None, patch_tokens_list=None,
+                  depth_only=False):
         """Streaming inference with the causal KV cache.
 
         depth_token_feats_list / depth_head_residuals_list: optional per-frame
@@ -214,6 +215,9 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
         ([B, P_patch, C], the encoder cache). Not under no_grad: the
         one-frame-at-a-time training forward (depth_cond train.window) runs
         through here with gradients.
+        depth_only: run the depth head alone (and the scale readout): no
+        camera, point or track head, and no such keys in the results. For the
+        windowed training forward, whose losses and validation read depth only.
         """
         if depth_token_feats_list is not None and len(depth_token_feats_list) != len(frames):
             raise ValueError(
@@ -254,7 +258,10 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 events[-1][0].record(timing_stream)
             elif timing:
                 t0 = time.perf_counter()
-            images = frame["img"].unsqueeze(0)
+            # [B, 1, 3, H, W]: one frame of each of the B clips (unsqueeze(0)
+            # read a training batch's [B, 3, H, W] as B frames of one clip)
+            img = frame["img"]
+            images = img[:, None] if img.dim() == 4 else img[None, None]
             token_feats = depth_token_feats_list[i] if depth_token_feats_list is not None else None
             head_residuals = depth_head_residuals_list[i] if depth_head_residuals_list is not None else None
             if head_residuals is None:
@@ -278,7 +285,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 past_key_values = truncate_kv(past_key_values, window)
 
             with torch.cuda.amp.autocast(enabled=False):
-                if self.camera_head is not None:
+                if self.camera_head is not None and not depth_only:
                     pose_enc, past_key_values_camera = self.camera_head(aggregated_tokens, past_key_values_camera=past_key_values_camera, use_cache=True)
                     pose_enc = pose_enc[-1]
                     camera_pose = pose_enc[:, 0, :]
@@ -292,7 +299,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                     depth = self.apply_scale(depth, scale_log)[:, 0]
                     depth_conf = depth_conf[:, 0]
 
-                if self.point_head is not None:
+                if self.point_head is not None and not depth_only:
                     pts3d, pts3d_conf = self.point_head(
                         aggregated_tokens, images=images, patch_start_idx=patch_start_idx,
                         depth_residuals=head_residuals["point"],
@@ -300,7 +307,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                     pts3d = pts3d[:, 0]
                     pts3d_conf = pts3d_conf[:, 0]
 
-                if self.track_head is not None and query_points is not None:
+                if self.track_head is not None and query_points is not None and not depth_only:
                     track_list, vis, conf = self.track_head(
                         aggregated_tokens, images=images, patch_start_idx=patch_start_idx, query_points=query_points
                 )
@@ -310,18 +317,19 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                     track_conf = conf[:, 0]
 
             all_ress.append({
-                'pts3d_in_other_view': pts3d,
-                'conf': pts3d_conf,
+                **({'pts3d_in_other_view': pts3d,
+                    'conf': pts3d_conf,
+                    'camera_pose': camera_pose}
+                if not depth_only else {}),
                 'depth': depth,
                 'depth_conf': depth_conf,
-                'camera_pose': camera_pose,
                 **({'valid_mask': frame["valid_mask"]}
                     if 'valid_mask' in frame else {}),  
 
                 **({'track': track, 
                     'vis': vis,  
                     'track_conf': track_conf}
-                if query_points is not None else {}),
+                if query_points is not None and not depth_only else {}),
                 **({'scale_log': scale_log[:, 0]}  # [B]
                 if scale_log is not None else {}),
             })

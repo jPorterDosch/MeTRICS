@@ -372,13 +372,17 @@ class MetricStreamVGGT(nn.Module):
         if patch_tokens is not None:  # [B*S, P, C], batch-major
             patch_tokens = patch_tokens.reshape(B, S, *patch_tokens.shape[1:])
             patch_list = [patch_tokens[:, s] for s in range(S)]
-        # no track head: the depth losses never read it, and inference() would
-        # feed every frame's track back as the next frame's queries, with
-        # gradients (finetune_depth refuses train.window for the distill recipe,
-        # the one that supervises tracks)
+        # depth head only, in training AND validation (both come through here):
+        # the depth losses and the validation metrics, images and glb export
+        # read predicted depth alone (poses come from the GT views). The
+        # camera, point and track heads would add a pass per frame each, with
+        # its autograd graph; the track head would also feed every frame's
+        # track back as the next frame's queries. finetune_depth refuses
+        # train.window for the distill recipe, which supervises tracks.
         return self.model.inference(
             views,
             None,
+            depth_only=True,
             depth_token_feats_list=token_list,
             window=self.cfg.train.window,
             patch_tokens_list=patch_list,

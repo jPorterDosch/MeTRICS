@@ -59,8 +59,8 @@
 #                             frames of the encoder sweep's 10-frame clips at
 #                             15 (67,500), which also keeps an arm inside the
 #                             3-day wall clock (cost below)
-# Readout target: the log of the clip's mean valid GT depth, the same for
-# every frame (depth_cond/scale_token.py), L1, weight 0.1.
+# Readout target: the log of the mean valid GT depth over frames 0..t,
+# causal like the stream (depth_cond/scale_token.py), L1, weight 0.1.
 #
 # Contrasts: 3 vs 0 = an extra (supervised) token, which also moves the
 # pretrained output from step 0 (it starts as a copy of register 0); 1 vs 3 =
@@ -91,9 +91,9 @@
 # 41 h 57 m on an H100 (job 6463259: 67,500 steps, ~1.9 s/step, with
 # validation and the end-of-run benchmark). A 16-frame windowed step is
 # estimated at ~1.8x, so 45,000 steps at ~3.4 s ~ 43 h + validation and
-# benchmark, ~50 h per arm. probe_window_memory.sh (its 16:8 point) measures
-# the step time and peak memory before this is queued. BENCH=0 skips the
-# end-of-run benchmark.
+# benchmark, ~50 h per arm. The smoke run above measures the step time (and,
+# with --print-freq 1, the logged max mem) before this is queued. BENCH=0
+# skips the end-of-run benchmark.
 # =============================================================================
 
 set -euo pipefail

@@ -28,7 +28,7 @@ from streamvggt.depth_cond.config import (
 )
 from streamvggt.depth_cond.model import MetricStreamVGGT
 from streamvggt.depth_cond.scale_token import (
-    clip_log_scale,
+    running_log_scale,
     scale_readout_loss,
     withhold_depth_tail,
 )
@@ -94,6 +94,19 @@ def test_unbounded_one_frame_path_equals_the_parallel_forward():
 
 
 @torch.no_grad()
+def test_one_frame_path_streams_a_batch_of_clips():
+    m = tiny(scale_token=True, recurrent=True, readout=True, factorised=True)
+    m.aggregator.scale_carry.proj.weight.normal_(std=0.1)
+    fs = frames(S=4, B=2)
+    both = depth_of(m.inference(fs, window=2))
+    for b in range(2):
+        one = depth_of(
+            m.inference([{"img": f["img"][b : b + 1]} for f in fs], window=2)
+        )
+        assert torch.allclose(both[b : b + 1], one, rtol=1e-4, atol=1e-5)
+
+
+@torch.no_grad()
 def test_window_keeps_the_last_frames_only():
     m = tiny()
     fs = frames()
@@ -124,14 +137,17 @@ def test_recurrence_starts_as_a_no_op_and_needs_the_one_frame_path():
     plain, rec = tiny(scale_token=True), tiny(scale_token=True, recurrent=True)
     rec.load_state_dict(plain.state_dict(), strict=False)  # same weights
     fs = frames()
-    assert torch.equal(depth_of(plain.inference(fs, window=2)), depth_of(rec.inference(fs, window=2)))
+    assert torch.equal(
+        depth_of(plain.inference(fs, window=2)), depth_of(rec.inference(fs, window=2))
+    )
     with pytest.raises(ValueError):
         rec(fs)  # the parallel forward cannot carry a state
     with torch.no_grad():
         rec.aggregator.scale_carry.proj.weight.normal_()
     # the carried state now reaches frames whose own cache never held frame 0
     assert not torch.allclose(
-        depth_of(plain.inference(fs, window=2))[:, 3:], depth_of(rec.inference(fs, window=2))[:, 3:]
+        depth_of(plain.inference(fs, window=2))[:, 3:],
+        depth_of(rec.inference(fs, window=2))[:, 3:],
     )
 
 
@@ -176,13 +192,20 @@ def test_gradient_reaches_the_carry_through_eviction():
 def test_checkpointed_one_frame_path_gives_the_same_gradients():
     grads = []
     for ckpt in (False, True):
-        m = tiny(scale_token=True, recurrent=True, readout=True, factorised=True).train()
+        m = tiny(
+            scale_token=True, recurrent=True, readout=True, factorised=True
+        ).train()
         m.scale_head.net[-1].weight.data.normal_(std=0.1)
         m.aggregator.grad_checkpointing = ckpt
         out = m.inference(frames(), window=2)
         torch.stack([r["depth"] for r in out.ress]).mean().backward()
         grads.append(
-            torch.cat([m.aggregator.scale_carry.proj.weight.grad.flatten(), m.aggregator.scale_token.grad.flatten()])
+            torch.cat(
+                [
+                    m.aggregator.scale_carry.proj.weight.grad.flatten(),
+                    m.aggregator.scale_token.grad.flatten(),
+                ]
+            )
         )
     assert grads[0].abs().sum() > 0
     assert torch.allclose(grads[0], grads[1], rtol=1e-4, atol=1e-8)
@@ -192,12 +215,22 @@ def test_checkpointed_one_frame_path_gives_the_same_gradients():
 # MetricStreamVGGT: config, pretrained loading, freezing, windowed forward
 # ---------------------------------------------------------------------------
 def metric_model(monkeypatch, scale: ScaleTokenCfg, window=None):
-    def factory(img_size, patch_size, embed_dim, scale_token, scale_recurrent, scale_readout, scale_factorised):
+    def factory(
+        img_size,
+        patch_size,
+        embed_dim,
+        scale_token,
+        scale_recurrent,
+        scale_readout,
+        scale_factorised,
+    ):
         return tiny(scale_token, scale_recurrent, scale_readout, scale_factorised)
 
     monkeypatch.setattr(model_module, "StreamVGGT", factory)
     cfg = MetricCfg(
-        depth_cond=DepthCondCfg(encoder=EncoderType.IDENTITY, injection=InjectionType.TOKEN),
+        depth_cond=DepthCondCfg(
+            encoder=EncoderType.IDENTITY, injection=InjectionType.TOKEN
+        ),
         lora=LoRACfg(enabled=False),
         train=TrainCondCfg(window=window, grad_checkpoint=False),
         scale_token=scale,
@@ -217,13 +250,16 @@ def test_config_refuses_untrainable_combinations():
     with pytest.raises(ValueError):  # recurrence needs the windowed forward
         MetricCfg(scale_token=ScaleTokenCfg(enabled=True, recurrent=True)).validate()
     with pytest.raises(ValueError):  # a readout nothing trains
-        ScaleTokenCfg(enabled=True, readout=ScaleReadout.AUX, readout_weight=0.0).validate()
+        ScaleTokenCfg(
+            enabled=True, readout=ScaleReadout.AUX, readout_weight=0.0
+        ).validate()
     with pytest.raises(ValueError):
         TrainCondCfg(window=0).validate()
     with pytest.raises(ValueError):
         TrainCondCfg(depth_dropout_p=1.5).validate()
     MetricCfg(
-        scale_token=ScaleTokenCfg(enabled=True, recurrent=True), train=TrainCondCfg(window=4)
+        scale_token=ScaleTokenCfg(enabled=True, recurrent=True),
+        train=TrainCondCfg(window=4),
     ).validate()
     MetricCfg().validate()  # the default: no token, parallel forward
 
@@ -245,13 +281,19 @@ def test_freeze_trains_the_scale_modules(monkeypatch):
     m = metric_model(monkeypatch, ScaleTokenCfg(enabled=True, recurrent=True), window=2)
     m.freeze_for_finetune()
     names = {n for n, p in m.named_parameters() if p.requires_grad}
-    for want in ("model.aggregator.scale_token", "model.aggregator.scale_carry.proj.weight", "model.scale_head.net.3.weight"):
+    for want in (
+        "model.aggregator.scale_token",
+        "model.aggregator.scale_carry.proj.weight",
+        "model.scale_head.net.3.weight",
+    ):
         assert want in names
     assert "model.aggregator.camera_token" not in names
 
 
 def test_windowed_forward_matches_windowed_inference(monkeypatch):
-    m = metric_model(monkeypatch, ScaleTokenCfg(enabled=True, recurrent=True), window=2).eval()
+    m = metric_model(
+        monkeypatch, ScaleTokenCfg(enabled=True, recurrent=True), window=2
+    ).eval()
     m.model.aggregator.scale_carry.proj.weight.data.normal_(std=0.1)
     with torch.no_grad():
         m.conditioner.token_proj.weight.normal_(std=0.1)  # zero-init: make it count
@@ -261,30 +303,56 @@ def test_windowed_forward_matches_windowed_inference(monkeypatch):
         feats = conditioning["depth_token_feats"]
         assert feats.abs().sum() > 0
         ref = depth_of(
-            m.model.inference(fs, depth_token_feats_list=[feats[:, s] for s in range(len(fs))], window=2)
+            m.model.inference(
+                fs,
+                depth_token_feats_list=[feats[:, s] for s in range(len(fs))],
+                window=2,
+            )
         )
-    assert torch.equal(train_path, ref)
+    assert torch.equal(train_path, ref)  # depth unchanged by skipping heads
+    keys = set(m(fs).ress[0])
+    assert "depth" in keys and not keys & {
+        "camera_pose",
+        "pts3d_in_other_view",
+        "track",
+    }
 
 
 # ---------------------------------------------------------------------------
 # training-side helpers
 # ---------------------------------------------------------------------------
-def test_readout_target_is_the_clip_mean_depth():
+def test_readout_target_is_the_running_mean_depth():
     views = [
         {"depthmap": torch.tensor([[[2.0, 0.0]]])},
-        {"depthmap": torch.tensor([[[4.0, 6.0]]]), "valid_mask": torch.tensor([[[True, False]]])},
+        {
+            "depthmap": torch.tensor([[[4.0, 6.0]]]),
+            "valid_mask": torch.tensor([[[True, False]]]),
+        },
     ]
-    assert torch.allclose(clip_log_scale(views), torch.tensor([math.log(3.0)], dtype=torch.float64))
-    preds = [{"scale_log": torch.tensor([math.log(3.0)])}, {"scale_log": torch.tensor([math.log(3.0) + 1])}]
+    # frame 0 sees only its own 2.0; frame 1 the mean of 2.0 and 4.0
+    want = torch.tensor([[math.log(2.0), math.log(3.0)]], dtype=torch.float64)
+    assert torch.allclose(running_log_scale(views), want)
+    preds = [
+        {"scale_log": torch.tensor([math.log(2.0)])},
+        {"scale_log": torch.tensor([math.log(3.0) + 1])},
+    ]
     assert torch.isclose(scale_readout_loss(preds, views), torch.tensor(0.5))
-    empty = [{"depthmap": torch.zeros(1, 1, 2)}]
-    assert scale_readout_loss(preds[:1], empty) == 0  # no valid GT: no target
+    # no valid pixel yet: that frame has no target and leaves the mean
+    late = [{"depthmap": torch.zeros(1, 1, 2)}, views[1]]
+    assert torch.isnan(running_log_scale(late)[0, 0])
+    # frame 1 is then the first frame with GT: its target is log 4 alone
+    want_late = torch.tensor(1 + math.log(3.0) - math.log(4.0))
+    assert torch.isclose(scale_readout_loss(preds, late), want_late)
+    assert scale_readout_loss(preds[:1], late[:1]) == 0  # no target anywhere
 
 
 def test_depth_dropout_keeps_frame_0_and_cuts_a_tail():
     def views():
         return [
-            {"sparse_depth": torch.ones(2, 3, 3), "sparse_depth_mask": torch.ones(2, 3, 3, dtype=torch.bool)}
+            {
+                "sparse_depth": torch.ones(2, 3, 3),
+                "sparse_depth_mask": torch.ones(2, 3, 3, dtype=torch.bool),
+            }
             for _ in range(6)
         ]
 
