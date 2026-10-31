@@ -161,6 +161,13 @@ class Aggregator(nn.Module):
                 )
                 nn.init.zeros_(self.scale_carry.proj.weight)
                 nn.init.zeros_(self.scale_carry.proj.bias)
+                # [first frame, later frames]: the carry's multiplier, picked
+                # like the first-frame token (from the cache's shape), so an
+                # exported graph fed a zero state at frame 0 adds nothing
+                # there and one graph serves every frame. Not in the state dict.
+                self.register_buffer(
+                    "_carry_gate", torch.tensor([0.0, 1.0]).reshape(1, 2, 1, 1), persistent=False
+                )
         self.scale_token_idx = 1 + num_register_tokens if scale_token else None
 
         # The patch tokens start after the camera, register (and scale) tokens
@@ -332,7 +339,9 @@ class Aggregator(nn.Module):
                         "scale_prev needs a recurrent scale token on the KV-cache "
                         "path (one frame per call)"
                     )
-                scale_token = scale_token + self.scale_carry(scale_prev).reshape(B, 1, C)
+                gate_full = slice_expand_and_flatten(self._carry_gate, B, S_true)
+                gate = gate_full.reshape(B, -1, 1, 1)[:, -1]  # [B, 1, 1]: 0 on frame 0
+                scale_token = scale_token + self.scale_carry(scale_prev).reshape(B, 1, C) * gate
             special.append(scale_token)
         elif scale_prev is not None:
             raise ValueError("scale_prev given to an aggregator without a scale token")
