@@ -210,7 +210,9 @@ def load_curve_model(curve: Curve, base_ckpt: str, device: torch.device):
         from eval.baselines import record as R
 
         # through the reproduction gate, as bench_baselines builds it
-        return A.build_arm(curve.source, device, [("scannet", "published")], R.load()), None
+        return A.build_arm(
+            curve.source, device, [("scannet", "published")], R.load()
+        ), None
     if curve.is_ovggt:
         from eval import ovggt_cache
 
@@ -1316,7 +1318,9 @@ def validate(args, curves, clip_len: int) -> None:
     if args.experiment != "dropout" and any(c.drop is not None for c in curves):
         raise ValueError("@DROP only applies to --experiment dropout")
     if args.experiment != "dropout" and any(c.is_cache_arm for c in curves):
-        raise ValueError("cache-arm curves (infinite_vggt, ovggt) only apply to dropout")
+        raise ValueError(
+            "cache-arm curves (infinite_vggt, ovggt) only apply to dropout"
+        )
     if args.experiment != "dropout" and any(c.is_promptda for c in curves):
         # its output is network(prompt / range) * range: a scaled prompt gives
         # an exactly scaled output, so step / sine / jitter only restate that

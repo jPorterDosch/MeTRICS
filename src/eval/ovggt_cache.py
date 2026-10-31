@@ -72,7 +72,9 @@ def stream_depth(ovggt, metric, views: list[dict], amp: bool = True) -> np.ndarr
         feats = None
         if metric.conditioner is not None:
             feats = [
-                metric._route_conditioning([view], view["img"][:, None])["depth_token_feats"]
+                metric._route_conditioning([view], view["img"][:, None])[
+                    "depth_token_feats"
+                ]
                 for view in views
             ]
         out = ovggt.inference(views, depth_token_feats_list=feats)
