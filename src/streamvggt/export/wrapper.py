@@ -291,6 +291,10 @@ class StreamingDepthExport(nn.Module):
         else:
             raise TypeError(f"unsupported model type: {type(model).__name__}")
 
+        if inner.aggregator.scale_token is not None:
+            # the graph would neither carry a recurrent token's state between
+            # frames nor apply a factorised readout: a silently different model
+            raise NotImplementedError("export does not support the scale token yet")
         assert_cache_layout(inner.aggregator)
         self.aggregator = inner.aggregator
         self.depth_head = inner.depth_head

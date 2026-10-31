@@ -433,3 +433,62 @@ def test_promptda_curves_are_dropout_only() -> None:
     ):
         with pytest.raises(ValueError):
             SD.validate(argparse.Namespace(**{**base, **change}), curves, 192)
+
+
+def test_parse_curve_ema() -> None:
+    c = SD.parse_curve("Base+EMA=base@20+ema0.9")
+    assert (c.source, c.drop, c.ema, c.takes_depth) == ("base", 20, 0.9, True)
+    c = SD.parse_curve("Ours=/runs/abc+ema0")
+    assert (c.source, c.drop, c.ema) == ("/runs/abc", None, 0.0)
+    assert not SD.parse_curve("B=base").takes_depth
+    for bad in ("x=base+ema", "x=base+ema1", "x=base+emahalf"):
+        with pytest.raises(ValueError):
+            SD.parse_curve(bad)
+
+
+def _fed(values, fed_frames, hw=(2, 3)):
+    views = []
+    for t, v in enumerate(values):
+        mask = torch.zeros((1, *hw), dtype=torch.bool)
+        if t in fed_frames:
+            mask[0, 0, 0] = True
+        views.append({"sparse_depth": torch.full((1, *hw), v) * mask, "sparse_depth_mask": mask})
+    return views
+
+
+def test_ema_correct_tracks_then_holds_the_fed_scale() -> None:
+    pred = np.ones((5, 2, 3), np.float32)
+    views = _fed([2.0, 2.0, 2.0, 8.0, 8.0], fed_frames={0, 1, 2})
+    out = SD.ema_correct(pred, views, alpha=0.0)  # no memory: follows each frame
+    np.testing.assert_allclose(out[:3], 2.0, rtol=1e-6)
+    np.testing.assert_allclose(out[3:], 2.0, rtol=1e-6)  # unfed frames hold
+    views = _fed([2.0, 2.0, 8.0], fed_frames={0, 1, 2})
+    out = SD.ema_correct(np.ones((3, 2, 3), np.float32), views, alpha=0.5)
+    # log-space EMA: frame 2 is halfway between log 2 and log 8
+    np.testing.assert_allclose(out[2], 4.0, rtol=1e-6)
+    out = SD.ema_correct(pred, _fed([1.0] * 5, fed_frames={2}), alpha=0.5)
+    np.testing.assert_allclose(out[:2], 1.0)  # before the first measurement: as is
+
+
+def test_ema_makes_base_a_depth_taking_curve() -> None:
+    import argparse
+
+    args = argparse.Namespace(
+        experiment="step",
+        window=20,
+        ref_frames=20,
+        dropout_at=None,
+        step_at=40,
+        step_factor=[1.25],
+        sine_amplitude=1.2,
+        sine_periods=[8.0],
+        jitter_sigma=0.1,
+        splice_scale=2.0,
+        cut_pairs_per_bin=1,
+    )
+    SD.validate(args, [SD.parse_curve("B=base+ema0.9")], 192)
+    with pytest.raises(ValueError):
+        SD.validate(args, [SD.parse_curve("B=base")], 192)
+    args.experiment = "dropout"
+    with pytest.raises(ValueError):
+        SD.validate(args, [SD.parse_curve("P=promptda+ema0.9")], 192)

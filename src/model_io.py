@@ -22,6 +22,7 @@ from streamvggt.depth_cond import (
     LoRACfg,
     MetricCfg,
     MetricStreamVGGT,
+    ScaleTokenCfg,
     TrainCondCfg,
 )
 
@@ -99,6 +100,13 @@ def load_run_model(
     mcfg = rebuild_metric_cfg(raw)
     if not encoder_cache:
         mcfg.encoder_cache.enabled = False
+    if base and mcfg.scale_token.enabled:
+        # the token (a register copy), its carry and readout are extra modules:
+        # not the raw backbone, whatever their zero-init
+        raise ValueError(
+            "--base with a scale-token run is not the raw StreamVGGT; "
+            "take the architecture from a run without the token"
+        )
     if base:
         pretrained = pretrained or raw.get("pretrained") or ""
         if not pretrained or not os.path.exists(pretrained):
@@ -178,4 +186,6 @@ def rebuild_metric_cfg(raw: dict) -> MetricCfg:
         lora=LoRACfg(**raw["lora"]),
         encoder_cache=EncoderCacheCfg(**raw["encoder_cache"]),
         train=TrainCondCfg(**raw["train"]),
+        # runs from before the scale token have no such block: off
+        scale_token=ScaleTokenCfg(**raw.get("scale_token", {})),
     ).validate()

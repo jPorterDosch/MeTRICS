@@ -17,7 +17,7 @@ from streamvggt.models.streamvggt import StreamVGGT, StreamVGGTOutput
 
 from .cache import EncoderFeatureCache
 from .conditioner import DepthConditioner, dpt_fusion_sizes
-from .config import HeadType, InjectionType, MetricCfg
+from .config import HeadType, InjectionType, MetricCfg, ScaleReadout
 from .lora import apply_lora, param_stats
 
 
@@ -33,8 +33,15 @@ class MetricStreamVGGT(nn.Module):
         cfg.validate()
         self.cfg = cfg
         self.patch_size = patch_size
+        st = cfg.scale_token
         self.model = StreamVGGT(
-            img_size=img_size, patch_size=patch_size, embed_dim=embed_dim
+            img_size=img_size,
+            patch_size=patch_size,
+            embed_dim=embed_dim,
+            scale_token=st.enabled,
+            scale_recurrent=st.enabled and st.recurrent,
+            scale_readout=st.enabled and st.readout is not ScaleReadout.NONE,
+            scale_factorised=st.enabled and st.readout is ScaleReadout.FACTORISED,
         )
 
         self.conditioner = None
@@ -119,7 +126,25 @@ class MetricStreamVGGT(nn.Module):
             and not any(k.startswith("aggregator.") for k in sd)
         ):
             sd = sd["model"]
-        result = self.model.load_state_dict(sd, strict=True)
+        if not self.cfg.scale_token.enabled:
+            result = self.model.load_state_dict(sd, strict=True)
+        else:
+            # the pretrained checkpoint has no scale-token modules; nothing
+            # else may be missing or left over
+            result = self.model.load_state_dict(sd, strict=False)
+            new = ("aggregator.scale_token", "aggregator.scale_carry.", "scale_head.")
+            missing = [k for k in result.missing_keys if not k.startswith(new)]
+            if missing or result.unexpected_keys:
+                raise RuntimeError(
+                    f"pretrained checkpoint mismatch: missing {missing}, "
+                    f"unexpected {result.unexpected_keys}"
+                )
+            with torch.no_grad():
+                # start the scale token as a copy of a pretrained register
+                # token, a special token the backbone already attends to
+                # sensibly, instead of the 1e-6 noise of a fresh parameter
+                agg = self.model.aggregator
+                agg.scale_token.copy_(agg.register_token[:, :, :1])
         self.initialize_encoder_cache(path)
         return result
 
@@ -151,6 +176,13 @@ class MetricStreamVGGT(nn.Module):
         if self.conditioner is not None:
             for p in self.conditioner.parameters():
                 p.requires_grad = True
+        agg = self.model.aggregator
+        for module in (agg.scale_carry, self.model.scale_head):
+            if module is not None:
+                for p in module.parameters():
+                    p.requires_grad = True
+        if agg.scale_token is not None:
+            agg.scale_token.requires_grad = True
         stats = param_stats(self)
         stats["base_attention_frozen"] = self.check_base_attention_frozen()
         return stats
@@ -312,8 +344,44 @@ class MetricStreamVGGT(nn.Module):
             images = images.unsqueeze(0)
         conditioning = self._route_conditioning(views, images)
         patch_tokens = self._cached_patch_tokens(views, images)
-        return self.model(
-            views, query_points, patch_tokens=patch_tokens, **conditioning
+        if self.cfg.train.window is None:
+            return self.model(
+                views, query_points, patch_tokens=patch_tokens, **conditioning
+            )
+        return self._forward_windowed(views, patch_tokens, conditioning)
+
+    def _forward_windowed(self, views, patch_tokens, conditioning) -> StreamVGGTOutput:
+        """train.window set: the clip one frame at a time through the KV cache,
+        cut to the last train.window frames after every step, with gradients
+        (the deployment's sliding cache, and the only forward a recurrent scale
+        token can run). The conditioner still sees the whole clip at once, as in
+        the parallel forward, so its MAE / temporal paths are unchanged."""
+        if conditioning["depth_head_residuals"] is not None:
+            raise NotImplementedError(
+                "train.window is built for token injection; head injection would "
+                "need its per-scale residuals sliced per frame"
+            )
+        S = len(views)
+        feats = conditioning["depth_token_feats"]  # [B, S, P, C] or None
+        B = views[0]["img"].shape[0] if views[0]["img"].dim() == 4 else 1
+        token_list = None
+        if feats is not None:
+            feats = feats.reshape(B, S, *feats.shape[-2:])
+            token_list = [feats[:, s] for s in range(S)]
+        patch_list = None
+        if patch_tokens is not None:  # [B*S, P, C], batch-major
+            patch_tokens = patch_tokens.reshape(B, S, *patch_tokens.shape[1:])
+            patch_list = [patch_tokens[:, s] for s in range(S)]
+        # no track head: the depth losses never read it, and inference() would
+        # feed every frame's track back as the next frame's queries, with
+        # gradients (finetune_depth refuses train.window for the distill recipe,
+        # the one that supervises tracks)
+        return self.model.inference(
+            views,
+            None,
+            depth_token_feats_list=token_list,
+            window=self.cfg.train.window,
+            patch_tokens_list=patch_list,
         )
 
     def inference(
