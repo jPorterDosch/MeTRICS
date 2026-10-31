@@ -129,7 +129,7 @@ from streamvggt.export.wrapper import (  # noqa: E402
 from streamvggt.heads.dpt_head import DPTHead  # noqa: E402
 from streamvggt.layers.vision_transformer import DinoVisionTransformer  # noqa: E402
 from streamvggt.models.aggregator import Aggregator  # noqa: E402
-from streamvggt.models.streamvggt import StreamVGGT  # noqa: E402
+from streamvggt.models.streamvggt import ScaleReadoutHead, StreamVGGT  # noqa: E402
 from visualize_spot import load_spot_views  # noqa: E402
 
 # Fixed so that two constructions inside one run produce identical weights --
@@ -599,6 +599,8 @@ def build_tiny_model():
     model.camera_head = None
     model.point_head = None
     model.track_head = None
+    model.scale_head = None  # no scale token (see build_tiny_scale_token_model)
+    model.scale_factorised = False
     g = torch.Generator().manual_seed(MODEL_SEED)
     with torch.no_grad():
         agg = model.aggregator
@@ -705,15 +707,16 @@ def check_batch_independence(model, seed: int, batch: int = 2) -> None:
             feed.update(
                 dict(
                     zip(
-                        cache_input_names(),
+                        batched.carried_input_names(),
                         ort_cache
                         if ort_cache is not None
                         else [t.numpy() for t in batched.empty_cache()],
+                        strict=True,
                     )
                 )
             )
             out = run_by_name(sess, feed)
-            ort_cache = [out[n] for n in cache_output_names()]
+            ort_cache = [out[n] for n in batched.carried_output_names()]
             graph_out.append(out["depth"])
 
     # the B=1 wrapper rebakes the shared model's position getter for batch 1,
@@ -760,7 +763,13 @@ def check_graph_orientation(step_path, wrapper, seed: int) -> None:
     rgb, d = dummy_frame(h, w, seed=seed)
     feed = {"rgb": rgb.numpy(), "sparse_depth": d.numpy()}
     feed.update(
-        dict(zip(cache_input_names(), (t.numpy() for t in wrapper.empty_cache())))
+        dict(
+            zip(
+                wrapper.carried_input_names(),
+                (t.numpy() for t in wrapper.empty_cache()),
+                strict=True,
+            )
+        )
     )
     out = run_by_name(ort_session(step_path), feed)
     want = (1, *wrapper.net_hw)
@@ -828,6 +837,88 @@ def check_no_inverse_rotation(model, seed: int) -> None:
     )
 
 
+def build_tiny_scale_token_model():
+    """build_tiny_model's architecture with a recurrent scale token and a
+    factorised readout, every scale module forced away from its zero init
+    (zero-init carry and readout are no-ops, and the graph would match eager
+    whether or not it carried them)."""
+    torch.manual_seed(MODEL_SEED)
+    model = build_tiny_model()
+    agg = model.aggregator
+    tiny = Aggregator(
+        img_size=140,
+        patch_size=14,
+        embed_dim=64,
+        depth=24,
+        num_heads=4,
+        mlp_ratio=1.0,
+        patch_embed="conv",
+        scale_token=True,
+        scale_recurrent=True,
+    )
+    tiny.load_state_dict(agg.state_dict(), strict=False)
+    g = torch.Generator().manual_seed(MODEL_SEED + 1)
+    with torch.no_grad():
+        tiny.scale_token.copy_(torch.randn(tiny.scale_token.shape, generator=g))
+        # every carry parameter, biases included: with zero biases a zero
+        # state gives a zero carry whether or not the frame-0 gate works, and
+        # a constant-folded gate would pass the probe
+        for p in tiny.scale_carry.parameters():
+            p.copy_(0.05 * torch.randn(p.shape, generator=g))
+    model.aggregator = tiny
+    model.scale_head = ScaleReadoutHead(128, hidden=16)
+    with torch.no_grad():
+        model.scale_head.net[-1].weight.copy_(
+            0.1 * torch.randn(model.scale_head.net[-1].weight.shape, generator=g)
+        )
+    model.scale_factorised = True
+    return model.eval()
+
+
+def check_scale_token_export(args) -> None:
+    """A recurrent, factorised scale token through export: the state rides
+    as `past_scale` / `new_scale` (51 in / 51 out), the frame-0 probe also
+    pins the in-graph carry gate (a zero state at frame 0 must add nothing),
+    and the rollout runs past the window, where only the carried state still
+    links a frame to the evicted ones. The eager wrapper is also checked
+    against eval.streaming_window.stream_depth, the semantics the drift
+    experiments and training use, so the graph matches the model and not
+    only the wrapper."""
+    from eval.streaming_window import stream_depth
+
+    model = build_tiny_scale_token_model()
+    h, w = SMOKE_HW
+    wrapper = StreamingDepthExport(model, image_hw=(h, w), window=3)
+    if (
+        len(wrapper.carried_input_names()) != 49
+        or wrapper.carried_input_names()[-1] != "past_scale"
+    ):
+        raise AssertionError(f"carried inputs: {wrapper.carried_input_names()[-3:]}")
+    frames = [dummy_frame(h, w, seed=args.seed + 300 + i) for i in range(6)]
+    cache, eager = None, []
+    with torch.no_grad():
+        for rgb, d in frames:
+            depth, _, cache = wrapper._step(rgb, d, cache)
+            eager.append(depth[0])
+        ref = stream_depth(
+            model, [{"img": rgb} for rgb, _ in frames], window=3, amp=False
+        )
+    diff = float(np.abs(torch.stack(eager).numpy() - ref).max())
+    if diff >= 1e-5:
+        raise AssertionError(
+            f"export wrapper != stream_depth on a scale-token model (max|diff| {diff:.3e})"
+        )
+    ns = SimpleNamespace(height=h, width=w, window=3, opset=17)
+    with tempfile.TemporaryDirectory() as td:
+        step = export_step(wrapper, ns, os.path.join(td, "tiny_scale_step.onnx"))
+        probe_frame0(step, wrapper, ns)
+        validate_rollout(step, wrapper, ns, n_frames=6)
+    print(
+        "[export-smoke] scale token: OK (51 in / 51 out, carry gated off at "
+        f"frame 0, rollout past the window; wrapper vs stream_depth {diff:.1e})"
+    )
+
+
 def run_cpu_unit(args) -> None:
     # one seed for the whole run, from --seed: the checks below draw their
     # data from the global RNG rather than each pinning a magic number
@@ -840,6 +931,7 @@ def run_cpu_unit(args) -> None:
     check_exportable_adaptive_pool()
     check_window_slice()
     run_export_smoke(args)
+    check_scale_token_export(args)
     print("cpu-unit checks PASSED")
 
 
@@ -925,9 +1017,6 @@ def run_parity(args) -> None:
     if not os.path.isfile(step_path):
         raise SystemExit(f"missing {step_path}")
     step_sess = ort_session(step_path)
-    # a graph exported before the I/O contract was pinned (pruned or renamed
-    # `sparse_depth`) must fail here, not silently parity-check 49 inputs
-    assert_graph_io(step_sess, step_path)
     print(f"graph: {step_path} (single graph, all frames)")
 
     if args.weights:
@@ -942,6 +1031,10 @@ def run_parity(args) -> None:
         rotate=args.rotate,
         batch_size=args.batch_size,
     )
+    # a graph exported before the I/O contract was pinned (pruned or renamed
+    # `sparse_depth`) must fail here, not silently parity-check 49 inputs; the
+    # contract depends on the model (a recurrent scale token adds its state)
+    assert_graph_io(step_sess, step_path, wrapper)
     # --rotate / --height / --width are export-time constants baked into the
     # graph; this is where a mismatch with the flags given here is caught
     assert_graph_geometry(step_sess, wrapper, step_path)
@@ -980,9 +1073,9 @@ def run_parity(args) -> None:
             if ort_cache is not None
             else [t.numpy() for t in wrapper.empty_cache()]
         )
-        feed.update(dict(zip(cache_input_names(), cache)))
+        feed.update(dict(zip(wrapper.carried_input_names(), cache, strict=True)))
         out = run_by_name(step_sess, feed)
-        ort_cache = [out[n] for n in cache_output_names()]
+        ort_cache = [out[n] for n in wrapper.carried_output_names()]
 
         # the graph declares its depth/conf dims symbolically (the DPT head
         # interpolates to traced sizes), so the orientation contract can only

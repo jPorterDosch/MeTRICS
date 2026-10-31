@@ -49,6 +49,8 @@ from streamvggt.depth_cond import (
     LoRACfg,
     MetricCfg,
     MetricStreamVGGT,
+    ScaleReadout,
+    ScaleTokenCfg,
     TrainCondCfg,
     experiment_hash,
     experiment_id,
@@ -56,6 +58,7 @@ from streamvggt.depth_cond import (
     seed_everything,
     simulate_sparse_depth,
 )
+from streamvggt.depth_cond.scale_token import scale_readout_loss, withhold_depth_tail
 from eval.boundary import boundary_f1, fed_pixel_metrics
 from eval.temporal_consistency.metrics import depth_evaluation, tae
 from streamvggt.teacher import TeacherCfg, TeacherModel, build_teacher
@@ -134,6 +137,7 @@ class FinetuneDepthCfg:
     lora: LoRACfg = field(default_factory=LoRACfg)
     encoder_cache: EncoderCacheCfg = field(default_factory=EncoderCacheCfg)
     train: TrainCondCfg = field(default_factory=TrainCondCfg)
+    scale_token: ScaleTokenCfg = field(default_factory=ScaleTokenCfg)
     # frozen monocular teacher for the edge-aware loss (--loss.edge-weight);
     # run online on every training and validation frame (streamvggt.teacher)
     teacher: TeacherCfg = field(default_factory=TeacherCfg)
@@ -920,7 +924,11 @@ def train_loop(
     ):
         with accelerator.accumulate(model):
             _prepare_batch(batch, mcfg, teacher)
+            # stats before the dropout: they describe the configured sparsity,
+            # comparable with runs without it
             sparse_stats = sparse_depth_stats(batch, mcfg.depth_cond.sim_mask_ratio)
+            # training batches only: validation keeps every frame fed
+            withhold_depth_tail(batch, mcfg.train.depth_dropout_p)
 
             epoch_f = epoch + data_iter_step / len(data_loader)
             if data_iter_step % accum_iter == 0:
@@ -948,6 +956,15 @@ def train_loop(
             if mae_recon is not None and not already_backprop:
                 loss = loss + mcfg.depth_cond.mae_recon_weight * mae_recon
                 loss_details["mae_recon"] = mae_recon.detach()
+            st = mcfg.scale_token
+            if st.enabled and st.readout is not ScaleReadout.NONE:
+                if already_backprop:
+                    raise RuntimeError(
+                        "the scale readout loss needs the loss before backprop"
+                    )
+                readout = scale_readout_loss(result["pred"], result["views"])
+                loss = loss + st.readout_weight * readout
+                loss_details["scale_readout"] = readout.detach()
             loss_value = float(loss)
             _check_finite_loss(loss_value, loss_details, accelerator)
             if not already_backprop:
@@ -1619,7 +1636,23 @@ def main(cfg: FinetuneDepthCfg) -> None:
         lora=cfg.lora,
         encoder_cache=cfg.encoder_cache,
         train=cfg.train,
+        scale_token=cfg.scale_token,
     ).validate()
+    if mcfg.train.window is not None and cfg.loss.recipe in _POINT_SUPERVISED_RECIPES:
+        raise ValueError(
+            "train.window runs the depth head only; the "
+            f"{cfg.loss.recipe.value} recipe reads point / track outputs"
+        )
+    if (
+        mcfg.scale_token.enabled
+        and mcfg.scale_token.recurrent
+        and mcfg.train.window >= cfg.train_dataset.num_views
+    ):
+        raise ValueError(
+            f"train.window {mcfg.train.window} >= {cfg.train_dataset.num_views} "
+            "frames per clip: nothing ever leaves the cache, so the recurrence "
+            "is never needed in training"
+        )
 
     manifest = build_manifest(cfg)
     _validate_resume_identity(cfg, manifest)

@@ -94,6 +94,20 @@ class LoRATarget(str, enum.Enum):
     O = "o"  # noqa: E741 - mirrors the q/k/v/o naming convention
 
 
+class ScaleReadout(str, enum.Enum):
+    """What the scale token's readout (a small MLP on its last-layer output,
+    one log-scale per frame) does."""
+
+    NONE = "none"  # no readout: the token is free, nothing supervises it
+    # train-only decoder: supervised against the clip's log scene scale, never
+    # applied to the output (the depth head may or may not come to use it)
+    AUX = "aux"
+    # depth = exp(readout) * depth head output, so the scale the token carries
+    # IS the output's global scale; the readout loss (if weighted) also pins
+    # the depth head's map to the normalized scene
+    FACTORISED = "factorised"
+
+
 class SparseSimMode(str, enum.Enum):
     NONE = "none"  # no masking: full dense GT depth as conditioning
     RANDOM = "random"  # MAE-style: random visible patches, resampled per frame
@@ -314,6 +328,20 @@ class EncoderCacheCfg:
 class TrainCondCfg:
     grad_checkpoint: bool = True
     clip_len: int | None = 10  # repo default: num_views=10 in config/finetune.yaml
+    # KV window of the training forward, in frames. None: the parallel causal
+    # forward over the whole clip (every frame sees every earlier one). An int:
+    # the clip runs one frame at a time through the KV cache, cut to the last
+    # `window` frames after every step -- the sliding cache the deployment and
+    # scale_drift.py use -- so frames do leave the cache during training. With
+    # clips of 10 frames and the parallel forward nothing is ever evicted,
+    # which is the regime a recurrent scale token exists for.
+    window: int | None = None
+    # Probability that a training clip loses its sparse depth from a random
+    # frame on (scale_token.withhold_depth_tail; training batches only). Every
+    # training clip is otherwise fed on every frame, so nothing ever asks the
+    # model to hold a scale without measurements -- the dropout the scale
+    # token exists for.
+    depth_dropout_p: float = 0.0
     # Output heads to fully unfreeze during fine-tuning, in BOTH injection
     # arms (the arms stay comparable because this knob is part of the hashed
     # manifest). The pretrained heads must be free to move for the output to
@@ -330,6 +358,50 @@ class TrainCondCfg:
 
     def validate(self) -> None:
         self.train_heads = [HeadType(h) for h in self.train_heads]
+        if self.window is not None and self.window < 1:
+            raise ValueError(f"train.window must be >= 1 or None, got {self.window}")
+        if not 0.0 <= self.depth_dropout_p <= 1.0:
+            raise ValueError(
+                f"train.depth_dropout_p must be in [0, 1], got {self.depth_dropout_p}"
+            )
+
+
+@dataclass
+class ScaleTokenCfg:
+    """An extra special token (after the camera and register tokens) meant to
+    hold the clip's global metric scale: a time-invariant latent, as opposed
+    to the per-frame structure in the patch tokens."""
+
+    enabled: bool = False
+    # frame t's input token = the learned token + a zero-init projection of
+    # frame t-1's last-layer output token, so the state survives eviction from
+    # the KV cache. False: a plain token, evicted with its frame (the
+    # cache-only control). Recurrence needs the one-frame-at-a-time forward,
+    # i.e. train.window set.
+    recurrent: bool = True
+    readout: ScaleReadout = ScaleReadout.AUX
+    # weight of the readout loss: L1 between frame t's readout and the log
+    # of the mean GT depth over frames 0..t (scale_token.scale_readout_loss)
+    readout_weight: float = 0.1
+
+    def validate(self) -> None:
+        self.readout = ScaleReadout(self.readout)
+        if not math.isfinite(self.readout_weight) or self.readout_weight < 0:
+            raise ValueError(
+                "scale_token.readout_weight must be finite and non-negative, got "
+                f"{self.readout_weight}"
+            )
+        if not self.enabled:
+            return
+        if self.readout is ScaleReadout.AUX and self.readout_weight == 0:
+            raise ValueError(
+                "scale_token.readout=aux with readout_weight 0 trains a readout "
+                "nothing reads; set a weight or readout=none"
+            )
+        if self.readout is ScaleReadout.NONE and self.readout_weight > 0:
+            raise ValueError(
+                "scale_token.readout_weight > 0 needs a readout (aux or factorised)"
+            )
 
 
 @dataclass
@@ -338,12 +410,23 @@ class MetricCfg:
     lora: LoRACfg = field(default_factory=LoRACfg)
     encoder_cache: EncoderCacheCfg = field(default_factory=EncoderCacheCfg)
     train: TrainCondCfg = field(default_factory=TrainCondCfg)
+    scale_token: ScaleTokenCfg = field(default_factory=ScaleTokenCfg)
 
     def validate(self) -> "MetricCfg":
         self.depth_cond.validate()
         self.lora.validate()
         self.encoder_cache.validate()
         self.train.validate()
+        self.scale_token.validate()
+        if (
+            self.scale_token.enabled
+            and self.scale_token.recurrent
+            and self.train.window is None
+        ):
+            raise ValueError(
+                "scale_token.recurrent trains only through the one-frame-at-a-time "
+                "forward: set train.window (frames kept in the KV cache)"
+            )
         return self
 
 
