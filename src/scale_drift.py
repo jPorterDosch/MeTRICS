@@ -122,6 +122,8 @@ EXPERIMENTS = ("dropout", "step", "sine", "jitter", "splice", "cut")
 CUT_BINS = ((1.0, 1.25), (1.5, 2.0), (2.0, 2.5), (2.5, math.inf))
 RECOVER_HOLD = 5  # cut: frames it must stay back, so one lucky frame does not count
 CUT_ROLE_CAP = 2  # cut: times one clip may lead (or follow) within one bin
+# 12 distinct colours (the first 8 unchanged, so earlier figures keep theirs);
+# curves past 12 would repeat one
 _COLORS = [
     "#2563eb",
     "#e8590c",
@@ -131,6 +133,10 @@ _COLORS = [
     "#db2777",
     "#0891b2",
     "#ca8a04",
+    "#991b1b",
+    "#0f766e",
+    "#1e1b4b",
+    "#65a30d",
 ]
 
 
