@@ -41,6 +41,13 @@ sliding KV cache of `--window` frames, the deployment setting. A curve is
           all-zero validity mask, the model's "no measurement"); omitted =
           fed on every frame. Ignored for `base`, which takes no depth.
 
+`LABEL=SOURCE[@DROP]+emaALPHA` adds the non-learned scale correction on top
+of the model's output (ema_correct): per frame, e_t = median log(fed / pred)
+over the fed pixels, m_t = ALPHA m_{t-1} + (1 - ALPHA) e_t (held where a frame
+has no fed pixel), output pred * exp(m_t). A learned scale state has to beat
+this. `base+ema0.9` makes the RGB-only StreamVGGT metric from the same
+measurements, and its @DROP then applies.
+
     python src/scale_drift.py --out <dir> --dropout-at 20 \\
         --curve "StreamVGGT=base" \\
         --curve "Ours (dropout @20)=<run>@20" \\
@@ -133,10 +140,17 @@ class Curve:
     label: str
     source: str  # "base", "promptda", "promptda-hold" or a run directory
     drop: int | None  # first frame without sparse depth; None = always fed
+    ema: float | None = None  # ALPHA of the +ema output correction; None = off
 
     @property
     def is_base(self) -> bool:
         return self.source == "base"
+
+    @property
+    def takes_depth(self) -> bool:
+        """Whether the fed depth reaches the output (so its scale is metric):
+        everything but the RGB-only `base`, unless an EMA correction reads it."""
+        return not self.is_base or self.ema is not None
 
     @property
     def is_promptda(self) -> bool:
@@ -144,14 +158,46 @@ class Curve:
 
 
 def parse_curve(spec: str) -> Curve:
-    """LABEL=SOURCE[@DROP]."""
+    """LABEL=SOURCE[@DROP][+emaALPHA]."""
     label, sep, rest = spec.partition("=")
     if not sep or not label or not rest:
-        raise ValueError(f"--curve wants LABEL=SOURCE[@DROP], got {spec!r}")
+        raise ValueError(f"--curve wants LABEL=SOURCE[@DROP][+emaALPHA], got {spec!r}")
+    rest, plus, alpha = rest.partition("+ema")
+    ema = None
+    if plus:
+        try:
+            ema = float(alpha)
+        except ValueError:
+            raise ValueError(f"--curve {spec!r}: +ema wants an ALPHA, e.g. +ema0.9")
+        if not 0.0 <= ema < 1.0:
+            raise ValueError(f"--curve {spec!r}: ALPHA must be in [0, 1)")
     source, at, drop = rest.rpartition("@") if "@" in rest else (rest, "", "")
     if at and not drop.isdigit():
         raise ValueError(f"--curve {spec!r}: DROP must be a frame index")
-    return Curve(label, source, int(drop) if at else None)
+    return Curve(label, source, int(drop) if at else None, ema)
+
+
+def ema_correct(pred: np.ndarray, views: list[dict], alpha: float) -> np.ndarray:
+    """[S, h, w] model-grid depth times exp(m_t), m_t the EMA of each frame's
+    median log(fed / pred) on its fed pixels (the views' sparse depth, on the
+    same grid), held over frames with none, 0 before the first. Causal: frame
+    t uses frames <= t."""
+    depth, mask = _sparse_arrays(views)
+    out = np.empty_like(pred)
+    m = None
+    for t in range(len(pred)):
+        ok = mask[t] & (depth[t] > 0) & np.isfinite(pred[t]) & (pred[t] > 0)
+        if ok.any():
+            e = float(np.median(np.log(depth[t][ok] / pred[t][ok])))
+            m = e if m is None else alpha * m + (1 - alpha) * e
+        out[t] = pred[t] if m is None else pred[t] * math.exp(m)
+    return out
+
+
+def curve_depth(curve: Curve, model, views: list[dict], window: int, amp) -> np.ndarray:
+    """stream_depth, plus the curve's EMA correction if it has one."""
+    pred = stream_depth(model, views, window, amp)
+    return pred if curve.ema is None else ema_correct(pred, views, curve.ema)
 
 
 # PromptDA (dropout only): a per-frame model that needs depth on every frame.
@@ -534,9 +580,9 @@ def run_dropout(args, curves, models, seqs, spec, bench, device):
                     model, seq, spec, curve_views, gt.shape[1:], hold
                 )
             else:
-                if not curve.is_base:
+                if curve.takes_depth:
                     withhold_depth(curve_views, curve.drop)
-                pred = stream_depth(model, curve_views, args.window, amp)
+                pred = curve_depth(curve, model, curve_views, args.window, amp)
                 pred_gt = model_to_gt(pred, gt.shape[1:], box)
             s = frame_scales(pred_gt, gt, scored)
             r, a = drift_rows(s, args.ref_frames)
@@ -562,7 +608,7 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
     for k, c in enumerate(curves):
         x = np.arange(rel[c.label].shape[1])
         _band_line(ax1, x, rel[c.label], _COLORS[k % len(_COLORS)], c.label)
-        if c.is_base:
+        if not c.takes_depth:
             # no metric scale to hold: its |log s_t| is how far off an RGB-only
             # model starts, the gap that metric conditioning closes
             ax2.plot(
@@ -605,7 +651,7 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
     # the curves that keep their input all clip long: on the shared axes they
     # sit on top of each other, so they get a figure of their own, each panel
     # on its own scale (same colours as above)
-    kept = [(k, c) for k, c in enumerate(curves) if c.drop is None and not c.is_base]
+    kept = [(k, c) for k, c in enumerate(curves) if c.drop is None and c.takes_depth]
     if len(kept) > 1:
         fig, (ax1, ax2) = plt.subplots(
             2, 1, figsize=(9, 7), sharex=True, constrained_layout=True
@@ -637,7 +683,7 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
                 "rel_median": band(rel[c.label])[0],
                 # base: not a metric model, so not an error it could avoid
                 "abs_median": band(absol[c.label])[0],
-                "metric": not c.is_base,
+                "metric": c.takes_depth,
             }
             for c in curves
         ],
@@ -675,11 +721,11 @@ def run_response(args, curves, models, seqs, spec, bench, device):
         inputs = _inputs(args, S, n, bench)
         for c in curves:
             model, amp = models[c.label]
-            native_0 = stream_depth(model, views, args.window, amp)
+            native_0 = curve_depth(c, model, views, args.window, amp)
             pred_0 = model_to_gt(native_0, gt.shape[1:], box)
             for key, u in inputs.items():
-                native = stream_depth(
-                    model, scale_fed(views, np.exp(u)), args.window, amp
+                native = curve_depth(
+                    c, model, scale_fed(views, np.exp(u)), args.window, amp
                 )
                 pred = model_to_gt(native, gt.shape[1:], box)
                 r, q = response(pred, pred_0, scored)
@@ -905,10 +951,10 @@ def run_splice(args, curves, models, seqs, spec, bench, device):
             gt = np.concatenate([gt_a, gt_b * factor])
             views = views_a + scale_fed(views_b, np.full(len(views_b), factor))
             for c in curves:
-                if c.is_base and factor != k:
+                if not c.takes_depth and factor != k:
                     continue  # no fed depth: the control is the same run
                 model, amp = models[c.label]
-                pred = stream_depth(model, views, args.window, amp)
+                pred = curve_depth(c, model, views, args.window, amp)
                 pred = model_to_gt(pred, gt.shape[1:], box)
                 s = frame_scales(pred, gt, scored)
                 st = median_scaled_absrel(pred, gt, scored)
@@ -944,7 +990,7 @@ def summarize_splice(args, curves, header, rows, out: Path, cut: int) -> dict:
         q = stack(c.label, k, "median_scaled_absrel")
         x = np.arange(q.shape[1])
         entry = {"label": c.label, "structure_median": band(q)[0]}
-        if not c.is_base:
+        if c.takes_depth:
             e = np.abs(np.log(stack(c.label, k, "scale")))
             e1 = np.abs(np.log(stack(c.label, 1.0, "scale")))
             entry |= {
@@ -1076,7 +1122,7 @@ def run_cut(args, curves, models, seqs, spec, bench, device):
         prediction mapped onto its own GT grid."""
         gt_i, views_i, scored_i, _, box_i = clip(i)
         gt_j, views_j, scored_j, _, box_j = clip(j)
-        pred = stream_depth(model, views_i + views_j, args.window, amp)
+        pred = curve_depth(c, model, views_i + views_j, args.window, amp)
         n = len(views_i)
         p_i = model_to_gt(pred[:n], gt_i.shape[1:], box_i)
         p_j = model_to_gt(pred[n:], gt_j.shape[1:], box_j)
@@ -1256,12 +1302,16 @@ def validate(args, curves, clip_len: int) -> None:
         raise ValueError("PromptDA curves only apply to --experiment dropout")
     if any(c.source == "promptda-hold" and c.drop is None for c in curves):
         raise ValueError("promptda-hold needs @DROP: the frame it starts holding from")
-    if args.experiment in ("step", "sine", "jitter") and any(c.is_base for c in curves):
+    if any(c.is_promptda and c.ema is not None for c in curves):
+        raise ValueError("+ema applies to the streamed models, not PromptDA")
+    if args.experiment in ("step", "sine", "jitter") and any(
+        not c.takes_depth for c in curves
+    ):
         raise ValueError(
             f"--experiment {args.experiment}: `base` takes no depth to perturb"
         )
     if args.experiment == "dropout":
-        drops = {c.drop for c in curves if not c.is_base and c.drop is not None}
+        drops = {c.drop for c in curves if c.takes_depth and c.drop is not None}
         if any(not 0 < d < clip_len for d in drops):
             raise ValueError(f"@DROP must be in (0, {clip_len}), got {sorted(drops)}")
         if drops and args.ref_frames > min(drops):
@@ -1297,8 +1347,8 @@ def validate(args, curves, clip_len: int) -> None:
     if args.experiment == "cut":
         if len(curves) != 1:
             raise ValueError("cut takes one --curve (its figures are per model)")
-        if any(c.is_base for c in curves):
-            raise ValueError("cut scores metric scale: `base` has none")
+        if any(not c.takes_depth for c in curves):
+            raise ValueError("cut scores metric scale: `base` has none (try base+ema)")
         if args.cut_pairs_per_bin < 1:
             raise ValueError("--cut-pairs-per-bin must be >= 1")
 

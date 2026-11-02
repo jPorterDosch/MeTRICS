@@ -60,6 +60,10 @@ class TinyBackbone(nn.Module):
         self.point_head = TinyHead()
         self.aggregator = nn.Module()
         self.aggregator.grad_checkpointing = False
+        # no scale token (depth_cond ScaleTokenCfg off)
+        self.aggregator.scale_token = None
+        self.aggregator.scale_carry = None
+        self.scale_head = None
 
     @staticmethod
     def _images(views: list[dict]) -> torch.Tensor:

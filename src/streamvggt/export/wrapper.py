@@ -41,6 +41,11 @@ I/O contract (all variants share it; ONE graph serves every frame):
                                (see StreamingDepthExport._zero_from -- an
                                untied input is pruned by the tracer).
            past_k_00..past_v_23: 48 cache tensors [B, 16, n_frames, P, 64],
+                               then, for a recurrent scale token only,
+                               past_scale [B, 2C]: the previous frame's
+                               last-layer scale token (zeros at frame 0,
+                               where the graph gates the carry off -- see
+                               Aggregator._carry_gate),
                                dynamic dim 2. Frame 0 feeds n_frames == 0
                                (see StreamingDepthExport.empty_cache). The
                                aggregator's frame-0 vs later-frame camera/
@@ -54,7 +59,9 @@ I/O contract (all variants share it; ONE graph serves every frame):
   outputs: depth [B, H', W'], depth_conf [B, H', W'] where (H', W') is the
            NETWORK orientation -- (W, H) with rotate=True, (H, W) otherwise
            (rotated outputs are not rotated back) -- plus new_k_00..new_v_23
-           (cache carried to the next call, already window-sliced).
+           (cache carried to the next call, already window-sliced), and
+           new_scale [B, 2C] for a recurrent scale token. A factorised scale
+           readout is applied in-graph (depth * exp(readout)).
 
 Rotation: with rotate=True the graph rotates rgb+depth 90 degrees clockwise
 before the network; the depth/conf outputs REMAIN in that rotated
@@ -294,6 +301,13 @@ class StreamingDepthExport(nn.Module):
         assert_cache_layout(inner.aggregator)
         self.aggregator = inner.aggregator
         self.depth_head = inner.depth_head
+        # scale token (depth_cond ScaleTokenCfg): a recurrent token's state
+        # rides with the cache as one more carried tensor, and a factorised
+        # readout scales the depth in-graph -- the semantics of
+        # StreamVGGT.inference / eval.streaming_window.stream_depth
+        self.scale_head = inner.scale_head
+        self.scale_factorised = inner.scale_factorised
+        self.has_scale_state = inner.aggregator.scale_carry is not None
         self.window = int(window)
         if self.window < 1:
             raise ValueError(f"window must be >= 1, got {window}")
@@ -395,15 +409,27 @@ class StreamingDepthExport(nn.Module):
 
     def empty_cache(self, batch_size: int | None = None) -> list[torch.Tensor]:
         """48 zero-length cache tensors matching THIS model's geometry, batched
-        to the wrapper's baked B (one independent stream per batch element)."""
+        to the wrapper's baked B (one independent stream per batch element);
+        plus the zero scale state for a recurrent scale token."""
         from .cache import empty_cache
 
-        return empty_cache(
-            self.n_tokens,
-            self.num_heads,
-            self.head_dim,
-            batch_size=self.batch_size if batch_size is None else batch_size,
-        )
+        b = self.batch_size if batch_size is None else batch_size
+        cache = empty_cache(self.n_tokens, self.num_heads, self.head_dim, batch_size=b)
+        if self.has_scale_state:
+            dim = 2 * self.aggregator.scale_token.shape[-1]  # frame + global halves
+            cache.append(torch.zeros(b, dim))
+        return cache
+
+    def carried_input_names(self) -> list[str]:
+        """Names of everything carried between calls, in empty_cache order."""
+        from .cache import cache_input_names
+
+        return cache_input_names() + (["past_scale"] if self.has_scale_state else [])
+
+    def carried_output_names(self) -> list[str]:
+        from .cache import cache_output_names
+
+        return cache_output_names() + (["new_scale"] if self.has_scale_state else [])
 
     @property
     def variant(self) -> str:
@@ -465,6 +491,9 @@ class StreamingDepthExport(nn.Module):
         if self.conditioner is None:
             images = images + self._zero_from(depth, images.dtype)
 
+        scale_prev = None
+        if self.has_scale_state and past_kv is not None:
+            past_kv, scale_prev = past_kv[:-1], past_kv[-1]
         # fresh list every call -- the aggregator mutates it in place
         pkv = (
             unflatten_cache(past_kv)
@@ -477,6 +506,7 @@ class StreamingDepthExport(nn.Module):
             use_cache=True,
             past_frame_idx=0,  # confirmed inert; RoPE is spatial-only
             injected_patch_feats=feats,
+            scale_prev=scale_prev,
         )
         # heads run fp32 (StreamVGGT.forward disables autocast around them)
         tokens = [t.float() for t in tokens]
@@ -486,6 +516,10 @@ class StreamingDepthExport(nn.Module):
             patch_start_idx=patch_start_idx,
             depth_residuals=residuals,
         )
+        idx = self.aggregator.scale_token_idx
+        if self.scale_factorised:
+            scale_log = self.scale_head(tokens[-1][:, :, idx])  # [B, 1]
+            depth_pred = depth_pred * torch.exp(scale_log)[:, :, None, None, None]
         depth_pred = depth_pred[:, 0, :, :, 0]  # [B, H', W']
         conf = conf[:, 0]  # [B, H', W']
 
@@ -494,6 +528,8 @@ class StreamingDepthExport(nn.Module):
             # sliding window, baked: no-op until the cache exceeds `window`
             # (negative Slice clamps), then keeps the most recent W frames.
             out_cache += [k[:, :, -self.window :], v[:, :, -self.window :]]
+        if self.has_scale_state:
+            out_cache.append(tokens[-1][:, -1, idx])  # this frame's token, [B, 2C]
 
         # outputs deliberately stay in the rotated (network) orientation --
         # the consumer wants rotated depth maps, so no rotate_ccw here
@@ -502,7 +538,8 @@ class StreamingDepthExport(nn.Module):
 
 class StepWrapper(nn.Module):
     """The single exported graph: 48 cache tensors in (zero-length at frame
-    0), 48 (window-sliced) out."""
+    0), 48 (window-sliced) out; plus the scale state in and out for a
+    recurrent scale token."""
 
     def __init__(self, core: StreamingDepthExport) -> None:
         super().__init__()
