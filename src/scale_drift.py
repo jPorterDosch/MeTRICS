@@ -678,7 +678,13 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
     # the curves that keep their input all clip long: on the shared axes they
     # sit on top of each other, so they get a figure of their own, each panel
     # on its own scale (same colours as above)
-    kept = [(k, c) for k, c in enumerate(curves) if c.drop is None and c.metric]
+    # plus the RGB-only cache arms, whose drift sits in this range (their
+    # absolute error is not a metric one, so drift panel only)
+    kept = [
+        (k, c)
+        for k, c in enumerate(curves)
+        if c.drop is None and (c.metric or c.is_cache_arm)
+    ]
     if len(kept) > 1:
         fig, (ax1, ax2) = plt.subplots(
             2, 1, figsize=(9, 7), sharex=True, constrained_layout=True
@@ -687,15 +693,16 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
             x = np.arange(rel[c.label].shape[1])
             color = _COLORS[k % len(_COLORS)]
             _band_line(ax1, x, rel[c.label], color, c.label)
-            _band_line(ax2, x, absol[c.label], color, c.label)
+            if c.metric:
+                _band_line(ax2, x, absol[c.label], color, c.label)
         ax1.set_ylabel("|log(s_t / s_ref)|  (drift from own early scale)")
         ax2.set_ylabel("|log s_t|  (metric scale error)")
         ax2.set_xlabel("frame index")
         for ax in (ax1, ax2):
             _style(ax)
         ax1.set_title(
-            "Scale drift, ScanNet TAE clips, zoomed: every curve without a "
-            "dropout (the pretrained StreamVGGT left out)",
+            "Scale drift, zoomed: curves without a dropout (StreamVGGT left "
+            "out; RGB-only cache arms: drift panel only)",
             fontsize=9,
         )
         fig.savefig(out / "scale_drift_kept.png", dpi=150)
