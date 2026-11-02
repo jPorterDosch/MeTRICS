@@ -57,9 +57,12 @@ def scale_readout_loss(preds: list[dict], views: list[dict]) -> torch.Tensor:
     return (s[keep] - target[keep]).abs().mean()
 
 
-def withhold_depth_tail(views: list[dict], p: float) -> int:
+def withhold_depth_tail(
+    views: list[dict], p: float, last_start: int | None = None
+) -> int:
     """With probability `p` per clip, remove its sparse depth from a frame
-    drawn uniformly in [1, S-1] on: zero depth and a zero validity mask, the
+    drawn uniformly in [1, min(last_start, S-1)] on (last_start None: [1, S-1]):
+    zero depth and a zero validity mask, the
     model's "no measurement" (as scale_drift.py's dropout). Frame 0 always
     keeps its depth, so the scale has something to start from. In place;
     returns the number of clips cut. Uses the global torch RNG, like the
@@ -70,7 +73,8 @@ def withhold_depth_tail(views: list[dict], p: float) -> int:
     B = views[0]["sparse_depth"].shape[0]
     device = views[0]["sparse_depth"].device
     cut = torch.rand(B, device=device) < p
-    start = torch.randint(1, S, (B,), device=device)
+    last = S - 1 if last_start is None else min(last_start, S - 1)
+    start = torch.randint(1, last + 1, (B,), device=device)
     for t in range(1, S):
         drop = cut & (start <= t)  # [B]
         if not drop.any():

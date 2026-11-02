@@ -928,7 +928,9 @@ def train_loop(
             # comparable with runs without it
             sparse_stats = sparse_depth_stats(batch, mcfg.depth_cond.sim_mask_ratio)
             # training batches only: validation keeps every frame fed
-            withhold_depth_tail(batch, mcfg.train.depth_dropout_p)
+            withhold_depth_tail(
+                batch, mcfg.train.depth_dropout_p, mcfg.train.depth_dropout_last_start
+            )
 
             epoch_f = epoch + data_iter_step / len(data_loader)
             if data_iter_step % accum_iter == 0:

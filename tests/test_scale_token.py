@@ -346,6 +346,24 @@ def test_readout_target_is_the_running_mean_depth():
     assert scale_readout_loss(preds[:1], late[:1]) == 0  # no target anywhere
 
 
+def test_depth_dropout_start_respects_the_last_start():
+    torch.manual_seed(0)
+    views = [
+        {
+            "sparse_depth": torch.ones(64, 2, 2),
+            "sparse_depth_mask": torch.ones(64, 2, 2, dtype=torch.bool),
+        }
+        for _ in range(16)
+    ]
+    withhold_depth_tail(views, 1.0, last_start=7)
+    fed = torch.stack([v["sparse_depth_mask"][:, 0, 0] for v in views], 1)  # [64, 16]
+    start = (~fed).float().argmax(1)
+    assert int(start.min()) >= 1 and int(start.max()) <= 7
+    assert bool((~fed[:, 7:]).all())  # every clip dropped by frame 7
+    with pytest.raises(ValueError):
+        TrainCondCfg(depth_dropout_last_start=0).validate()
+
+
 def test_depth_dropout_keeps_frame_0_and_cuts_a_tail():
     def views():
         return [

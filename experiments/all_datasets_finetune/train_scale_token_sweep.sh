@@ -49,11 +49,15 @@
 #                             t-8..t, so frames 9-15 run without frame 0 (the
 #                             parallel forward on 10-frame clips never evicts)
 #   --train.depth-dropout-p   half the clips lose their sparse depth from a
-#                             random frame in [1, 15] on, so holding a scale
+#   --train.depth-dropout-last-start 7
+#                             random frame in [1, 7] on, so holding a scale
 #                             without measurements is something training
 #                             asks. A frame with NO fed frame left in its
-#                             cache needs t >= dropout frame + 8: only clips
-#                             dropped by frame 7, at their last frames.
+#                             cache needs t >= dropout frame + 8, so the start
+#                             is drawn early: every dropped clip then has
+#                             8 - start such frames (frames 9-15 for a start
+#                             at 1), where a start anywhere in [1, 15] gave
+#                             them only to the 7 of 15 clips dropped by 7
 #   --epochs 10               budgeted by frame exposures, not steps: 16-frame
 #                             clips at 10 epochs (45,000 steps) show 1.07x the
 #                             frames of the encoder sweep's 10-frame clips at
@@ -72,9 +76,21 @@
 # mismatch, so the contrasts above hold; a contrast against the encoder sweep
 # mixes in the window change. Their deployment numbers come from window 8:
 # scale_drift.py --window 8 (rerun the earlier models at 8 too, so every curve
-# shares the deployment setting) and the long-clip table. The non-learned bar is
-# not a training arm: scale_drift.py's +ema correction on arm 0 (and on the
-# encoder sweep's conv-stem run) is what the token has to beat.
+# shares the deployment setting) and the long-clip table.
+#
+# Drift evaluation (scale_drift.py --window 8, dropout at 20), one curve per
+# line, so the non-learned and training-free bars sit next to the token:
+#   arm 0, window 8                 dropout training alone
+#   arm 0 +ema0.9                   non-learned: the last fed scale, held
+#   ovggt:<arm 0>                   training-free: OVGGT's anchored cache
+#                                   (2026-10-31, conv-stem: 0.25 vs window 8's
+#                                   0.38 at frame 191, scale_drift/
+#                                   ovggt_cache_drop20_w8)
+#   arms 1-3, window 8              the token
+#   fed references of arms 0-1
+# The question is the frames >= dropout + 8, where no fed frame is left in the
+# cache: the token has to beat all three bars there. Needs a checkout with both
+# the +ema curves (this branch) and the ovggt: source (feat/ovggt-ours).
 #
 #   sbatch --array=0-3 experiments/all_datasets_finetune/train_scale_token_sweep.sh
 #   REPO=<worktree> sbatch --array=0-3 ...   # before the branch is merged
@@ -99,7 +115,7 @@
 set -euo pipefail
 
 ARM_NAMES=(window_ctrl token_rec_aux token_rec_fact token_cache_aux)
-COMMON="--depth-cond.encoder PREFILL_CONV --train.window 8 --train-dataset.num-views 16 --train.depth-dropout-p 0.5"
+COMMON="--depth-cond.encoder PREFILL_CONV --train.window 8 --train-dataset.num-views 16 --train.depth-dropout-p 0.5 --train.depth-dropout-last-start 7"
 ARM_FLAGS=(
     "$COMMON --scale-token.no-enabled"
     "$COMMON --scale-token.enabled --scale-token.recurrent --scale-token.readout AUX"

@@ -342,6 +342,12 @@ class TrainCondCfg:
     # model to hold a scale without measurements -- the dropout the scale
     # token exists for.
     depth_dropout_p: float = 0.0
+    # Latest frame the dropout may start at: the start is drawn uniformly in
+    # [1, depth_dropout_last_start] (None: [1, S-1]). With a KV window W, a
+    # frame t >= start + W has no fed frame left in its cache -- the regime a
+    # persistent scale state is for -- so an early start trains it on more
+    # frames (16-frame clips, W 8: start <= 7 leaves 8 - start such frames).
+    depth_dropout_last_start: int | None = None
     # Output heads to fully unfreeze during fine-tuning, in BOTH injection
     # arms (the arms stay comparable because this knob is part of the hashed
     # manifest). The pretrained heads must be free to move for the output to
@@ -360,6 +366,14 @@ class TrainCondCfg:
         self.train_heads = [HeadType(h) for h in self.train_heads]
         if self.window is not None and self.window < 1:
             raise ValueError(f"train.window must be >= 1 or None, got {self.window}")
+        if (
+            self.depth_dropout_last_start is not None
+            and self.depth_dropout_last_start < 1
+        ):
+            raise ValueError(
+                "train.depth_dropout_last_start must be >= 1 (frame 0 keeps its "
+                f"depth) or None, got {self.depth_dropout_last_start}"
+            )
         if not 0.0 <= self.depth_dropout_p <= 1.0:
             raise ValueError(
                 f"train.depth_dropout_p must be in [0, 1], got {self.depth_dropout_p}"
