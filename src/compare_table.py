@@ -59,6 +59,16 @@ EVAL_NOTES = {
         "to 1:2 and verified on a 1:2 KITTI crop, here run on the full frame "
         "(KITTI 1:3.3)."
     ),
+    "infinite_vggt": (
+        "StreamVGGT weights with InfiniteVGGT's rolling KV memory (training-free), "
+        "dust3r input sizing (long side 518), fp16 as upstream; depth up to scale, "
+        "so no metric column."
+    ),
+    "ovggt": (
+        "StreamVGGT weights with OVGGT's constant-cost cache (training-free), "
+        "dust3r input sizing (long side 518), bf16 on A40/H100 as upstream; depth "
+        "up to scale, so no metric column."
+    ),
 }
 
 
