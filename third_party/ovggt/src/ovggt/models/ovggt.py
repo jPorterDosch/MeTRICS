@@ -142,6 +142,7 @@ class OVGGT(nn.Module, PyTorchModelHubMixin):
         max_anchors: int = 3,
         coverage_threshold: float = 0.2,
         anchor_keep_ratio: float = 0.05,
+        depth_token_feats_list=None,  # MeTRICS: added, one [B, P, C] (or None) per frame
     ):
         past_key_values = [None] * self.aggregator.depth
         past_key_values_camera = [None] * self.camera_head.trunk_depth
@@ -233,6 +234,10 @@ class OVGGT(nn.Module, PyTorchModelHubMixin):
                 anchor_token_count=anchor_token_count,
                 importance_weight=importance_weight,
                 window_token_count=window_token_count,
+                # MeTRICS: added, this frame's depth-conditioning features
+                injected_patch_feats=(
+                    depth_token_feats_list[i] if depth_token_feats_list is not None else None
+                ),
             )
 
 
