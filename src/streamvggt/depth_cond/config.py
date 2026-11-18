@@ -41,6 +41,17 @@ def _freq_digest(array: "np.ndarray") -> str:
     return digest.hexdigest()
 
 
+SD2_VAE_WEIGHTS = "diffusion_pytorch_model.safetensors"  # diffusers layout
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def freq_map_sha256(path: str) -> str:
     """SHA-256 over the 'freq' array's dtype, shape and bytes. Hashes the array
     rather than the .npz file because np.savez embeds zip timestamps, so an
@@ -61,6 +72,13 @@ class EncoderType(str, enum.Enum):
     # nearest-measurement prefill + distance channel, then a 3x3 conv stem
     # before the stride-14 patch embed (conditioner.PrefillConvDepthEncoder)
     PREFILL_CONV = "prefill_conv"
+    # the same prefilled map rendered as an image through Stable Diffusion 2's
+    # frozen VAE encoder (Marigold's depth latent), its 1/8 latent patchified
+    # onto the patch grid, plus the pooled mask and distance channels, then a
+    # trainable stem (conditioner.VAEDepthEncoder); needs vae_path
+    SD2_VAE = "sd2_vae"
+    # the same with FLUX.2's AE (32 latent channels; conditioner.VAEDepthEncoder)
+    FLUX2_VAE = "flux2_vae"
 
 
 class InjectionType(str, enum.Enum):
@@ -160,8 +178,18 @@ class DepthCondCfg:
     # train.train_heads when training a recipe that supervises points.
     heads: list[HeadType] = field(default_factory=lambda: [HeadType.DEPTH])
 
-    # conv encoder width (encoder == CONV or PREFILL_CONV)
+    # conv encoder width (encoder == CONV, PREFILL_CONV, SD2_VAE or FLUX2_VAE)
     conv_channels: int = 128
+    # diffusers directory of the VAE (encoder == SD2_VAE / FLUX2_VAE), read on a FRESH
+    # run only: its diffusion_pytorch_model.safetensors initialises the frozen
+    # encoder, whose weights then live in the checkpoint. A reload rebuilds the
+    # architecture from SD2_VAE_CONFIG and loads the checkpoint, so the path
+    # need not exist then (and is not part of the experiment identity:
+    # finetune_depth._NON_IDENTITY_KEYS); vae_sha256 is.
+    vae_path: str = ""
+    # sha256 of that safetensors file, filled by validate() on a fresh run and
+    # checked against the file on reload when the path still exists
+    vae_sha256: str = ""
 
     # MAE encoder and training-only reconstruction head (encoder == MAE)
     mae_dim: int = 256
@@ -214,6 +242,28 @@ class DepthCondCfg:
                 "depth_cond.norm_constant_m must be finite and positive when "
                 f"depth_cond.norm=fixed, got {self.norm_constant_m}"
             )
+        if self.enabled and self.encoder in (
+            EncoderType.SD2_VAE,
+            EncoderType.FLUX2_VAE,
+        ):
+            weights = pathlib.Path(self.vae_path, SD2_VAE_WEIGHTS)
+            if not self.vae_sha256:  # a fresh run: the file is required
+                if not self.vae_path:
+                    raise ValueError(
+                        "--depth-cond.vae-path is required when "
+                        f"--depth-cond.encoder={self.encoder.value}"
+                    )
+                if not weights.is_file():
+                    raise ValueError(f"--depth-cond.vae-path has no {weights}")
+                self.vae_sha256 = file_sha256(str(weights))
+            elif self.vae_path and weights.is_file():
+                digest = file_sha256(str(weights))
+                if digest != self.vae_sha256:
+                    raise ValueError(
+                        f"VAE {weights} has sha256 {digest}, but the config "
+                        f"expects {self.vae_sha256}: a different VAE than the "
+                        "run was trained with"
+                    )
         if self.token_append:
             raise NotImplementedError(
                 "depth_cond.token_append=True (append extra tokens) is not built; "

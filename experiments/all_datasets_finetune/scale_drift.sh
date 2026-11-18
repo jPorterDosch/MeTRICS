@@ -63,6 +63,9 @@ fi
 OUT=${OUT:-/lustre/isaac24/proj/UTK0516/metrics_data/eval_jd/scale_drift/$(basename "$RUN")_${TAG}_w${WINDOW}}
 
 export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/envs/metrics/bin:$PATH
+# an sd2_vae-encoder run rebuilds its frozen VAE encoder with diffusers, which
+# the metrics venv lacks: the overlay (its SOURCE says which version and why)
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/lustre/isaac24/proj/UTK0516/metrics_data/envs_jd/diffusers_overlay"
 export LD_LIBRARY_PATH=/nfs/home/jdosch1/.local/lib:${LD_LIBRARY_PATH:-}  # libbz2 shim
 # the baseline arms' extra dependencies (PromptDA curves), as experiments/baselines/benchmark.sh
 export PYTHONPATH="/lustre/isaac24/proj/UTK0516/metrics_data/envs_jd/baselines_pydeps${PYTHONPATH:+:$PYTHONPATH}"

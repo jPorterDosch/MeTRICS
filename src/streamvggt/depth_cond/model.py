@@ -176,6 +176,8 @@ class MetricStreamVGGT(nn.Module):
         if self.conditioner is not None:
             for p in self.conditioner.parameters():
                 p.requires_grad = True
+            for p in self.conditioner.frozen_parameters():
+                p.requires_grad = False
         agg = self.model.aggregator
         for module in (agg.scale_carry, self.model.scale_head):
             if module is not None:

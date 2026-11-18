@@ -332,7 +332,8 @@ _NON_IDENTITY_FIELDS = (
 # Nested manifest keys that do not define the experiment. The freq map is
 # identified by depth_cond.sim_freq_map_sha256; its path differs per machine
 # (Oscar vs ISAAC checkouts), so it is recorded in manifest.json but not hashed.
-_NON_IDENTITY_KEYS = ("depth_cond.sim_freq_map_path",)
+# paths whose CONTENT is hashed instead (sim_freq_map_sha256, vae_sha256)
+_NON_IDENTITY_KEYS = ("depth_cond.sim_freq_map_path", "depth_cond.vae_path")
 
 
 def build_manifest(cfg: FinetuneDepthCfg) -> dict:

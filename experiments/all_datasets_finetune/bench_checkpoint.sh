@@ -51,6 +51,9 @@ IMAGE_SIZE=${IMAGE_SIZE:-518}
 case " $DENSITIES " in *" 0.05 "*) CLOUD_DENSITY=${CLOUD_DENSITY:-0.05} ;; *) CLOUD_DENSITY=${CLOUD_DENSITY:-${DENSITIES%% *}} ;; esac
 
 export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/envs/metrics/bin:$PATH
+# an sd2_vae-encoder run rebuilds its frozen VAE encoder with diffusers, which
+# the metrics venv lacks: the overlay (its SOURCE says which version and why)
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/lustre/isaac24/proj/UTK0516/metrics_data/envs_jd/diffusers_overlay"
 export LD_LIBRARY_PATH=/nfs/home/jdosch1/.local/lib:${LD_LIBRARY_PATH:-}  # libbz2 shim
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4

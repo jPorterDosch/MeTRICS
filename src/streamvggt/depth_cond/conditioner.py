@@ -12,6 +12,8 @@ Anything meeting that contract can be summed with this module's output at the
 injection site in model.py.
 """
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,6 +24,7 @@ from .config import (
     HeadType,
     InjectionType,
     NormType,
+    SD2_VAE_WEIGHTS,
     TemporalType,
 )
 from .mae import MAEDepthDecoder, MAEDepthEncoder
@@ -110,6 +113,186 @@ class PrefillConvDepthEncoder(nn.Module):
         return y.reshape(B, S, *y.shape[1:])
 
 
+# the SD2 VAE file predates diffusers' Attention module: its attention
+# blocks are saved as query / key / value / proj_attn, which from_pretrained
+# renames on load and a plain load_state_dict does not
+_LEGACY_ATTENTION_KEYS = {
+    ".query.": ".to_q.",
+    ".key.": ".to_k.",
+    ".value.": ".to_v.",
+    ".proj_attn.": ".to_out.0.",
+}
+
+
+def _modern_attention_key(key: str) -> str:
+    if ".attentions." in key:
+        for old, new in _LEGACY_ATTENTION_KEYS.items():
+            key = key.replace(old, new)
+    return key
+
+
+class VAEDepthEncoder(nn.Module):
+    """The prefilled map through a frozen latent-diffusion VAE encoder: SD2's
+    (the latent Marigold / DepthFM run their depth diffusion in) or FLUX.2's.
+    The depth-latent probe (2026-11-07) found both near-lossless for depth
+    edges where the conv stems were not (boundary F1 0.94-0.98 vs 0.20).
+
+    Input [B, S, 3, H, W] from prefill_channels (filled transformed
+    disparity, mask, log-distance). The filled channel goes to the VAE as an
+    image: a FIXED affine, `filled / VAE_INPUT_SCALE - 1`, puts the indoor
+    range of log1p(10 / depth) (0.5-10 m -> 0.7-3.0) around [-0.65, 0.5]
+    (metric scale is preserved: no per-frame normalisation, see NormType),
+    copied to 3 channels, resized to 16 px per patch so each patch covers
+    exactly 2 x 2 latent cells. The posterior mean, fp32 and frozen, is
+    pixel-unshuffled onto the patch grid (a reshape: 4 x 4 = 16 channels for
+    SD2, 32 x 4 = 128 for FLUX.2) and scaled the way its own transformer
+    reads it (SD2: x scaling_factor; FLUX.2: its BatchNorm running stats on
+    the unshuffled channels, the same (c, dy, dx) order as pixel_unshuffle),
+    the mask and distance channels are area-pooled to the grid, and a
+    trainable 1x1 stem + 3x3 refine (as ConvDepthEncoder) gives the
+    conditioner's channels. Only the VAE encoder, quant_conv (and FLUX.2's
+    bn buffers) are kept, frozen, in eval mode, and saved in the
+    checkpoint."""
+
+    VAE_INPUT_SCALE = 2.0
+    LATENT_PX = 8  # both VAEs' downsampling factor
+    CELLS = 2  # latent cells per patch side -> 16 px per patch
+    # the two VAEs' config.json, fixed here so a checkpoint rebuilds without
+    # the files. SD2: stable-diffusion-2 vae (Marigold's copy); its
+    # scaling_factor is diffusers' default (the config predates the field).
+    # FLUX.2: black-forest-labs/FLUX.2-dev vae.
+    CONFIGS = {
+        "sd2": dict(
+            in_channels=3,
+            out_channels=3,
+            down_block_types=("DownEncoderBlock2D",) * 4,
+            up_block_types=("UpDecoderBlock2D",) * 4,
+            block_out_channels=(128, 256, 512, 512),
+            layers_per_block=2,
+            act_fn="silu",
+            latent_channels=4,
+            norm_num_groups=32,
+            sample_size=768,
+        ),
+        "flux2": dict(
+            in_channels=3,
+            out_channels=3,
+            down_block_types=("DownEncoderBlock2D",) * 4,
+            up_block_types=("UpDecoderBlock2D",) * 4,
+            block_out_channels=(128, 256, 512, 512),
+            layers_per_block=2,
+            act_fn="silu",
+            latent_channels=32,
+            norm_num_groups=32,
+            sample_size=1024,
+            force_upcast=True,
+            use_quant_conv=True,
+            use_post_quant_conv=True,
+            mid_block_add_attention=True,
+            batch_norm_eps=1e-4,
+            batch_norm_momentum=0.1,
+            patch_size=(2, 2),
+        ),
+    }
+    SD2_SCALING_FACTOR = 0.18215
+
+    def __init__(
+        self, kind: str, vae_path: str, channels: int, patch_size: int
+    ) -> None:
+        """`kind`: "sd2" or "flux2". `vae_path`: the diffusers directory whose
+        safetensors initialise the frozen encoder when present; absent (a
+        reload from a checkpoint, which holds these weights), the encoder
+        starts at random init and load_state_dict must follow."""
+        super().__init__()
+        if kind not in self.CONFIGS:
+            raise ValueError(f"VAEDepthEncoder kind must be sd2 or flux2, got {kind!r}")
+        # diffusers is not in the metrics venv: experiments scripts put an
+        # overlay on PYTHONPATH (metrics_data/envs_jd/diffusers_overlay)
+        import diffusers
+
+        self.kind = kind
+        cls = diffusers.AutoencoderKL if kind == "sd2" else diffusers.AutoencoderKLFlux2
+        vae = cls(**self.CONFIGS[kind])
+        self.vae_encoder = vae.encoder
+        self.quant_conv = vae.quant_conv
+        self.bn = vae.bn.eval() if kind == "flux2" else None  # buffers only
+        self.latent_channels = int(self.CONFIGS[kind]["latent_channels"])
+        del vae  # the decoder is not needed
+        weights = os.path.join(vae_path, SD2_VAE_WEIGHTS) if vae_path else ""
+        if weights and os.path.isfile(weights):
+            from safetensors.torch import load_file
+
+            sd = load_file(weights)
+            for prefix, module in self._frozen_modules():
+                module.load_state_dict(
+                    {
+                        _modern_attention_key(k[len(prefix) + 1 :]): v
+                        for k, v in sd.items()
+                        if k.startswith(prefix + ".")
+                    },
+                    strict=True,
+                )
+        for p in self.frozen_parameters():
+            p.requires_grad_(False)
+        self.patch_size = patch_size
+        in_ch = self.latent_channels * self.CELLS**2 + 2
+        self.stem = nn.Conv2d(in_ch, channels, kernel_size=1)
+        self.refine = nn.Sequential(
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+        )
+        self.out_channels = channels
+
+    def _frozen_modules(self):
+        """(state-dict prefix in the diffusers file, module)."""
+        yield "encoder", self.vae_encoder
+        yield "quant_conv", self.quant_conv
+        if self.bn is not None:
+            yield "bn", self.bn
+
+    def frozen_parameters(self):
+        for _, m in self._frozen_modules():
+            yield from m.parameters()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        for _, m in self._frozen_modules():
+            m.eval()  # frozen: no train-mode behaviour (bn keeps its stats)
+        return self
+
+    @torch.no_grad()
+    def _latent(self, filled: torch.Tensor, ph: int, pw: int) -> torch.Tensor:
+        """[N, H, W] filled transformed disparity -> [N, C x CELLS^2, ph, pw]."""
+        img = (filled[:, None] / self.VAE_INPUT_SCALE - 1.0).float()
+        side = self.LATENT_PX * self.CELLS
+        img = F.interpolate(
+            img, size=(ph * side, pw * side), mode="bilinear", align_corners=False
+        )
+        with torch.autocast(device_type=img.device.type, enabled=False):
+            moments = self.quant_conv(self.vae_encoder(img.expand(-1, 3, -1, -1)))
+        mean = moments[:, : self.latent_channels]
+        if self.kind == "sd2":
+            return F.pixel_unshuffle(mean * self.SD2_SCALING_FACTOR, self.CELLS)
+        # FLUX.2: per-channel standardisation of the 2x2-patchified latent
+        # with the AE's running stats, as its pipeline feeds the transformer
+        z = F.pixel_unshuffle(mean, self.CELLS)
+        std = torch.sqrt(self.bn.running_var + self.bn.eps)
+        return (z - self.bn.running_mean.view(1, -1, 1, 1)) / std.view(1, -1, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, S, 3, H, W] -> [B, S, C, H/ps, W/ps]
+        B, S, _, H, W = x.shape
+        ph, pw = H // self.patch_size, W // self.patch_size
+        flat = x.flatten(0, 1)
+        z = self._latent(flat[:, 0], ph, pw).to(x.dtype)
+        aux = F.adaptive_avg_pool2d(flat[:, 1:3], (ph, pw))  # mask fraction, distance
+        y = self.stem(torch.cat([z, aux], dim=1))
+        y = y + self.refine(y)
+        return y.reshape(B, S, *y.shape[1:])
+
+
 def prefill_channels(x: torch.Tensor, patch_size: int) -> torch.Tensor:
     """[B,S,2,H,W] (transformed disparity, mask) from prepare() ->
     [B,S,3,H,W]: channel 0 filled from the nearest measurement, channel 1 the
@@ -189,6 +372,14 @@ class DepthConditioner(nn.Module):
                 enc_channels = cfg.conv_channels
             case EncoderType.PREFILL_CONV:
                 self.encoder = PrefillConvDepthEncoder(cfg.conv_channels, patch_size)
+                enc_channels = cfg.conv_channels
+            case EncoderType.SD2_VAE | EncoderType.FLUX2_VAE:
+                self.encoder = VAEDepthEncoder(
+                    "sd2" if cfg.encoder is EncoderType.SD2_VAE else "flux2",
+                    cfg.vae_path,
+                    cfg.conv_channels,
+                    patch_size,
+                )
                 enc_channels = cfg.conv_channels
             case EncoderType.MAE:
                 self.encoder = MAEDepthEncoder(
@@ -333,6 +524,12 @@ class DepthConditioner(nn.Module):
             torch.stack(valid_masks, dim=1),
         )
 
+    def frozen_parameters(self):
+        """Parameters that stay frozen whatever the training recipe unfreezes
+        (the SD2 VAE encoder); empty for the other encoders."""
+        if isinstance(self.encoder, VAEDepthEncoder):
+            yield from self.encoder.frozen_parameters()
+
     def pop_aux_loss(self) -> torch.Tensor | None:
         """Return and clear the most recent reconstruction loss."""
         loss, self._aux_loss = self._aux_loss, None
@@ -374,7 +571,11 @@ class DepthConditioner(nn.Module):
         """
         self._aux_loss = None
         x = self.prepare(depth, mask)  # [B,S,2,H,W]
-        if self.cfg.encoder is EncoderType.PREFILL_CONV:
+        if self.cfg.encoder in (
+            EncoderType.PREFILL_CONV,
+            EncoderType.SD2_VAE,
+            EncoderType.FLUX2_VAE,
+        ):
             x = prefill_channels(x, self.patch_size)  # [B,S,3,H,W]
         if self.encoder is not None:
             x = self.encoder(x)
@@ -420,7 +621,13 @@ class DepthConditioner(nn.Module):
                     # channel 1 the validity
                     pooled, frac = masked_downsample(flat[:, 0:1], flat[:, 1:2], out_hw)
                     scale_inputs.append(torch.cat([pooled, frac], dim=1))
-                case EncoderType.CONV | EncoderType.MAE | EncoderType.PREFILL_CONV:
+                case (
+                    EncoderType.CONV
+                    | EncoderType.MAE
+                    | EncoderType.PREFILL_CONV
+                    | EncoderType.SD2_VAE
+                    | EncoderType.FLUX2_VAE
+                ):
                     # Learned latent channels are no longer a (signal, mask)
                     # pair, so resize instead of masked pooling.
                     scale_inputs.append(
@@ -455,7 +662,13 @@ class DepthConditioner(nn.Module):
             case EncoderType.IDENTITY:
                 # raw full-res map: fold patches into channels to reach the patch grid
                 flat = F.pixel_unshuffle(flat, self.patch_size)  # [B*S, 2*ps^2, ph, pw]
-            case EncoderType.CONV | EncoderType.MAE | EncoderType.PREFILL_CONV:
+            case (
+                EncoderType.CONV
+                | EncoderType.MAE
+                | EncoderType.PREFILL_CONV
+                | EncoderType.SD2_VAE
+                | EncoderType.FLUX2_VAE
+            ):
                 pass  # learned encoder already produced a patch-grid latent
             case _:
                 # new EncoderType members must be threaded here explicitly

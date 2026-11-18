@@ -32,6 +32,39 @@
 #                                                 LoRA + heads trained on the
 #                                                 same data and schedule, RGB
 #                                                 only
+#    5   sd2_vae       none                       arm 1 with Stable Diffusion
+#                                                 2's frozen VAE encoder in
+#                                                 place of the conv stem
+#                                                 (added 2026-11-07)
+#    6   flux2_vae     none                       arm 1 with FLUX.2's frozen
+#                                                 AE encoder (32 latent
+#                                                 channels; added 2026-11-08)
+#
+# sd2_vae (conditioner.SD2VAEDepthEncoder): the same prefilled map, rendered
+# as an image through SD2's VAE encoder (Marigold's depth latent, frozen),
+# its 1/8 latent patchified onto the patch grid (2 x 2 cells per patch) with
+# the pooled mask and distance channels, then a trainable stem. Motivation:
+# the depth-latent probe (eval_jd/depth_latent_probe, 2026-11-07) recovered
+# depth edges from that latent at boundary F1 0.87 against 0.20 from the
+# conv stem's tokens (single frames, before attention). That probe fed the
+# VAE per-frame min/max-normalised disparity over its full [-1, 1] range;
+# this encoder feeds the FIXED affine of the transformed disparity (metric
+# scale kept), which occupies a smaller part of the range (indoors ~[-0.65,
+# 0.5], KITTI far field ~[-0.9, -0.8]). The probe's `sd2_vae --vae-norm
+# fixed` round trip checks the latent under this input before reading 5 vs
+# 1 as an encoder contrast. Everything else equal. Needs diffusers: the
+# overlay below.
+#
+# flux2_vae (arm 6, the same VAEDepthEncoder with FLUX.2's AE, 128 latent
+# channels per patch after the 2 x 2 unshuffle, standardised with the AE's
+# BatchNorm stats as its transformer reads them): the probe's round trips on
+# the 960 val frames, AbsRel / boundary F1, FLUX.2 vs SD2: per-frame input
+# 0.0048 / 0.982 vs 0.0042 / 0.955; the fixed affine 0.020 / 0.939 vs 0.0072
+# / 0.936. Better edges, equal under the fixed affine; FLUX.2's fixed-affine
+# AbsRel is a small intensity bias (delta1 1.0) the trainable stem can
+# absorb. Contrast 6 vs 5 = which latent. Weights: checkpoints_jd/
+# flux2_vae_mirror (its SOURCE: verified against the official file; FLUX.2
+# dev licence is non-commercial).
 #
 # prefill_conv (depth_cond/conditioner.py): the sparse map is filled from the
 # nearest measurement, a distance-to-measurement channel is added, and a 3x3
@@ -63,6 +96,13 @@
 #
 #   sbatch --array=0-4 experiments/all_datasets_finetune/train_all_datasets_encoder_sweep.sh
 #   sbatch --array=2   experiments/all_datasets_finetune/train_all_datasets_encoder_sweep.sh
+#   REPO=<worktree> sbatch --array=5 ...     # arms 5-6 before their branch is merged
+#
+# Extra arguments go to finetune_depth.py after the ones above (the last
+# occurrence of a flag wins), e.g. a GPU smoke of one arm:
+#   BENCH=0 REPO=<worktree> CKPT_DIR=<scratch> sbatch --array=5 -p ai-tenn-debug -q ai-tenn-debug \
+#       --time=01:00:00 experiments/all_datasets_finetune/train_all_datasets_encoder_sweep.sh \
+#       --epochs 1 --train-dataset.epoch-size 8 8 8 8 8 --val-dataset.epoch-size 4 4 4 4
 #
 # Cost: arm 0/1 as train_all_datasets.sh (~23 h on an H100); arms 2/3 add a
 # DA3-L forward per frame (estimate +10% at 1x, +30% at 2x). BENCH=0 skips
@@ -71,16 +111,20 @@
 
 set -euo pipefail
 
-ARM_NAMES=(identity_noedge prefill_noedge prefill_edge1x prefill_edge2x lora_nodepth)
+SD2_VAE=${SD2_VAE:-/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd/sd2_vae}  # Marigold's copy
+FLUX2_VAE=${FLUX2_VAE:-/lustre/isaac24/proj/UTK0516/metrics_data/checkpoints_jd/flux2_vae_mirror}
+ARM_NAMES=(identity_noedge prefill_noedge prefill_edge1x prefill_edge2x lora_nodepth sd2_vae_noedge flux2_vae_noedge)
 ARM_FLAGS=(
     "--depth-cond.encoder IDENTITY"
     "--depth-cond.encoder PREFILL_CONV"
     "--depth-cond.encoder PREFILL_CONV --loss.edge-weight 0.5 --teacher.model DA3 --teacher.res-scale 1"
     "--depth-cond.encoder PREFILL_CONV --loss.edge-weight 0.5 --teacher.model DA3 --teacher.res-scale 2"
     "--depth-cond.no-enabled"
+    "--depth-cond.encoder SD2_VAE --depth-cond.vae-path $SD2_VAE"
+    "--depth-cond.encoder FLUX2_VAE --depth-cond.vae-path $FLUX2_VAE"
 )
 
-REPO=/nfs/home/jdosch1/brown-visual-computing/MeTRICS
+REPO=${REPO:-/nfs/home/jdosch1/brown-visual-computing/MeTRICS}  # a worktree before merge
 DATA=/lustre/isaac24/proj/UTK0516/metrics_data/processed
 # The datasets rebuilt as video are NOT under $DATA: metrics_data/processed is
 # hqi-owned with mode drwxr-sr-x, so this uid cannot mkdir in it and the
@@ -105,6 +149,10 @@ mkdir -p "$CKPT_DIR" "$REPO/logs"
 export PATH=/nfs/home/jdosch1/.pyenv/versions/3.11.13/envs/metrics/bin:$PATH
 export LD_LIBRARY_PATH=/nfs/home/jdosch1/.local/lib:${LD_LIBRARY_PATH:-}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# diffusers (arm 5's VAE) is not in the metrics venv; the overlay's SOURCE
+# says which version and why. Appended, so the venv's own packages win.
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/lustre/isaac24/proj/UTK0516/metrics_data/envs_jd/diffusers_overlay"
+export HF_HUB_OFFLINE=1
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 if [ -f "$REPO/.secrets/wandb-personal.env" ]; then
@@ -144,6 +192,13 @@ cd "$REPO/src"
 
 for i in "${ARMS[@]}"; do
     echo "=== arm $i: ${ARM_NAMES[$i]}  (${ARM_FLAGS[$i]}) ==="
+    case "${ARM_FLAGS[$i]}" in
+        *SD2_VAE*) VAE_DIR=$SD2_VAE ;;
+        *FLUX2_VAE*) VAE_DIR=$FLUX2_VAE ;;
+        *) VAE_DIR= ;;
+    esac
+    [ -z "$VAE_DIR" ] || [ -f "$VAE_DIR/diffusion_pytorch_model.safetensors" ] \
+        || { echo "[fatal] no VAE weights under $VAE_DIR (arm $i)"; exit 1; }
     # ARM_FLAGS[$i] is deliberately unquoted: it word-splits into separate args
     # shellcheck disable=SC2086
     python finetune_depth.py \
@@ -193,6 +248,7 @@ for i in "${ARMS[@]}"; do
         --num-workers 12 \
         --print-freq 10 \
         "${BENCH_ARGS[@]}" \
+        "$@" \
         || echo "=== arm $i did not run to completion (exists or failed); continuing ==="
 done
 
