@@ -54,6 +54,9 @@ class ArmInfo:
     output: str  # "depth" (metres) | "disparity" (affine-invariant inverse depth)
     causal: bool  # frame t depends on frames <= t only
     prompted: bool  # consumes sparse/low-res metric depth
+    # False: depth defined only up to an unknown scale -- scored like a
+    # disparity output (bench_baselines._pred), never under `metric`
+    metric: bool = True
 
 
 @contextlib.contextmanager
@@ -678,6 +681,159 @@ class DA3MetricArm:
 
 
 # ---------------------------------------------------------------------------
+# StreamVGGT with a bounded KV cache: InfiniteVGGT and OVGGT (training-free)
+# ---------------------------------------------------------------------------
+# packages the forks ship under names our own process already uses: their
+# dust3r / streamvggt / vggt, and croco's top-level packages, which their
+# dust3r imports through croco's own sys.path entry (path_to_croco.py)
+_FORK_SHADOWED = (
+    "dust3r",
+    "croco",
+    "streamvggt",
+    "vggt",
+    "models",
+    "utils",
+    "datasets",
+    "stereoflow",
+)
+
+
+def _fork_parts(root: Path, module: str, cls: str):
+    """(model class, upstream loss_of_one_batch, _resize_pil_image, ImgNorm)
+    from a StreamVGGT fork's own src/, imported eagerly and then hidden again.
+    Undone afterwards, besides the shadowed modules: the sys.path entries the
+    fork's dust3r adds (path_to_croco.py inserts its croco/, dust3r/model.py
+    appends its src/) and the TF32 switch its croco flips at import -- each
+    arm sets TF32 itself, around its own inference."""
+    import importlib
+
+    saved_path = list(sys.path)
+    saved_tf32 = torch.backends.cuda.matmul.allow_tf32
+    try:
+        with _vendored(root / "src", *_FORK_SHADOWED):
+            from dust3r.inference import loss_of_one_batch
+            from dust3r.utils.image import ImgNorm, _resize_pil_image
+
+            model_cls = getattr(importlib.import_module(module), cls)
+    finally:
+        sys.path[:] = saved_path
+        torch.backends.cuda.matmul.allow_tf32 = saved_tf32
+    return model_cls, loss_of_one_batch, _resize_pil_image, ImgNorm
+
+
+class _CacheVGGTArm:
+    """A StreamVGGT fork run the way its own src/eval/video_depth/launch.py
+    runs it (identical in both repositories): dust3r's load_images_for_eval
+    sizing at size 518 with crop off (long side 518, each side then resized
+    to an even multiple of 7, LANCZOS), ImgNorm then (x + 1) / 2, every frame
+    through the fork's loss_of_one_batch(inference=True) -- its own streaming
+    loop, its own cache policy and budget, its own autocast -- and the
+    predicted depth taken as saved (`depth`). StreamVGGT's released weights;
+    the forks are training-free. Returns depth at the model resolution, up
+    to an unknown scale (not metric). TF32 matmuls are on during inference,
+    as in upstream's launcher (its croco import turns them on), in reproduce
+    and benchmark alike."""
+
+    ROOT: Path
+    MODULE: str
+    CLASS: str
+    NAME: str
+    SIZE = 518
+
+    def __init__(self, device: torch.device, record: dict | None = None):
+        import PIL.Image
+
+        self.info = ArmInfo(
+            self.NAME, "depth", causal=True, prompted=False, metric=False
+        )
+        model_cls, self._loss, self._resize, self._norm = _fork_parts(
+            self.ROOT, self.MODULE, self.CLASS
+        )
+        self._pil = PIL.Image
+        model = model_cls()
+        ckpt = torch.load(weights_file(self.NAME, record), map_location="cpu")
+        model.load_state_dict(ckpt, strict=True)
+        del ckpt
+        self.model = model.to(device).eval()
+        self.device = device
+
+    def _image(self, frame: np.ndarray) -> torch.Tensor:
+        """load_images_for_eval(size=518, crop=False) on one decoded frame."""
+        img = self._resize(self._pil.fromarray(frame), self.SIZE)
+        W, H = img.size
+        cx, cy = W // 2, H // 2
+        halfw, halfh = ((2 * cx) // 14) * 7, ((2 * cy) // 14) * 7
+        if W == H:  # square_ok=False, as upstream
+            halfh = 3 * halfw / 4
+        img = img.resize((2 * halfw, 2 * halfh), self._pil.LANCZOS)
+        return self._norm(img)[None]
+
+    def predict(self, frames: np.ndarray, prompt: Prompt | None = None) -> np.ndarray:
+        _check_frames(frames)
+        _no_prompt(self.info, prompt)
+        views = []
+        ray_maps: dict = {}  # one all-NaN ray map per size, shared (never read)
+        for i, frame in enumerate(frames):
+            img = self._image(frame).to(self.device)
+            h, w = img.shape[-2:]
+            if (h, w) not in ray_maps:
+                ray_maps[h, w] = torch.full((1, 6, h, w), torch.nan, device=self.device)
+            views.append(
+                {  # launch.py's prepare_input, image-only branch
+                    "img": (img + 1.0) / 2.0,
+                    "ray_map": ray_maps[h, w],
+                    "true_shape": torch.tensor([[h, w]], device=self.device),
+                    "idx": i,
+                    "instance": str(i),
+                    "camera_pose": torch.eye(4, device=self.device)[None],
+                    "img_mask": torch.tensor([True], device=self.device),
+                    "ray_mask": torch.tensor([False], device=self.device),
+                    "update": torch.tensor([True], device=self.device),
+                    "reset": torch.tensor([False], device=self.device),
+                }
+            )
+        tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = True
+        try:
+            with (
+                torch.cuda.device(self.device)
+                if self.device.type == "cuda"
+                else contextlib.nullcontext()
+            ):
+                out = self._loss(views, self.model, None, None, inference=True)
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = tf32
+        # launch.py's prepare_output + save_depth_maps: depth[..., -1]
+        depth = torch.cat([p["depth"].float().cpu() for p in out["pred"]], 0)
+        return np.ascontiguousarray(depth[..., -1].numpy(), dtype=np.float32)
+
+
+class InfiniteVGGTArm(_CacheVGGTArm):
+    """InfiniteVGGT (arXiv:2601.02281): StreamVGGT with a rolling KV memory
+    pruned by key cosine diversity, the first frame kept as an anchor, model
+    default total_budget 1,200,000 tokens. Its loss_of_one_batch autocasts to
+    fp16 on every GPU."""
+
+    ROOT = THIRD_PARTY / "infinite_vggt"
+    MODULE = "streamvggt.models.streamvggt"
+    CLASS = "StreamVGGT"
+    NAME = "infinite_vggt"
+
+
+class OVGGTArm(_CacheVGGTArm):
+    """OVGGT (arXiv:2603.05959): StreamVGGT with a constant-size cache
+    (model default total_budget 200,000 tokens), the first frame kept as a
+    global anchor, history anchors by view coverage (inference defaults:
+    anchor_interval 250, min 100, max 3). Its loss_of_one_batch autocasts to
+    bf16 on compute capability >= 8, else fp16."""
+
+    ROOT = THIRD_PARTY / "ovggt"
+    MODULE = "ovggt.models.ovggt"
+    CLASS = "OVGGT"
+    NAME = "ovggt"
+
+
+# ---------------------------------------------------------------------------
 # registry + gate
 # ---------------------------------------------------------------------------
 ARMS = {
@@ -687,6 +843,8 @@ ARMS = {
     "ovda": OVDAArm,
     "promptda": PromptDAArm,
     "da3_metric": DA3MetricArm,
+    "infinite_vggt": InfiniteVGGTArm,
+    "ovggt": OVGGTArm,
 }
 
 
