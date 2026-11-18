@@ -23,6 +23,7 @@ from streamvggt.depth_cond.config import (
     LoRACfg,
     MetricCfg,
     ScaleReadout,
+    ScaleTarget,
     ScaleTokenCfg,
     TrainCondCfg,
 )
@@ -321,7 +322,8 @@ def test_windowed_forward_matches_windowed_inference(monkeypatch):
 # ---------------------------------------------------------------------------
 # training-side helpers
 # ---------------------------------------------------------------------------
-def test_readout_target_is_the_running_mean_depth():
+def test_readout_target_log_mean_is_the_running_mean_depth():
+    M = ScaleTarget.LOG_MEAN
     views = [
         {"depthmap": torch.tensor([[[2.0, 0.0]]])},
         {
@@ -331,19 +333,53 @@ def test_readout_target_is_the_running_mean_depth():
     ]
     # frame 0 sees only its own 2.0; frame 1 the mean of 2.0 and 4.0
     want = torch.tensor([[math.log(2.0), math.log(3.0)]], dtype=torch.float64)
-    assert torch.allclose(running_log_scale(views), want)
+    assert torch.allclose(running_log_scale(views, M), want)
     preds = [
         {"scale_log": torch.tensor([math.log(2.0)])},
         {"scale_log": torch.tensor([math.log(3.0) + 1])},
     ]
-    assert torch.isclose(scale_readout_loss(preds, views), torch.tensor(0.5))
+    assert torch.isclose(scale_readout_loss(preds, views, M), torch.tensor(0.5))
     # no valid pixel yet: that frame has no target and leaves the mean
     late = [{"depthmap": torch.zeros(1, 1, 2)}, views[1]]
-    assert torch.isnan(running_log_scale(late)[0, 0])
+    assert torch.isnan(running_log_scale(late, M)[0, 0])
     # frame 1 is then the first frame with GT: its target is log 4 alone
     want_late = torch.tensor(1 + math.log(3.0) - math.log(4.0))
-    assert torch.isclose(scale_readout_loss(preds, late), want_late)
-    assert scale_readout_loss(preds[:1], late[:1]) == 0  # no target anywhere
+    assert torch.isclose(scale_readout_loss(preds, late, M), want_late)
+    assert scale_readout_loss(preds[:1], late[:1], M) == 0  # no target anywhere
+
+
+def test_readout_target_median_log_is_the_default_and_pools_frames():
+    """The default target is the median log depth over every valid pixel of
+    frames 0..t: a few far pixels move the mean, not the median."""
+    assert ScaleTokenCfg().target is ScaleTarget.MEDIAN_LOG
+    g = torch.Generator().manual_seed(0)
+    near = torch.full((1, 20, 20), 2.0)
+    far = torch.full((1, 20, 20), 2.0)
+    far[0, :2] = 50.0  # 10% of the pixels at 50 m
+    views = [
+        {"depthmap": near},
+        {"depthmap": far, "valid_mask": torch.ones(1, 20, 20, dtype=torch.bool)},
+    ]
+    med = running_log_scale(views)  # default: MEDIAN_LOG
+    assert torch.allclose(med, torch.full((1, 2), math.log(2.0)), atol=0.0051)
+    mean = running_log_scale(views, ScaleTarget.LOG_MEAN)
+    assert mean[0, 1] > math.log(4.0)  # the far 10% drag the mean past 4 m
+    # the running median pools frames: frame 1 alone would be the median of
+    # a mix, over 0..1 the near pixels still dominate
+    mixed = torch.cat(
+        [torch.full((1, 20, 10), 1.0), torch.full((1, 20, 10), 8.0)], dim=2
+    )
+    views2 = [{"depthmap": torch.full((1, 20, 20), 1.0)}, {"depthmap": mixed}]
+    m2 = running_log_scale(views2)
+    assert abs(float(m2[0, 1]) - math.log(1.0)) < 0.0051  # 600 of 800 px at 1 m
+    # invalid pixels are not counted; a clip with none yet has no target
+    late = [
+        {"depthmap": torch.zeros(1, 1, 2)},
+        {"depthmap": torch.tensor([[[4.0, 0.0]]])},
+    ]
+    out = running_log_scale(late)
+    assert torch.isnan(out[0, 0]) and abs(float(out[0, 1]) - math.log(4.0)) < 0.0051
+    del g
 
 
 def test_depth_dropout_start_respects_the_last_start():

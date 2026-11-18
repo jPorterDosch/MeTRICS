@@ -63,8 +63,13 @@
 #                             frames of the encoder sweep's 10-frame clips at
 #                             15 (67,500), which also keeps an arm inside the
 #                             3-day wall clock (cost below)
-# Readout target: the log of the mean valid GT depth over frames 0..t,
-# causal like the stream (depth_cond/scale_token.py), L1, weight 0.1.
+# Readout target (--scale-token.target, depth_cond/scale_token.py): a causal
+# statistic of the valid GT depth over frames 0..t, L1, weight 0.1. The first
+# pass (2026-11-02, runs 5637ae59 / f085e1af / d8849db1 / d867c3ad) used
+# LOG_MEAN, the log of the mean depth, which far pixels dominate; the drift
+# metric is a MEDIAN log ratio. The default is now MEDIAN_LOG (the pooled
+# median log depth), and arms 1-3 are rerun with it (2026-11-09); arm 0 has
+# no readout and needs no rerun.
 #
 # Contrasts: 3 vs 0 = an extra (supervised) token, which also moves the
 # pretrained output from step 0 (it starts as a copy of register 0); 1 vs 3 =
@@ -94,6 +99,7 @@
 #
 #   sbatch --array=0-3 experiments/all_datasets_finetune/train_scale_token_sweep.sh
 #   REPO=<worktree> sbatch --array=0-3 ...   # before the branch is merged
+#   REPO=<worktree> sbatch --array=1-3 ...   # the median-target rerun of the token arms
 #
 # Extra arguments go to finetune_depth.py after the ones above (the last
 # occurrence of a flag wins), e.g. a smoke run of two arms, a few steps each:

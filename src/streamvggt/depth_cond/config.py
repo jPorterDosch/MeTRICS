@@ -94,6 +94,19 @@ class LoRATarget(str, enum.Enum):
     O = "o"  # noqa: E741 - mirrors the q/k/v/o naming convention
 
 
+class ScaleTarget(str, enum.Enum):
+    """What the readout is supervised towards (scale_token.running_log_scale),
+    a causal statistic of the GT depth over frames 0..t."""
+
+    # log of the mean valid depth: the 2026-11 sweep's target. Far pixels
+    # dominate a mean, and the drift metric is a MEDIAN log ratio, so the two
+    # did not share a definition
+    LOG_MEAN = "log_mean"
+    # median of the log depth over every valid pixel so far (a running
+    # histogram, exact to its bin width): the metric's own statistic
+    MEDIAN_LOG = "median_log"
+
+
 class ScaleReadout(str, enum.Enum):
     """What the scale token's readout (a small MLP on its last-layer output,
     one log-scale per frame) does."""
@@ -394,12 +407,15 @@ class ScaleTokenCfg:
     # i.e. train.window set.
     recurrent: bool = True
     readout: ScaleReadout = ScaleReadout.AUX
-    # weight of the readout loss: L1 between frame t's readout and the log
-    # of the mean GT depth over frames 0..t (scale_token.scale_readout_loss)
+    # weight of the readout loss: L1 between frame t's readout and `target`,
+    # a running statistic of the GT depth over frames 0..t
+    # (scale_token.scale_readout_loss)
     readout_weight: float = 0.1
+    target: ScaleTarget = ScaleTarget.MEDIAN_LOG
 
     def validate(self) -> None:
         self.readout = ScaleReadout(self.readout)
+        self.target = ScaleTarget(self.target)
         if not math.isfinite(self.readout_weight) or self.readout_weight < 0:
             raise ValueError(
                 "scale_token.readout_weight must be finite and non-negative, got "

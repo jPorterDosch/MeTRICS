@@ -7,7 +7,15 @@ record every file they import (eval.provenance.loaded_code).
 
 from __future__ import annotations
 
+import math
+
 import torch
+
+from .config import ScaleTarget
+
+# running-median histogram over log depth: 1 mm .. 1 km in 0.005 log steps
+_LOG_LO, _LOG_HI, _LOG_STEP = math.log(1e-3), math.log(1e3), 0.005
+_NBINS = int(round((_LOG_HI - _LOG_LO) / _LOG_STEP))
 
 
 def _gt_depth(view: dict) -> tuple[torch.Tensor, torch.Tensor]:
@@ -22,12 +30,18 @@ def _gt_depth(view: dict) -> tuple[torch.Tensor, torch.Tensor]:
     return depth, valid
 
 
-def running_log_scale(views: list[dict]) -> torch.Tensor:
-    """[B, S] log of the mean valid GT depth over frames 0..t: the scale of
-    the scene the stream has shown so far (causal: frame t's target never
-    reads a later frame). It settles as the clip goes on, the time-invariant
-    part as opposed to the per-frame structure. NaN until a clip's first
-    valid pixel."""
+def running_log_scale(
+    views: list[dict], target: ScaleTarget = ScaleTarget.MEDIAN_LOG
+) -> torch.Tensor:
+    """[B, S] a log-scale statistic of the valid GT depth over frames 0..t:
+    the scale of the scene the stream has shown so far (causal: frame t's
+    target never reads a later frame). It settles as the clip goes on, the
+    time-invariant part as opposed to the per-frame structure. NaN until a
+    clip's first valid pixel. `target` picks the statistic (ScaleTarget):
+    the median log depth over all valid pixels so far (a running histogram,
+    exact to 0.005 in log space), or the log of the mean depth."""
+    if ScaleTarget(target) is ScaleTarget.MEDIAN_LOG:
+        return _running_median_log(views)
     total, count, out = 0.0, 0, []
     for view in views:
         depth, valid = _gt_depth(view)
@@ -46,11 +60,41 @@ def running_log_scale(views: list[dict]) -> torch.Tensor:
     return torch.stack(out, dim=1)
 
 
-def scale_readout_loss(preds: list[dict], views: list[dict]) -> torch.Tensor:
+def _running_median_log(views: list[dict]) -> torch.Tensor:
+    """[B, S] median of log GT depth over every valid pixel of frames 0..t,
+    from a per-clip histogram accumulated frame by frame (exact to the bin
+    width; a depth outside 1 mm .. 1 km lands in the end bins)."""
+    hist, out = None, []
+    for view in views:
+        depth, valid = _gt_depth(view)
+        B = depth.shape[0]
+        if hist is None:
+            hist = torch.zeros(B, _NBINS, dtype=torch.float64, device=depth.device)
+        logd = torch.log(depth.float().clamp(min=1e-6))
+        idx = ((logd - _LOG_LO) / _LOG_STEP).floor().long().clamp(0, _NBINS - 1)
+        for b in range(B):
+            hist[b] += torch.bincount(idx[b][valid[b]], minlength=_NBINS).double()
+        count = hist.sum(1)
+        # first bin whose cumulative count reaches half: the median's bin
+        half = (count / 2).unsqueeze(1)
+        reached = hist.cumsum(1) >= half
+        median_bin = torch.where(
+            reached, torch.arange(_NBINS, device=depth.device), _NBINS
+        ).amin(1)
+        median = _LOG_LO + (median_bin.float() + 0.5) * _LOG_STEP
+        out.append(
+            torch.where(count > 0, median, torch.full_like(median, float("nan")))
+        )
+    return torch.stack(out, dim=1)
+
+
+def scale_readout_loss(
+    preds: list[dict], views: list[dict], target: ScaleTarget = ScaleTarget.MEDIAN_LOG
+) -> torch.Tensor:
     """Mean |readout_t - running_log_scale_t| over the frames and clips with a
     target (zero loss if none has one)."""
     s = torch.stack([p["scale_log"] for p in preds], dim=1)  # [B, S]
-    target = running_log_scale(views).to(device=s.device, dtype=s.dtype)
+    target = running_log_scale(views, target).to(device=s.device, dtype=s.dtype)
     keep = torch.isfinite(target)
     if not keep.any():
         return s.sum() * 0.0

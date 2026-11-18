@@ -964,7 +964,7 @@ def train_loop(
                     raise RuntimeError(
                         "the scale readout loss needs the loss before backprop"
                     )
-                readout = scale_readout_loss(result["pred"], result["views"])
+                readout = scale_readout_loss(result["pred"], result["views"], st.target)
                 loss = loss + st.readout_weight * readout
                 loss_details["scale_readout"] = readout.detach()
             loss_value = float(loss)
