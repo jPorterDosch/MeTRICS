@@ -158,7 +158,6 @@ class Curve:
     def is_base(self) -> bool:
         return self.source == "base"
 
-
     @property
     def is_promptda(self) -> bool:
         return self.source in PROMPTDA_SOURCES
