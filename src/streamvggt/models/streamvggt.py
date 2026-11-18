@@ -17,16 +17,78 @@ class StreamVGGTOutput(ModelOutput):
     ress: Optional[List[dict]] = None
     views: Optional[torch.Tensor] = None
 
-class StreamVGGT(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, img_size=518, patch_size=14, embed_dim=1024):
-        super().__init__()
+class ScaleReadoutHead(nn.Module):
+    """[..., 2C] last-layer scale token -> [...] log scale. The last layer is
+    zero-init, so the readout starts at 0: a factorised output starts as the
+    depth head's own (of the model WITH the token, which the extra token has
+    already moved slightly off the pretrained one)."""
 
-        self.aggregator = Aggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
+    def __init__(self, dim_in: int, hidden: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim_in), nn.Linear(dim_in, hidden), nn.GELU(), nn.Linear(hidden, 1)
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, token: torch.Tensor) -> torch.Tensor:
+        return self.net(token.float()).squeeze(-1)
+
+
+class StreamVGGT(nn.Module, PyTorchModelHubMixin):
+    def __init__(
+        self,
+        img_size=518,
+        patch_size=14,
+        embed_dim=1024,
+        scale_token=False,
+        scale_recurrent=False,
+        scale_readout=False,
+        scale_factorised=False,
+    ):
+        """scale_*: the optional scale token (depth_cond ScaleTokenCfg). Off:
+        the pretrained architecture. scale_readout builds the log-scale MLP
+        on the token; scale_factorised multiplies the depth by exp(readout)."""
+        super().__init__()
+        if scale_factorised and not scale_readout:
+            raise ValueError("scale_factorised needs scale_readout")
+        if scale_readout and not scale_token:
+            raise ValueError("scale_readout needs scale_token")
+
+        self.aggregator = Aggregator(
+            img_size=img_size,
+            patch_size=patch_size,
+            embed_dim=embed_dim,
+            scale_token=scale_token,
+            scale_recurrent=scale_recurrent,
+        )
         self.camera_head = CameraHead(dim_in=2 * embed_dim)
         self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1")
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1")
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size)
-    
+        self.scale_head = ScaleReadoutHead(2 * embed_dim) if scale_readout else None
+        self.scale_factorised = scale_factorised
+
+    def scale_log(self, aggregated_tokens_list) -> Optional[torch.Tensor]:
+        """[B, S] log-scale readout of the last layer's scale token, or None
+        without a readout."""
+        if self.scale_head is None:
+            return None
+        return self.scale_head(aggregated_tokens_list[-1][:, :, self.aggregator.scale_token_idx])
+
+    def scale_state(self, aggregated_tokens_list) -> Optional[torch.Tensor]:
+        """[B, 2C] the newest frame's last-layer scale token: the next frame's
+        `scale_prev` for a recurrent token, None otherwise."""
+        if self.aggregator.scale_carry is None:
+            return None
+        return aggregated_tokens_list[-1][:, -1, self.aggregator.scale_token_idx]
+
+    def apply_scale(self, depth: torch.Tensor, scale_log: Optional[torch.Tensor]) -> torch.Tensor:
+        """depth [B, S, H, W, 1] times exp(readout) when factorised."""
+        if not self.scale_factorised:
+            return depth
+        return depth * torch.exp(scale_log)[:, :, None, None, None]
+
 
 
     def forward(
@@ -65,12 +127,17 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
 
         if depth_head_residuals is None:
             depth_head_residuals = {"depth": None, "point": None}
+        if self.aggregator.scale_carry is not None:
+            # every frame of the parallel forward is built before any output
+            # exists: a recurrent token can only run through inference()
+            raise ValueError("a recurrent scale token needs the one-frame-at-a-time forward")
         aggregated_tokens_list, patch_start_idx = self.aggregator(
             images, patch_tokens=patch_tokens, injected_patch_feats=depth_token_feats
         )
         predictions = {}
 
         with torch.cuda.amp.autocast(enabled=False):
+            scale_log = self.scale_log(aggregated_tokens_list)  # [B, S] or None
             if self.camera_head is not None:
                 pose_enc_list = self.camera_head(aggregated_tokens_list)
                 predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
@@ -80,7 +147,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                     aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx,
                     depth_residuals=depth_head_residuals["depth"],
                 )
-                predictions["depth"] = depth
+                predictions["depth"] = self.apply_scale(depth, scale_log)
                 predictions["depth_conf"] = depth_conf
 
             if self.point_head is not None:
@@ -117,14 +184,17 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                     **({'track': predictions['track'][:, s],  # [B, N, 2]
                         'vis': predictions['vis'][:, s],  # [B, N]
                         'track_conf': predictions['conf'][:, s]}
-                    if 'track' in predictions else {})
+                    if 'track' in predictions else {}),
+                    **({'scale_log': scale_log[:, s]}  # [B]
+                    if scale_log is not None else {}),
                 }
                 ress.append(res)
             return StreamVGGTOutput(ress=ress, views=views)  # [S] [B, C, H, W]
         
     def inference(self, frames, query_points: torch.Tensor = None, past_key_values=None,
                   depth_token_feats_list=None, depth_head_residuals_list=None,
-                  frame_times_ms=None):
+                  frame_times_ms=None, window=None, patch_tokens_list=None,
+                  depth_only=False):
         """Streaming inference with the causal KV cache.
 
         depth_token_feats_list / depth_head_residuals_list: optional per-frame
@@ -138,6 +208,16 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
         into the same list). Attention is over a cache that grows with the frame
         index, so these are expected to ramp; frame 0 is the empty-cache case and
         also absorbs lazy CUDA init, so read it separately from the rest.
+
+        window: keep only the last `window` frames' K/V after every step (the
+        deployment's sliding cache, eval.streaming_window); None: unbounded.
+        patch_tokens_list: optional per-frame precomputed embed_patches output
+        ([B, P_patch, C], the encoder cache). Not under no_grad: the
+        one-frame-at-a-time training forward (depth_cond train.window) runs
+        through here with gradients.
+        depth_only: run the depth head alone (and the scale readout): no
+        camera, point or track head, and no such keys in the results. For the
+        windowed training forward, whose losses and validation read depth only.
         """
         if depth_token_feats_list is not None and len(depth_token_feats_list) != len(frames):
             raise ValueError(
@@ -157,6 +237,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
 
         all_ress = []
         processed_frames = []
+        scale_prev = None
 
         # CUDA events rather than a per-frame synchronize(): they are enqueued on
         # the stream like kernels, so the CPU keeps running ahead and the loop we
@@ -177,7 +258,10 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 events[-1][0].record(timing_stream)
             elif timing:
                 t0 = time.perf_counter()
-            images = frame["img"].unsqueeze(0)
+            # [B, 1, 3, H, W]: one frame of each of the B clips (unsqueeze(0)
+            # read a training batch's [B, 3, H, W] as B frames of one clip)
+            img = frame["img"]
+            images = img[:, None] if img.dim() == 4 else img[None, None]
             token_feats = depth_token_feats_list[i] if depth_token_feats_list is not None else None
             head_residuals = depth_head_residuals_list[i] if depth_head_residuals_list is not None else None
             if head_residuals is None:
@@ -187,29 +271,35 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 past_key_values=past_key_values,
                 use_cache=True,
                 past_frame_idx=i,
+                patch_tokens=patch_tokens_list[i] if patch_tokens_list is not None else None,
                 injected_patch_feats=token_feats,
+                scale_prev=scale_prev,
             )
 
             if isinstance(aggregator_output, tuple) and len(aggregator_output) == 3:
                 aggregated_tokens, patch_start_idx, past_key_values = aggregator_output
             else:
                 aggregated_tokens, patch_start_idx = aggregator_output
+            scale_prev = self.scale_state(aggregated_tokens)
+            if window is not None:
+                past_key_values = truncate_kv(past_key_values, window)
 
             with torch.cuda.amp.autocast(enabled=False):
-                if self.camera_head is not None:
+                if self.camera_head is not None and not depth_only:
                     pose_enc, past_key_values_camera = self.camera_head(aggregated_tokens, past_key_values_camera=past_key_values_camera, use_cache=True)
                     pose_enc = pose_enc[-1]
                     camera_pose = pose_enc[:, 0, :]
 
+                scale_log = self.scale_log(aggregated_tokens)
                 if self.depth_head is not None:
                     depth, depth_conf = self.depth_head(
                         aggregated_tokens, images=images, patch_start_idx=patch_start_idx,
                         depth_residuals=head_residuals["depth"],
                     )
-                    depth = depth[:, 0]
+                    depth = self.apply_scale(depth, scale_log)[:, 0]
                     depth_conf = depth_conf[:, 0]
 
-                if self.point_head is not None:
+                if self.point_head is not None and not depth_only:
                     pts3d, pts3d_conf = self.point_head(
                         aggregated_tokens, images=images, patch_start_idx=patch_start_idx,
                         depth_residuals=head_residuals["point"],
@@ -217,7 +307,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                     pts3d = pts3d[:, 0]
                     pts3d_conf = pts3d_conf[:, 0]
 
-                if self.track_head is not None and query_points is not None:
+                if self.track_head is not None and query_points is not None and not depth_only:
                     track_list, vis, conf = self.track_head(
                         aggregated_tokens, images=images, patch_start_idx=patch_start_idx, query_points=query_points
                 )
@@ -227,18 +317,21 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                     track_conf = conf[:, 0]
 
             all_ress.append({
-                'pts3d_in_other_view': pts3d,
-                'conf': pts3d_conf,
+                **({'pts3d_in_other_view': pts3d,
+                    'conf': pts3d_conf,
+                    'camera_pose': camera_pose}
+                if not depth_only else {}),
                 'depth': depth,
                 'depth_conf': depth_conf,
-                'camera_pose': camera_pose,
                 **({'valid_mask': frame["valid_mask"]}
                     if 'valid_mask' in frame else {}),  
 
                 **({'track': track, 
                     'vis': vis,  
                     'track_conf': track_conf}
-                if query_points is not None else {})
+                if query_points is not None and not depth_only else {}),
+                **({'scale_log': scale_log[:, 0]}  # [B]
+                if scale_log is not None else {}),
             })
             processed_frames.append(frame)
             if cuda_timing:
@@ -256,3 +349,13 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
 
         output = StreamVGGTOutput(ress=all_ress, views=processed_frames)
         return output
+
+
+def truncate_kv(past_kv: list, window: int) -> list:
+    """Keep the last `window` frame slices of every block's (K, V)
+    ([B, heads, n_frames, P, head_dim]; dim 2 is the frame axis), the slice
+    the export wrapper applies to its cache outputs."""
+    return [
+        None if kv is None else (kv[0][:, :, -window:], kv[1][:, :, -window:])
+        for kv in past_kv
+    ]

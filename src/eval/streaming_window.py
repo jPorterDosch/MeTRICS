@@ -22,11 +22,11 @@ def truncate_cache(past_kv: list, window: int) -> list:
     Frame 0's K/V leave the cache once the stream exceeds `window`; VGGT-family
     camera and point heads anchor to frame 0, depth is per-frame and the most
     robust to that eviction (tests/kv_cache_window_validation.py measures it).
+    StreamVGGT.inference(window=...) applies the same cut.
     """
-    return [
-        None if kv is None else (kv[0][:, :, -window:], kv[1][:, :, -window:])
-        for kv in past_kv
-    ]
+    from streamvggt.models.streamvggt import truncate_kv
+
+    return truncate_kv(past_kv, window)
 
 
 @torch.no_grad()
@@ -37,12 +37,16 @@ def stream_depth(
     aggregator and depth head, the cache cut to the last `window` frames after
     every step (None: unbounded, as StreamVGGT.inference). `model` is a
     StreamVGGT or a MetricStreamVGGT; each view's "img" is [1, 3, h, w] in
-    [0, 1], and a MetricStreamVGGT reads its sparse depth from the view."""
+    [0, 1], and a MetricStreamVGGT reads its sparse depth from the view.
+    A scale token is carried and applied as StreamVGGT.inference does: a
+    recurrent one passes its state to the next frame, a factorised readout
+    multiplies the depth."""
     from streamvggt.depth_cond import MetricStreamVGGT
 
     metric = isinstance(model, MetricStreamVGGT)
     inner = model.model if metric else model
     past_kv = [None] * inner.aggregator.depth
+    scale_prev = None
     out = []
     for i, view in enumerate(views):
         images = view["img"][:, None]  # [1, 1, 3, h, w]
@@ -59,7 +63,9 @@ def stream_depth(
                 use_cache=True,
                 past_frame_idx=i,
                 injected_patch_feats=token_feats,
+                scale_prev=scale_prev,
             )
+            scale_prev = inner.scale_state(tokens)
         if depth_residuals is not None:
             depth_residuals = [r.float() for r in depth_residuals]
         depth, _ = inner.depth_head(
@@ -68,6 +74,7 @@ def stream_depth(
             patch_start_idx=patch_start_idx,
             depth_residuals=depth_residuals,
         )
+        depth = inner.apply_scale(depth, inner.scale_log(tokens))
         out.append(depth[0, 0, :, :, 0].float().cpu().numpy())
         if window is not None:
             past_kv = truncate_cache(past_kv, window)

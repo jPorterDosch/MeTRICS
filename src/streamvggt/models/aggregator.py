@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
 from typing import Tuple, Union, List
@@ -44,6 +46,11 @@ class Aggregator(nn.Module):
         qk_norm (bool): Whether to apply QK normalization.
         rope_freq (int): Base frequency for rotary embedding. -1 to disable.
         init_values (float): Init scale for layer scale.
+        scale_token (bool): Add a scale token after the register tokens
+            (depth_cond ScaleTokenCfg). Off: the pretrained token layout.
+        scale_recurrent (bool): The scale token of frame t > 0 starts from a
+            zero-init projection of frame t-1's last-layer output token
+            (`scale_prev`), so it survives eviction from the KV cache.
     """
 
     def __init__(
@@ -65,8 +72,12 @@ class Aggregator(nn.Module):
         qk_norm=True,
         rope_freq=100,
         init_values=0.01,
+        scale_token=False,
+        scale_recurrent=False,
     ):
         super().__init__()
+        if scale_recurrent and not scale_token:
+            raise ValueError("scale_recurrent needs scale_token")
 
         self.__build_patch_embed__(patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim)
 
@@ -129,8 +140,38 @@ class Aggregator(nn.Module):
         self.camera_token = nn.Parameter(torch.randn(1, 2, 1, embed_dim))
         self.register_token = nn.Parameter(torch.randn(1, 2, num_register_tokens, embed_dim))
 
-        # The patch tokens start after the camera and register tokens
-        self.patch_start_idx = 1 + num_register_tokens
+        # Optional scale token, between the register and the patch tokens; the
+        # same first-frame / later-frame pair as the others. MetricStreamVGGT
+        # copies a pretrained register token into it after loading weights. An
+        # extra token is attended to, so enabling it changes the pretrained
+        # output from step 0 (register 0's attention weight doubles).
+        self.scale_token = None
+        self.scale_carry = None
+        if scale_token:
+            self.scale_token = nn.Parameter(torch.randn(1, 2, 1, embed_dim))
+            nn.init.normal_(self.scale_token, std=1e-6)
+            if scale_recurrent:
+                # LayerNorm first: the carried state is the raw last-layer
+                # residual stream, and training unrolls it 9 steps while
+                # inference runs it for hundreds; normalising every step keeps
+                # a gain the short unroll never constrains from compounding.
+                # Zero-init projection: the recurrence starts as a no-op.
+                self.scale_carry = nn.Sequential(
+                    OrderedDict(norm=nn.LayerNorm(2 * embed_dim), proj=nn.Linear(2 * embed_dim, embed_dim))
+                )
+                nn.init.zeros_(self.scale_carry.proj.weight)
+                nn.init.zeros_(self.scale_carry.proj.bias)
+                # [first frame, later frames]: the carry's multiplier, picked
+                # like the first-frame token (from the cache's shape), so an
+                # exported graph fed a zero state at frame 0 adds nothing
+                # there and one graph serves every frame. Not in the state dict.
+                self.register_buffer(
+                    "_carry_gate", torch.tensor([0.0, 1.0]).reshape(1, 2, 1, 1), persistent=False
+                )
+        self.scale_token_idx = 1 + num_register_tokens if scale_token else None
+
+        # The patch tokens start after the camera, register (and scale) tokens
+        self.patch_start_idx = 1 + num_register_tokens + int(scale_token)
 
         # Initialize parameters with small values
         nn.init.normal_(self.camera_token, std=1e-6)
@@ -220,6 +261,7 @@ class Aggregator(nn.Module):
         past_frame_idx=0,
         patch_tokens=None,
         injected_patch_feats=None,
+        scale_prev=None,
     ) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
@@ -232,6 +274,9 @@ class Aggregator(nn.Module):
                 residually to the RGB patch tokens BEFORE any attention block
                 (i.e. before the causal K/V cache). [B, S, P_patch, C] or
                 [B*S, P_patch, C]. None -> unmodified behavior.
+            scale_prev: the previous frame's last-layer scale token
+                ([B, 2C], read off the output list at scale_token_idx), for a
+                recurrent scale token on the KV-cache path; None on frame 0.
 
         Returns:
             (list[torch.Tensor], int):
@@ -281,8 +326,27 @@ class Aggregator(nn.Module):
         else:
             camera_token = slice_expand_and_flatten(self.camera_token, B, S)
             register_token = slice_expand_and_flatten(self.register_token, B, S)
+        special = [camera_token, register_token]
+        if self.scale_token is not None:
+            if use_cache:
+                scale_full = slice_expand_and_flatten(self.scale_token, B, S_true)
+                scale_token = scale_full.reshape(B, -1, *scale_full.shape[1:])[:, -1]
+            else:
+                scale_token = slice_expand_and_flatten(self.scale_token, B, S)
+            if scale_prev is not None:
+                if self.scale_carry is None or not use_cache:
+                    raise ValueError(
+                        "scale_prev needs a recurrent scale token on the KV-cache "
+                        "path (one frame per call)"
+                    )
+                gate_full = slice_expand_and_flatten(self._carry_gate, B, S_true)
+                gate = gate_full.reshape(B, -1, 1, 1)[:, -1]  # [B, 1, 1]: 0 on frame 0
+                scale_token = scale_token + self.scale_carry(scale_prev).reshape(B, 1, C) * gate
+            special.append(scale_token)
+        elif scale_prev is not None:
+            raise ValueError("scale_prev given to an aggregator without a scale token")
         # Concatenate special tokens with patch tokens
-        tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
+        tokens = torch.cat([*special, patch_tokens], dim=1)
 
         pos = None
         if self.rope is not None:
@@ -400,7 +464,19 @@ class Aggregator(nn.Module):
             else:
                 attn_mask = None
                 
-            if use_cache:
+            if use_cache and self.grad_checkpointing and self.training and torch.is_grad_enabled():
+                # the one-frame-at-a-time training forward (depth_cond
+                # train.window): checkpointed like the parallel path, the past
+                # K/V passed as inputs so their gradient reaches earlier frames
+                blk = self.global_blocks[global_idx]
+                past = () if past_key_values_block is None else tuple(past_key_values_block)
+                tokens, block_kv = torch.utils.checkpoint.checkpoint(
+                    lambda t, *kv, b=blk, p=pos: b(
+                        t, pos=p, past_key_values=kv if kv else None, use_cache=True
+                    ),
+                    tokens, *past, use_reentrant=False,
+                )
+            elif use_cache:
                 tokens, block_kv = self.global_blocks[global_idx](
                     tokens, 
                     pos=pos, 

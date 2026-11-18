@@ -14,7 +14,9 @@ B is --batch-size, BAKED into the graph (only the frame axis is dynamic), and
 its elements are independent streams -- one per synchronized camera, each with
 its own 48 cache tensors. Default 1.
 
-Every variant exports the SAME 50 inputs / 50 outputs -- including the base
+Every variant exports the SAME 50 inputs / 50 outputs -- 51 / 51 for a model
+with a recurrent scale token, whose state (`past_scale` -> `new_scale`, zeros
+at frame 0) is carried like the cache -- including the base
 arm, which ignores `sparse_depth`'s values but must still expose the input
 (the tracer prunes inputs nothing consumes, so the wrapper ties it in with an
 exactly-zero term). The input is NOT called `depth`: that name belongs to the
@@ -169,7 +171,7 @@ def export_step(wrapper: StreamingDepthExport, args, path: str) -> str:
     dyn = {n: {2: "n_frames"} for n in cache_input_names()}
     dyn.update({n: {2: "n_frames_out"} for n in cache_output_names()})
     print(f"exporting step graph -> {path} (opset {args.opset})")
-    input_names, output_names = graph_io_names()
+    input_names, output_names = graph_io_names(wrapper)
     torch.onnx.export(
         StepWrapper(wrapper),
         (rgb, d, *cache),
@@ -306,21 +308,22 @@ def ort_session(path: str):
     return sess
 
 
-def graph_io_names() -> tuple[list[str], list[str]]:
+def graph_io_names(wrapper: StreamingDepthExport) -> tuple[list[str], list[str]]:
     """The I/O contract every exported graph must satisfy, in one place --
     also the names handed to torch.onnx.export, so the two cannot drift.
 
     The sparse-depth INPUT is not called `depth`: ONNX value names share one
     namespace, and the exporter silently renames a collision (input `depth`
     became `depth.1` once it stopped being pruned). `depth` is the predicted
-    output; `sparse_depth` is the measured input."""
+    output; `sparse_depth` is the measured input. The carried tensors are the
+    48 cache tensors, plus the scale state of a recurrent scale token."""
     return (
-        ["rgb", "sparse_depth", *cache_input_names()],
-        ["depth", "depth_conf", *cache_output_names()],
+        ["rgb", "sparse_depth", *wrapper.carried_input_names()],
+        ["depth", "depth_conf", *wrapper.carried_output_names()],
     )
 
 
-def assert_graph_io(sess, path: str) -> None:
+def assert_graph_io(sess, path: str, wrapper: StreamingDepthExport) -> None:
     """Fail loudly if the exported graph's I/O deviates from the contract.
 
     Two failure modes, both silent and both observed: the tracer PRUNES an
@@ -329,7 +332,7 @@ def assert_graph_io(sess, path: str) -> None:
     an output (`depth` -> `depth.1`). Either way the consumer feeds a tensor
     the graph does not have. Checked on every export, before any parity
     number is reported."""
-    want_in, want_out = graph_io_names()
+    want_in, want_out = graph_io_names(wrapper)
     collide = sorted(set(want_in) & set(want_out))
     if collide:
         raise SystemExit(
@@ -429,10 +432,12 @@ def probe_frame0(step_path: str, wrapper: StreamingDepthExport, args) -> float:
     sess = ort_session(step_path)
     # contract first: a pruned input or a geometry mismatch would otherwise
     # surface as a confusing runtime failure below
-    assert_graph_io(sess, step_path)
+    assert_graph_io(sess, step_path, wrapper)
     assert_graph_geometry(sess, wrapper, step_path)
     feed = {"rgb": _np(rgb), "sparse_depth": _np(d)}
-    for name, t in zip(cache_input_names(), wrapper.empty_cache()):
+    for name, t in zip(
+        wrapper.carried_input_names(), wrapper.empty_cache(), strict=True
+    ):
         feed[name] = _np(t)
     try:
         out = run_by_name(sess, feed)
@@ -447,7 +452,7 @@ def probe_frame0(step_path: str, wrapper: StreamingDepthExport, args) -> float:
     d_depth = float(np.abs(out["depth"] - _np(ref_depth)).max())
     d_cache = max(
         float(np.abs(out[n] - _np(t)).max())
-        for n, t in zip(cache_output_names(), ref_cache)
+        for n, t in zip(wrapper.carried_output_names(), ref_cache, strict=True)
     )
     print(
         f"frame-0 probe: max diff vs eager frame-0: depth {d_depth:.3e}, "
@@ -493,9 +498,9 @@ def validate_rollout(
             if ort_cache is not None
             else [_np(t) for t in wrapper.empty_cache()]
         )
-        feed.update(dict(zip(cache_input_names(), cache)))
+        feed.update(dict(zip(wrapper.carried_input_names(), cache, strict=True)))
         out = run_by_name(step_sess, feed)
-        ort_cache = [out[n] for n in cache_output_names()]
+        ort_cache = [out[n] for n in wrapper.carried_output_names()]
 
         expect_frames = min(i + 1, wrapper.window)
         got = ort_cache[0].shape[2]
@@ -650,10 +655,18 @@ def check_fp16_numerics(fp16_path: str, wrapper: StreamingDepthExport, args) -> 
     rgb, d = dummy_frame(args, seed=30, batch_size=wrapper.batch_size)
     ref_depth, _, _ = wrapper._step(rgb, d, None)
     sess = ort_session(fp16_path)
-    assert_graph_io(sess, fp16_path)
+    assert_graph_io(sess, fp16_path, wrapper)
     assert_graph_geometry(sess, wrapper, fp16_path)
     feed = {"rgb": _np(rgb), "sparse_depth": _np(d)}
-    feed.update(dict(zip(cache_input_names(), (_np(t) for t in wrapper.empty_cache()))))
+    feed.update(
+        dict(
+            zip(
+                wrapper.carried_input_names(),
+                (_np(t) for t in wrapper.empty_cache()),
+                strict=True,
+            )
+        )
+    )
     out = run_by_name(sess, feed)
     finite = {n: bool(np.isfinite(out[n]).all()) for n in ("depth", "depth_conf")}
     if not all(finite.values()):
