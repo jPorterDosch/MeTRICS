@@ -253,7 +253,8 @@ def test_dropout_summary_includes_base_absolute_error(tmp_path) -> None:
     import argparse
 
     args = argparse.Namespace(ref_frames=2, dropout_at=4, window=3)
-    header = SD.header_for("dropout")
+    # rows from before the scale-token columns: still summarised (--replot)
+    header = SD.header_for("dropout")[:6]
     rows = []
     for label, a in (("StreamVGGT", 0.8), ("Ours (dropout @20)", 0.05)):
         for clip in ("c0", "c1"):
@@ -269,6 +270,40 @@ def test_dropout_summary_includes_base_absolute_error(tmp_path) -> None:
     assert np.allclose(base["abs_median"], 0.8) and base["metric"] is False
     assert np.allclose(ours["abs_median"], 0.05) and ours["metric"] is True
     assert (tmp_path / "scale_drift.png").stat().st_size > 0
+    assert summary["scale_token"] == []
+    assert not (tmp_path / "scale_token.png").exists()
+
+
+def test_dropout_summary_plots_the_scale_token_against_the_scene(tmp_path) -> None:
+    import argparse
+
+    args = argparse.Namespace(ref_frames=2, dropout_at=4, window=3)
+    header = SD.header_for("dropout")
+    rows = []
+    for k, clip in enumerate(("c0", "c1", "c2", "c3")):
+        scene = 0.5 + 0.2 * k  # the clip's scene scale; the readout is 0.1 above it
+        rows += [
+            ("Token", clip, i, 1.0, 0.0, 0.0, scene, scene + 0.1, 10.0 + 2 * scene)
+            for i in range(8)
+        ]
+        # a curve without a token: no readout, no norm
+        rows += [
+            ("Plain", clip, i, 1.0, 0.0, 0.0, scene, np.nan, np.nan) for i in range(8)
+        ]
+    summary = SD.summarize_dropout(
+        args,
+        [SD.parse_curve("Token=/runs/x@4"), SD.parse_curve("Plain=/runs/y@4")],
+        header,
+        rows,
+        tmp_path,
+    )
+    (token,) = summary["scale_token"]  # the plain curve is left out
+    assert token["label"] == "Token"
+    assert np.allclose(token["readout_error_median"], 0.1)
+    assert np.isclose(token["abs_error_last"], 0.1)
+    assert np.isclose(token["readout_vs_scene_r"], 1.0)
+    assert np.isclose(token["norm_vs_scene_r"], 1.0)
+    assert (tmp_path / "scale_token.png").stat().st_size > 0
 
 
 def test_step_summary_per_factor_and_fed_split(tmp_path) -> None:

@@ -75,6 +75,11 @@ the median over clips with the interquartile band, vertical lines at the
 dropout frame and at dropout + window (the first frame whose cache holds no
 conditioned frame). StreamVGGT's absolute error is drawn dashed, "not
 metric": the gap to ours is what the metric conditioning buys.
+For curves with a scale token it also writes <out>/scale_token.png: the
+token's readout against the scene's scale (the readout's training target on
+the full GT, the running median log depth), the token's L2 norm, both over
+the clip, and readout against scene scale per clip; per_frame.csv carries
+them as scene_log / readout_log / token_norm.
 
 Summary and figures are computed from per_frame.csv's rows, so a finished
 run is redrawn without a GPU (after a change to a statistic or a plot):
@@ -119,6 +124,7 @@ from eval.vda_benchmark import (  # noqa: E402
     model_to_gt,
 )
 from model_io import load_base_streamvggt, load_run_model  # noqa: E402
+from streamvggt.depth_cond.scale_token import running_log_scale  # noqa: E402
 
 DENSITY = 0.05
 DATASET = "scannet"
@@ -270,16 +276,19 @@ def load_curve_model(curve: Curve, base_ckpt: str, device: torch.device):
     return run.model, bool(run.raw.get("amp", 1))
 
 
-def curve_depth(curve: Curve, model, views: list[dict], window: int, amp) -> np.ndarray:
+def curve_depth(
+    curve: Curve, model, views: list[dict], window: int, amp, scale_out=None
+) -> np.ndarray:
     """[S, h, w] model-grid depth of one streamed curve: the sliding window,
     or OVGGT's cache for an `ovggt:` curve; plus the curve's EMA correction
-    if it has one."""
+    if it has one. `scale_out`: eval.streaming_window.stream_depth's (the
+    sliding window only)."""
     if curve.is_ovggt:
         from eval import ovggt_cache
 
         pred = ovggt_cache.stream_depth(*model, views, amp)
     else:
-        pred = stream_depth(model, views, window, amp)
+        pred = stream_depth(model, views, window, amp, scale_out)
     return pred if curve.ema is None else ema_correct(pred, views, curve.ema)
 
 
@@ -556,7 +565,18 @@ def _clip(seq, spec, bench, device, tae: bool = True):
 # --replot, which redraws a finished run without a GPU)
 # ---------------------------------------------------------------------------
 HEADERS = {
-    "dropout": ["curve", "clip", "frame", "scale", "rel_log_drift", "abs_log_error"],
+    "dropout": [
+        "curve",
+        "clip",
+        "frame",
+        "scale",
+        "rel_log_drift",
+        "abs_log_error",
+        # the scale token against the scene (run_dropout); absent before 2026-11-22
+        "scene_log",
+        "readout_log",
+        "token_norm",
+    ],
     "response": ["curve", "perturbation", "clip", "frame", "u", "r", "q", "r_fed"],
     "splice": ["curve", "factor", "pair", "frame", "scale", "median_scaled_absrel"],
     "cut": [
@@ -625,10 +645,17 @@ def _column(series: dict, name: str) -> np.ndarray:
 # summarize_* turns rows into summary.json's curves and the figure
 # ---------------------------------------------------------------------------
 def run_dropout(args, curves, models, seqs, spec, bench, device):
+    """Besides the scale rows: what the scale token held on every frame
+    (readout_log, token_norm; NaN for a curve without one) next to scene_log,
+    the readout's own training target on the full GT (the running median log
+    depth of the scene so far, depth_cond.scale_token.running_log_scale) --
+    the same for every curve of a clip, whatever depth it was fed."""
     rows = []
     for n, seq in enumerate(seqs):
         gt, views, scored, _, box = _clip(seq, spec, bench, device)
+        scene = running_log_scale(views)[0].cpu().numpy()  # before any dropout
         for curve in curves:
+            held = {}
             # shallow per-view copies: withhold_depth replaces tensors, never
             # writes into them, so the next curve still sees the full draw
             curve_views = [dict(v) for v in views]
@@ -646,20 +673,134 @@ def run_dropout(args, curves, models, seqs, spec, bench, device):
             else:
                 if curve.takes_depth:
                     withhold_depth(curve_views, curve.drop)
-                pred = curve_depth(curve, model, curve_views, args.window, amp)
+                pred = curve_depth(curve, model, curve_views, args.window, amp, held)
                 pred_gt = model_to_gt(pred, gt.shape[1:], box)
             s = frame_scales(pred_gt, gt, scored)
             r, a = drift_rows(s, args.ref_frames)
+            nan = np.full(len(s), np.nan)
+            readout = held.get("readout_log", nan)
+            norm = held.get("token_norm", nan)
             rows += [
-                (curve.label, seq.name, i, s[i], r[i], a[i]) for i in range(len(s))
+                (
+                    curve.label,
+                    seq.name,
+                    i,
+                    s[i],
+                    r[i],
+                    a[i],
+                    scene[i],
+                    readout[i],
+                    norm[i],
+                )
+                for i in range(len(s))
             ]
         print(f"[dropout] clip {n + 1}/{len(seqs)} {seq.name}", flush=True)
         del views
     return rows
 
 
+def plot_scale_token(args, curves, series, out: Path) -> list[dict]:
+    """scale_token.png: what the scale token holds against the scene's scale,
+    for the curves that have one. Top: the readout's error, readout_log -
+    scene_log, over the clip (0 = the token's estimate is the running median
+    log depth of the scene). Middle: the token's L2 norm. Bottom: readout
+    against scene scale per clip, on the last fed frame and the last frame.
+    Returns each curve's numbers for summary.json ([] and no figure when no
+    curve has a token)."""
+
+    def stack(label, col):
+        return np.stack([v[col] for (lab, _), v in series.items() if lab == label])
+
+    have = [
+        (k, c)
+        for k, c in enumerate(curves)
+        if np.isfinite(stack(c.label, "token_norm")).any()
+    ]
+    if not have:
+        return []
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        3, 1, figsize=(9, 11), constrained_layout=True, height_ratios=[1, 1, 1.3]
+    )
+    stats, lims = [], []
+    for k, c in have:
+        color = _COLORS[k % len(_COLORS)]
+        scene = stack(c.label, "scene_log")
+        readout = stack(c.label, "readout_log")
+        norm = stack(c.label, "token_norm")
+        x = np.arange(scene.shape[1])
+        last = scene.shape[1] - 1
+        fed = last if c.drop is None else max(c.drop - 1, 0)
+        _band_line(ax2, x, norm, color, c.label)
+        entry = {
+            "label": c.label,
+            "token_norm_median": band(norm)[0],
+            "norm_vs_scene_r": _pearson(norm[:, last], scene[:, last]),
+        }
+        if np.isfinite(readout).any():
+            err = readout - scene
+            _band_line(ax1, x, err, color, c.label)
+            ax3.scatter(
+                scene[:, fed],
+                readout[:, fed],
+                s=14,
+                facecolors="none",
+                edgecolors=color,
+            )
+            ax3.scatter(
+                scene[:, last], readout[:, last], s=14, color=color, label=c.label
+            )
+            lims += [scene[:, [fed, last]], readout[:, [fed, last]]]
+            entry.update(
+                readout_error_median=band(err)[0],
+                abs_error_last_fed=float(np.nanmean(np.abs(err[:, fed]))),
+                abs_error_last=float(np.nanmean(np.abs(err[:, last]))),
+                readout_vs_scene_r=_pearson(readout[:, last], scene[:, last]),
+            )
+        stats.append(entry)
+    for ax in (ax1, ax2):
+        if args.dropout_at is not None:
+            ax.axvline(args.dropout_at - 0.5, color="#374151", linewidth=0.8)
+            ax.axvline(
+                args.dropout_at + args.window - 0.5,
+                color="#9ca3af",
+                linestyle=":",
+                linewidth=1,
+            )
+        ax.set_xlabel("frame index")
+        _style(ax)
+    ax1.axhline(0, color="#9ca3af", linewidth=0.8)
+    ax1.set_ylabel("readout - scene scale  (log)")
+    ax2.set_ylabel("scale token L2 norm")
+    if lims:
+        lo = float(np.nanmin(np.concatenate([a.ravel() for a in lims])))
+        hi = float(np.nanmax(np.concatenate([a.ravel() for a in lims])))
+        ax3.plot([lo, hi], [lo, hi], color="#9ca3af", linewidth=0.8)
+    ax3.set_xlabel("scene scale: running median log depth of the GT (log m)")
+    ax3.set_ylabel("token readout (log m)")
+    _style(ax3)
+    ax1.set_title(
+        f"Scale token against the scene, ScanNet TAE clips, KV window {args.window}"
+        "\nbottom: one point per clip; hollow = last fed frame, filled = last frame",
+        fontsize=9,
+    )
+    fig.savefig(out / "scale_token.png", dpi=150)
+    plt.close(fig)
+    return stats
+
+
+def _pearson(a: np.ndarray, b: np.ndarray) -> float:
+    ok = np.isfinite(a) & np.isfinite(b)
+    if ok.sum() < 3 or np.std(a[ok]) == 0 or np.std(b[ok]) == 0:
+        return math.nan
+    return float(np.corrcoef(a[ok], b[ok])[0, 1])
+
+
 def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
     series = group(header, rows, ("curve", "clip"))
+    # rows streamed before the scale-token columns existed have none
+    token_stats = (
+        plot_scale_token(args, curves, series, out) if "token_norm" in header else []
+    )
 
     def stack(label, col):
         return np.stack([v[col] for (lab, _), v in series.items() if lab == label])
@@ -753,6 +894,7 @@ def summarize_dropout(args, curves, header, rows, out: Path) -> dict:
         plt.close(fig)
     return {
         "ref_frames": args.ref_frames,
+        "scale_token": token_stats,
         "curves": [
             {
                 "label": c.label,
@@ -1596,3 +1738,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 

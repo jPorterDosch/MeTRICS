@@ -177,8 +177,21 @@ def test_stream_depth_carries_the_token_like_inference():
     m.scale_head.net[-1].weight.normal_(std=0.1)
     fs = frames()
     ref = depth_of(m.inference(fs, window=2))[0, :, :, :, 0].numpy()
-    got = stream_depth(m, fs, window=2, amp=False)
+    held = {}
+    got = stream_depth(m, fs, window=2, amp=False, scale_out=held)
     np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-6)
+    # what the token held on every frame: inference's own readout, and a norm
+    ref_log = torch.stack([r["scale_log"] for r in m.inference(fs, window=2).ress], 1)
+    np.testing.assert_allclose(held["readout_log"], ref_log[0].numpy(), rtol=1e-5)
+    assert held["token_norm"].shape == (len(fs),)
+    assert np.isfinite(held["token_norm"]).all() and (held["token_norm"] > 0).all()
+
+
+@torch.no_grad()
+def test_stream_depth_reports_no_scale_state_without_a_token():
+    held = {}
+    stream_depth(tiny(), frames(S=2), window=2, amp=False, scale_out=held)
+    assert np.isnan(held["readout_log"]).all() and np.isnan(held["token_norm"]).all()
 
 
 def test_gradient_reaches_the_carry_through_eviction():

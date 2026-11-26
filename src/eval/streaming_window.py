@@ -31,7 +31,11 @@ def truncate_cache(past_kv: list, window: int) -> list:
 
 @torch.no_grad()
 def stream_depth(
-    model, views: list[dict], window: int | None, amp: bool = True
+    model,
+    views: list[dict],
+    window: int | None,
+    amp: bool = True,
+    scale_out: dict | None = None,
 ) -> np.ndarray:
     """[S, h, w] float32 depth, one frame at a time through the model's own
     aggregator and depth head, the cache cut to the last `window` frames after
@@ -40,7 +44,13 @@ def stream_depth(
     [0, 1], and a MetricStreamVGGT reads its sparse depth from the view.
     A scale token is carried and applied as StreamVGGT.inference does: a
     recurrent one passes its state to the next frame, a factorised readout
-    multiplies the depth."""
+    multiplies the depth.
+
+    `scale_out`, when given, is filled with what the scale token held on every
+    frame, [S] float64 each (NaN where the model has none): "readout_log",
+    the readout head's log scale (the token's own estimate of the scene's
+    scale, StreamVGGT.scale_log), and "token_norm", the L2 norm of the newest
+    frame's last-layer scale token."""
     from streamvggt.depth_cond import MetricStreamVGGT
 
     metric = isinstance(model, MetricStreamVGGT)
@@ -48,6 +58,9 @@ def stream_depth(
     past_kv = [None] * inner.aggregator.depth
     scale_prev = None
     out = []
+    idx = inner.aggregator.scale_token_idx
+    readouts = np.full(len(views), np.nan)
+    norms = np.full(len(views), np.nan)
     for i, view in enumerate(views):
         images = view["img"][:, None]  # [1, 1, 3, h, w]
         token_feats, depth_residuals = None, None
@@ -74,8 +87,16 @@ def stream_depth(
             patch_start_idx=patch_start_idx,
             depth_residuals=depth_residuals,
         )
-        depth = inner.apply_scale(depth, inner.scale_log(tokens))
+        scale_log = inner.scale_log(tokens)
+        depth = inner.apply_scale(depth, scale_log)
+        if scale_log is not None:
+            readouts[i] = float(scale_log[0, -1])
+        if idx is not None:
+            norms[i] = float(tokens[-1][0, -1, idx].float().norm())
         out.append(depth[0, 0, :, :, 0].float().cpu().numpy())
         if window is not None:
             past_kv = truncate_cache(past_kv, window)
+    if scale_out is not None:
+        scale_out["readout_log"] = readouts
+        scale_out["token_norm"] = norms
     return np.stack(out)
